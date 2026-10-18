@@ -1,3 +1,6 @@
+// Pid lock files that keep two runs of one background job (uploads, heartbeats) from overlapping;
+// a lock whose holder died is taken over.
+
 import { randomUUID } from 'node:crypto';
 import { link, readFile, rm, writeFile } from 'node:fs/promises';
 

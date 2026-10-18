@@ -1,3 +1,6 @@
+// One transcript loaded for `hive local`: its bytes (mapped, or a buffer reused across a loop, to
+// bound memory), parsed through session-data, with each tool entry linked to the agents it started.
+
 import { closeSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { leanRecord, parseTranscript, readRecords, readTranscript } from '@alignment-hive/session-data';

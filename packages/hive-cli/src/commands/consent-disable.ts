@@ -12,6 +12,10 @@ import {
 import { hive } from '../lib/messages';
 import { printSuccess, printWarning } from '../lib/output';
 
+/**
+ * `hive consent disable [DIR]`: the local opt-out marker comes first, since it needs no login and is
+ * what session start and uploads check; the server hears of it only for a project it has enabled.
+ */
 export async function consentDisable(projectPath?: string): Promise<number> {
   const resolvedPath = projectPath || process.cwd();
   const ids = getProjectIdentifiers(resolvedPath);

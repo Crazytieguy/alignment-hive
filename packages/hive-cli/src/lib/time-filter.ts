@@ -31,6 +31,7 @@ function parseAbsoluteTime(value: string): Date | null {
   return isNaN(date.getTime()) ? null : date;
 }
 
+/** A --since/--until value: a duration back from now (`2h`), or a local date or date and time. */
 export function parseTimeSpec(value: string): Date | null {
   return parseRelativeTime(value) ?? parseAbsoluteTime(value);
 }

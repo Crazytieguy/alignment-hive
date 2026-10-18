@@ -10,9 +10,6 @@ export const colors = {
   green: paint('32'),
   yellow: paint('33'),
   blue: paint('34'),
-  dim: paint('2'),
-  boldMagenta: paint('1;35'),
-  boldBlue: paint('1;34'),
 };
 
 export function printError(message: string): void {

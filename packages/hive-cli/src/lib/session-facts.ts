@@ -1,3 +1,7 @@
+// What `sessions` and `grep` need of a session without parsing all of it: the first and last entry
+// times and the git branch from the file's two ends, the title from its title records, and the first
+// human message from its head.
+
 import { closeSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import {
   isEmptySession,
@@ -10,10 +14,6 @@ import {
 } from '@alignment-hive/session-data';
 import type { Entry, RawRecord, Transcript } from '@alignment-hive/session-data';
 import type { TranscriptRef } from './locators';
-
-// What `sessions` and `grep` need of a session without parsing all of it: the first and last entry
-// times and the git branch from the file's two ends, the title from its title records, and the first
-// human message from its head.
 
 const CHUNK = 64 * 1024;
 /** A window of a whole-file read. */

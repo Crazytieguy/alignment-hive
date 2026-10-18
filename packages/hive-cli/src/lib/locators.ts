@@ -1,11 +1,3 @@
-import { readdir, stat } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
-import { locatorErrors } from './messages';
-import { AGENT_PREFIX, findFlatAgents, isSessionFile, scanSubagentDir } from './session-io';
-import type { Dirent } from 'node:fs';
-import type { Entry } from '@alignment-hive/session-data';
-import type { RawSessionRef } from './session-io';
-
 /**
  * Transcript locators, shared by `hive local` and `hive debrief render`: one grammar, one printed
  * form, one resolver. A locator names a transcript file (a session, or one of its agents) and
@@ -17,6 +9,14 @@ import type { RawSessionRef } from './session-io';
  * Each file is its own transcript, numbered on its own; the run's prints as `SESSION/wf_RUN/agent-ID`,
  * the other as `SESSION/agent-ID`.
  */
+
+import { readdir, stat } from 'node:fs/promises';
+import { basename, join } from 'node:path';
+import { locatorErrors } from './messages';
+import { AGENT_PREFIX, findFlatAgents, isSessionFile, scanSubagentDir } from './session-io';
+import type { Dirent } from 'node:fs';
+import type { Entry } from '@alignment-hive/session-data';
+import type { RawSessionRef } from './session-io';
 
 export interface Range {
   from: number;

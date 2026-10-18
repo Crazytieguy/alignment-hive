@@ -1,3 +1,8 @@
+// Paths and identities: the auth file, the per-project state dir (.claude/hive in the main worktree,
+// shared by every worktree) and its files, Claude Code's transcript dir names, and the project
+// identifiers consent is keyed on. Env is read inside these functions, not at module load: cli.ts
+// loads the dev .env files after this module is imported.
+
 import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -5,9 +10,6 @@ import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { findGroupForIdentifiers } from '@alignment-hive/session-data';
-
-// Env is read inside these functions, not at module load: cli.ts loads the dev .env files
-// after this module is imported.
 
 export function getAuthFile(): string {
   const env = process.env.ALIGNMENT_HIVE_AUTH_FILE;
@@ -40,17 +42,17 @@ function claudeProjectDirHash(path: string): number {
 
 const CLAUDE_PROJECT_DIR_MAX_LENGTH = 200;
 
+/** The start of the transcript dir name of this path and of every path under it. */
+export function claudeProjectDirPrefix(absolutePath: string): string {
+  return toClaudeProjectDirName(absolutePath).slice(0, CLAUDE_PROJECT_DIR_MAX_LENGTH);
+}
+
 /**
  * Convert an absolute path to the Claude project directory name, mirroring Claude Code's
  * scheme (as of 2.1.224): every non-alphanumeric character becomes '-' (e.g.,
  * /Users/foo/x.y → -Users-foo-x-y), and names over 200 chars are truncated to 200 plus
  * '-<base36 hash of the original path>' to keep long paths from colliding.
  */
-/** The start of the transcript dir name of this path and of every path under it. */
-export function claudeProjectDirPrefix(absolutePath: string): string {
-  return toClaudeProjectDirName(absolutePath).slice(0, CLAUDE_PROJECT_DIR_MAX_LENGTH);
-}
-
 export function toClaudeProjectDirName(absolutePath: string): string {
   const sanitized = absolutePath.replace(/[^a-zA-Z0-9]/g, '-');
   if (sanitized.length <= CLAUDE_PROJECT_DIR_MAX_LENGTH) return sanitized;
@@ -81,6 +83,7 @@ export function debriefRoundDir(cwd: string, session: string, round: number, dat
   return join(root, toClaudeProjectDirName(getMainWorktreePath(cwd) ?? cwd), session, `round-${round}`);
 }
 
+/** Create the state dir, with a .gitignore that keeps all of it out of git. */
 export async function ensureStateDir(stateDir: string): Promise<void> {
   await mkdir(stateDir, { recursive: true });
   const gitignorePath = join(stateDir, '.gitignore'); // Not in statePaths — infrastructure, not data
@@ -109,6 +112,7 @@ export async function readTimestamp(path: string): Promise<number | null> {
   return isNaN(ts) ? null : ts;
 }
 
+/** This checkout's random id, minted on first use; the server counts installs by it. */
 export async function getOrCreateCheckoutId(stateDir: string): Promise<string> {
   const checkoutIdFile = statePaths(stateDir).checkoutId;
   const existing = await readStateFile(checkoutIdFile);

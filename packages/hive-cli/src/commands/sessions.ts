@@ -37,6 +37,7 @@ export function sessionsByActivity(refs: Array<TranscriptRef>): Array<SessionFac
  */
 const humanOf = (f: SessionPresence) => (f.hasAssistant ? undefined : firstHumanMessage(f.ref, f.size));
 
+/** `hive local sessions`: sessions by last activity, newest first, each read from its file's ends (session-facts.ts). */
 export async function run(env: LocalEnv, args: Args): Promise<number> {
   if (args.positional.length) throw new LocalError(localErrors.sessionsTakesNoSession(args.positional[0]), true);
   const limit = numberFlag(args, '-n', 20);
@@ -44,10 +45,10 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
   const scope = await scopeOf(env, args);
   const w = timeWindow(args);
   const windowed = w.since !== undefined || w.until !== undefined;
-  // Like grep's agent filter, assume mtime bounds entry times; backdated copies/restores/imports can drop or misorder sessions.
-  // A file's mtime bounds its last entry time, so files are read newest-written first: one last
-  // written before --since has no entry in the window, and once `limit` listed sessions ended after
-  // the next file was last written, no later file is shown. Without a window those are only counted.
+  // A file's mtime bounds its last entry time (a backdated copy, restore or import can drop or
+  // misorder a session), so files are read newest-written first: one last written before --since
+  // has no entry in the window, and once `limit` listed sessions ended after the next file was last
+  // written, no later file is shown. Without a window those are only counted.
   const files = (await sessionsIn(scope))
     .map((ref, order) => ({ ref, order, written: statSync(ref.path).mtimeMs }))
     .filter((file) => w.since === undefined || file.written >= w.since)

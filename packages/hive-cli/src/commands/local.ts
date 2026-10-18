@@ -1,3 +1,7 @@
+// `hive local`: read-only access to this machine's Claude Code transcripts. This module holds what
+// the verbs share (scope, flags, time windows, output) and dispatches to sessions.ts, show.ts (show,
+// outline) and grep.ts. Rows are JSON lines on stdout; notes, warnings and errors are JSON lines on stderr.
+
 import { existsSync, statSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';

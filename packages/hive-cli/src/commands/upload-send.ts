@@ -21,6 +21,10 @@ import { loadConsentWindows, loadSessionStateWithMigrations, uploadOneSession } 
 
 const UPLOAD_CONCURRENCY = 5;
 
+/**
+ * `hive upload send [ID]`: upload one session, or every uploadable one. With --delay it is the job
+ * session start schedules: it sleeps first, then uploads only ready sessions, and not while snoozed.
+ */
 export async function uploadSend(args: Array<string>): Promise<number> {
   // A mistyped invocation must never fall through to the manual batch, which uploads pending
   // sessions still inside their review window: every malformed argument stops here.

@@ -143,6 +143,10 @@ async function showStatus(): Promise<number> {
   return 0;
 }
 
+/**
+ * `hive login [--status]`: WorkOS device authorization: print a code, open the browser, and poll
+ * until the person approves; the tokens land in the auth file (see lib/auth.ts).
+ */
 export async function login(args: Array<string>): Promise<number> {
   if (args.includes('--status')) {
     return showStatus();

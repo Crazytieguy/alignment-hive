@@ -1,3 +1,7 @@
+// Uploading a session: its records read and sanitized (copies of excluded sessions cut to chain
+// stubs), its agents and workflow runs found, then parent, agents and runs sent in that order.
+// uploadOneSession is the one path, shared by `hive upload send` and the review UI.
+
 import { readFileSync } from 'node:fs';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -17,6 +21,7 @@ import { generateUploadUrls, getConsentHistory, saveUploads, saveWorkflowRuns } 
 import { hive } from './messages';
 import { fileSessionSummary } from './session-facts';
 import { chunk, mapBatched } from './batch';
+import { escapeRegExp } from './grep-prefilter';
 import { buildSessionMeta } from './session-format';
 import { sanitizeDeep, sanitizeRecord, sanitizeString } from './sanitize';
 import {
@@ -243,10 +248,6 @@ export async function loadConsentWindows(ids: ProjectIds): Promise<ConsentWindow
     global: computeConsentWindows(consentHistory.global),
     project: computeConsentWindows(consentHistory.project),
   };
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**

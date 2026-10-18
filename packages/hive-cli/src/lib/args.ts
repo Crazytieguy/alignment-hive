@@ -1,3 +1,6 @@
+// Flag parsing for the upload commands, `notices` and `hive local`; `hive debrief` uses node:util's
+// parseArgs instead. A usage error exits 2.
+
 import { errors } from './messages';
 import { printError } from './output';
 

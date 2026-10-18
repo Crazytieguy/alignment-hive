@@ -26,6 +26,10 @@ function roundDir(values: { session?: string; round?: string; data?: string }, u
   return { dir: debriefRoundDir(process.cwd(), values.session.toLowerCase(), round, values.data), round };
 }
 
+/**
+ * `hive debrief dir|render|capture|preflight`: argument handling for the debrief plugin; the work is
+ * in ../debrief/. `--session`, `--round` and `--data` name a round directory (see debriefRoundDir).
+ */
 export async function reviewCommand(args: Array<string>): Promise<number> {
   const [verb, ...rest] = args;
   if (!verb || ['help', '--help', '-h'].includes(verb)) {

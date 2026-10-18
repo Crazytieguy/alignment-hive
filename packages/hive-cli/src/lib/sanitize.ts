@@ -1,3 +1,7 @@
+// Secret redaction. Uploads replace each span detectSecrets finds with `[REDACTED:<rule>]`: gitleaks'
+// rules (secret-rules.ts, generated), SECRET_SHAPES for secrets no rule names, and a high-entropy
+// safety net. The debrief page marks spans from a narrower list through secretSpans.
+
 import { SECRET_RULES } from './secret-rules';
 import type { SecretRule } from './secret-rules';
 

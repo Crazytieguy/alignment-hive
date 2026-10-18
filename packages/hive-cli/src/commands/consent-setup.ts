@@ -86,6 +86,11 @@ async function waitForConsent(): Promise<{ hasConsent: boolean; sessionSharing: 
   return null;
 }
 
+/**
+ * `hive consent setup`, run by the install script: web consent (opened in the browser and polled
+ * for), a checklist of the local projects to share, transcript-dir discovery for the chosen ones,
+ * and an offer to link private GitHub repos.
+ */
 export async function consentSetup(): Promise<number> {
   try {
     return await consentSetupInner();

@@ -12,6 +12,10 @@ import { withPidLock } from '../lib/pid-lock';
 import { countRawLines } from '../lib/session-io';
 import { computeSessionStatus, loadSessionState, withDiscoveryCache } from '../lib/session-state';
 
+/**
+ * `hive heartbeat`, spawned by session start: send the server the line count of every session not
+ * yet uploaded or excluded, under a pid lock so that session starts at the same time scan once.
+ */
 export async function hiveHeartbeat(): Promise<number> {
   const cwd = process.cwd();
   const stateDir = getStateDir(cwd);

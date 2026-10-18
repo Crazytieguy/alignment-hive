@@ -1,3 +1,7 @@
+// What session start, `hive notices` and `hive upload status` share: the sharing snapshot (one gate
+// for login, consent and transcripts), a session's Keep private state, upload scheduling, and when
+// /hive:align is due.
+
 import { canExclude, isPreUploadState } from '@alignment-hive/session-data';
 import { getAuthData } from './auth';
 import { isSharingDisabledLocally, loadTranscriptsDirs, readStateFile, readTimestamp, statePaths } from './config';
@@ -5,6 +9,7 @@ import { resolveProjectConsent } from './convex';
 import { computeSessionStatus, hasIncompleteUpload, withDiscoveryCache } from './session-state';
 import { getSnoozeUntil } from './snooze';
 import { loadConsentWindows, loadSessionStateWithMigrations } from './upload-session';
+import type { StatusContext } from './session-state';
 
 /** Session start waits this long before uploading ready sessions, so a review can still exclude them. */
 export const UPLOAD_DELAY_MINUTES = 10;
@@ -30,7 +35,6 @@ export async function alignDue(stateDir: string, pluginVersion: string | undefin
 }
 
 type SessionState = Awaited<ReturnType<typeof loadSessionStateWithMigrations>>;
-type StatusContext = Parameters<typeof computeSessionStatus>[1];
 
 /**
  * The project's sessions with what their sharing status is computed from, or why there is none:

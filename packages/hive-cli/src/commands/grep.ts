@@ -86,7 +86,10 @@ interface Group {
   agents: Array<TranscriptRef>;
 }
 
-/** grep PATTERN [SESSION...]: entries matching a JavaScript regex, in sessions (and their agents with --agents). */
+/**
+ * grep PATTERN [SESSION...]: entries matching a JavaScript regex, in sessions (and their agents with
+ * --agents). A file whose raw bytes provably cannot hold a match (grep-prefilter.ts) is not parsed.
+ */
 export async function run(env: LocalEnv, args: Args): Promise<number> {
   if (!args.positional.length) throw new LocalError(localErrors.needsPattern, true);
   const [pattern, ...sessionArgs] = args.positional;
@@ -141,9 +144,9 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
       ),
       (a) => a.session,
     );
-    // Like the agent filter, assume mtime bounds entry times; backdated copies/restores/imports can drop sessions.
     // Each transcript is skipped by its own times only: an agent can outlive its session. A file's
-    // mtime bounds its last entry. Agents that repeat their session are searched only when named.
+    // mtime bounds its last entry (a backdated copy, restore or import can drop a session). Agents
+    // that repeat their session are searched only when named.
     const written = (path: string) => w.since === undefined || lastWrite(path) >= w.since;
     const wanted = (a: TranscriptRef) => !repeatsSession(a.agentId ?? '') && written(a.path);
     const recentAgents = new Map(

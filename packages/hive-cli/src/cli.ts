@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+// The `hive` binary: dispatches argv[2] to its command module, imported only when that command
+// runs. A handler resolves to the exit code; anything it throws prints as `Error: <message>`, exit 1.
 
 import { config as loadDotenv } from 'dotenv';
 import { version } from '../package.json';

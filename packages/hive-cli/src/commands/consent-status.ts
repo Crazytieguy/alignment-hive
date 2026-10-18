@@ -11,6 +11,10 @@ import { getConsentStatus, getProjectSharing, getRepoLinkStatus } from '../lib/c
 import { checkRepoVisibility, githubRepoPath } from '../lib/github';
 import { hive } from '../lib/messages';
 
+/**
+ * `hive consent status`: consent state as plain lines, which /hive:align and the manage-data-sharing
+ * skill read. Being logged out, or a failed consent fetch, is a line of output and exit 0.
+ */
 export async function consentStatus(): Promise<number> {
   const authData = await getAuthData();
   if (!authData) {

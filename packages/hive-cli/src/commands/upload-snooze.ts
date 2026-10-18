@@ -5,6 +5,10 @@ import { printError, printInfo, printSuccess } from '../lib/output';
 import { clearSnooze, getSnoozeUntil, setSnooze } from '../lib/snooze';
 import { parseDuration } from '../lib/time-filter';
 
+/**
+ * `hive upload snooze [DURATION] | --clear`: hold back automatic uploads (24h by default, at most
+ * 7 days; see lib/snooze.ts).
+ */
 export async function uploadSnooze(args: Array<string>): Promise<number> {
   const parsed = parseCommandArgs({ bool: ['--clear'], value: [] }, args, hive.upload.usage);
   if (typeof parsed === 'number') return parsed;

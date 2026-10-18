@@ -7,6 +7,10 @@ import { reviewCmd } from '../lib/messages';
 import { printInfo, printSuccess } from '../lib/output';
 import { createReviewRouter } from '../lib/review-router';
 
+/**
+ * `hive upload review`: serve the review app (embedded in the binary) and its tRPC API
+ * (lib/review-router.ts) on localhost until Ctrl+C.
+ */
 export async function uploadReview(): Promise<number> {
   const cwd = process.cwd();
   const stateDir = getStateDir(cwd);

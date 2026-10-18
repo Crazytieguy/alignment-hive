@@ -1,3 +1,7 @@
+// A project's upload bookkeeping: which sessions exist (discovery, cached by mtime), what the state
+// dir records of them (uploaded, excluded, started uploads, workflow reopens: append-only files),
+// and the status that follows (computeSessionStatus). Exclusion goes through excludeSessionChecked alone.
+
 import { randomUUID } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
 import { access, appendFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
@@ -219,8 +223,6 @@ export async function loadExcludedSessions(stateDir: string): Promise<Set<string
   );
 }
 
-// --- Started (possibly partial) uploads ---
-
 interface StartedEntry {
   sessionId: string;
   startedAt: string;
@@ -269,8 +271,6 @@ export function hasIncompleteUpload(
   return isNaN(uploadedAt) || startedAt > uploadedAt;
 }
 
-// --- Session status ---
-
 export interface ConsentWindows {
   global: Array<ConsentWindow>;
   project: Array<ConsentWindow>;
@@ -303,6 +303,11 @@ export function reopenKey(entry: Pick<UploadedEntry, 'sessionId' | 'uploadedAt'>
   return `${entry.sessionId}@${entry.uploadedAt}`;
 }
 
+/**
+ * A session's upload status, in order of precedence: excluded, uploaded (unless the workflow backfill
+ * reopened it), not-shared (given consent windows), pending until its review period ends, then
+ * snoozed or ready.
+ */
 export function computeSessionStatus(session: DiscoveredSession, ctx: StatusContext): SessionStatus {
   const { uploadedMap, excludedSet, consentMtime, snoozeUntil, reopenedAt, consentWindows } = ctx;
 

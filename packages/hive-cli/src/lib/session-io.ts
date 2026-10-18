@@ -1,3 +1,6 @@
+// Transcript files on disk: session files, nested and legacy flat agent files with their .meta.json
+// metadata, and raw line counts. Shared by upload discovery and locator resolution.
+
 import { open, readFile, readdir, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { findInFileHead } from './transcript-discovery';

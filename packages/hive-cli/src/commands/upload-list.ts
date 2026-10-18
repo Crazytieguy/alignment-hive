@@ -11,6 +11,10 @@ import type { SessionStatus } from '@alignment-hive/session-data';
 
 const SUMMARY_WIDTH = 60;
 
+/**
+ * `hive upload list [--all]`: the session table, by default only the sessions awaiting review, and
+ * counts by status of every session.
+ */
 export async function uploadList(args: Array<string>): Promise<number> {
   const parsed = parseCommandArgs({ bool: ['--all'], value: [] }, args, hive.upload.usage);
   if (typeof parsed === 'number') return parsed;

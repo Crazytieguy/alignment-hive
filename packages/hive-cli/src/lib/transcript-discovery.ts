@@ -1,3 +1,8 @@
+// A project's transcript dirs under ~/.claude/projects beyond the one named after its path: its
+// worktrees', and those of deleted worktrees, recognized by recorded cwd or by commit hashes in their
+// `git log` output (the strategies in resolveTranscriptDirs). Consent and the registry backfill record
+// what they find in the transcripts-dirs registry; `hive local` resolves without writing.
+
 import { execSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';

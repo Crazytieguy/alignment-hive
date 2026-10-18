@@ -1,11 +1,11 @@
-import { parseTranscript } from '@alignment-hive/session-data';
-
 // grep searches decoded field text, but most files cannot match at all. When the pattern has a
 // mandatory literal of printable ASCII other than `"` and `\`, that literal appears byte for byte in
 // any file whose decoded text matches, because Claude Code writes those characters as themselves
 // (JSON allows `\u0041` and `\/`; files Claude Code wrote have none). The exceptions are text the
 // parser makes up (placeholders, `/name args`) and text joined by stripping a system reminder; a file
 // that may hold either is parsed anyway.
+
+import { parseTranscript } from '@alignment-hive/session-data';
 
 /** The quantifier after position j, if any: whether the atom may be absent or repeated, and where it ends. */
 function quantifier(pattern: string, j: number): { optional: boolean; repeat: boolean; end: number } {

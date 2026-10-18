@@ -1,3 +1,6 @@
+// The tRPC API behind `hive upload review`. Exclusions and uploads go through the CLI's own paths
+// (excludeSessionChecked, uploadOneSession), and the page shows the sanitized content an upload sends.
+
 import { stat } from 'node:fs/promises';
 import { initTRPC } from '@trpc/server';
 import { z } from 'zod';

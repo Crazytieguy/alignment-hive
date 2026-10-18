@@ -6,6 +6,10 @@ import { discoverWorktreeTranscriptDirsForAll } from '../lib/transcript-discover
 import { hive } from '../lib/messages';
 import { printError, printInfo, printSuccess } from '../lib/output';
 
+/**
+ * `hive consent enable [DIR]`: enable sharing for a project on the server (login required), clear
+ * the local opt-out, and register the transcript dirs of its worktrees.
+ */
 export async function consentEnable(projectPath?: string): Promise<number> {
   const authData = await getAuthData();
   if (!authData) {

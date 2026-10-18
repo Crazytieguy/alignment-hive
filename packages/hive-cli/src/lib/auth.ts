@@ -1,3 +1,7 @@
+// The WorkOS login on disk (~/.alignment-hive/auth.json, or ALIGNMENT_HIVE_AUTH_FILE): reading it,
+// saving it atomically, and refreshing its access token. Refresh tokens are single-use, so a refresh
+// runs in a detached `hive auth-refresh` that killing the caller cannot interrupt.
+
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { z } from 'zod';

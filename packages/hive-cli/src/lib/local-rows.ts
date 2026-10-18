@@ -1,7 +1,9 @@
+// The JSON rows `hive local` prints, one per entry (entryRow), and the clipping that keeps their
+// fields short. Clipping cuts at exact code points, marked in the text as [+N chars] on the side that
+// was cut.
+
 import { localNotes } from './messages';
 import type { Entry } from '@alignment-hive/session-data';
-
-// Clipping: cuts at exact code points, marked in the text as [+N chars] on the side that was cut.
 
 const isPair = (s: string, i: number) =>
   (s.charCodeAt(i) & 0xfc00) === 0xd800 && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00;

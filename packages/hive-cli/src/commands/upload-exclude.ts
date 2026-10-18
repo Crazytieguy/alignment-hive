@@ -6,6 +6,10 @@ import { lookupParentSession } from '../lib/session-lookup';
 import { excludeSessionChecked } from '../lib/session-state';
 import { loadSessionStateWithMigrations } from '../lib/upload-session';
 
+/**
+ * `hive upload exclude ID|--all`: stop sessions from uploading, through excludeSessionChecked, the
+ * one exclusion path (the review UI's too).
+ */
 export async function uploadExclude(args: Array<string>): Promise<number> {
   const parsed = parseCommandArgs({ bool: ['--all'], value: [] }, args, hive.upload.usage);
   if (typeof parsed === 'number') return parsed;

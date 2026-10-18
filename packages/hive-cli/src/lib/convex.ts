@@ -1,3 +1,5 @@
+// The CLI's Convex backend calls. All but pingCheckout run as the logged-in user through withClient.
+
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../web/convex/_generated/api';
 import { getAuthData } from './auth';

@@ -1,3 +1,6 @@
+// The CLI's user- and Claude-facing strings, grouped by command. The review app and the debrief
+// renderer take theirs from here too.
+
 import type { GitUpstream } from '../debrief/git';
 import type { FIXED_SECTIONS } from '../debrief/parse';
 
@@ -376,8 +379,6 @@ export const reviewCmd = {
   running: (url: string): string => `Review UI running at ${url}`,
   stopHint: 'Press Ctrl+C to stop.',
 };
-
-// ── Hive plugin messages ──
 
 const NOT_AUTHENTICATED = 'Not authenticated. Run: curl -fsSL https://alignment-hive.com/install.sh | bash';
 
