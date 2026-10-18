@@ -1,3 +1,5 @@
+// Session queries and mutations shared by the list and detail pages: cache keys, the exclude, upload
+// and snooze mutations with their notices, and the status badge.
 import { useMutation, useMutationState, useQueryClient, type QueryClient } from "@tanstack/react-query";
 // Shared status rules — the exclusion veto is privacy-critical and must match the CLI exactly.
 import { canExclude, getStatusColor } from "@alignment-hive/session-data";
@@ -9,7 +11,7 @@ import { useNotify } from "./notices";
 export type ListResult = Awaited<ReturnType<typeof trpc.sessions.list.query>>;
 export type Session = ListResult["sessions"][number];
 export type Status = Session["status"];
-type ContentResult = Awaited<ReturnType<typeof trpc.sessions.content.query>>;
+export type ContentResult = Awaited<ReturnType<typeof trpc.sessions.content.query>>;
 type StatusFields = Pick<Session, "status" | "partialUpload" | "statusLabel">;
 
 export const sessionsKey = ["sessions"] as const;
@@ -18,7 +20,7 @@ export const agentContentKey = (sessionId: string, agentId?: string) => ["agent-
 export const workflowRunKey = (sessionId: string, runId: string) => ["workflow-run", sessionId, runId] as const;
 
 /** The id prefix the CLI prints in its messages. */
-const shortId = (sessionId: string) => sessionId.slice(0, 8);
+export const shortId = (sessionId: string) => sessionId.slice(0, 8);
 
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : "Operation failed";

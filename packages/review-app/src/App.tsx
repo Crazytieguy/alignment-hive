@@ -1,3 +1,4 @@
+// Page shell: header with the Back buttons, notices, and the list or detail page for the hash route.
 import { useRef, useState } from "react";
 import { SessionList } from "./SessionList";
 import { SessionDetail } from "./SessionDetail";

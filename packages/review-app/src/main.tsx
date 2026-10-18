@@ -1,3 +1,5 @@
+// The review page `hive upload review` serves: built into one HTML file that the CLI embeds, talking
+// to the CLI's local tRPC server.
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";

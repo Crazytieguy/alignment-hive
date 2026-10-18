@@ -1,6 +1,7 @@
 /**
  * Consent windows: a session is visible to readers only if its lastModified falls inside a
- * window of BOTH the global and the project consent timelines.
+ * window of BOTH the global and the project consent timelines. A project's timeline merges every
+ * consent event that shares a directory or git remote with it, directly or transitively.
  */
 
 export interface ConsentEvent {
@@ -35,8 +36,6 @@ export function computeConsentWindows(events: Array<ConsentEvent>): Array<Consen
 export function isInConsentWindow(timestamp: number, windows: Array<ConsentWindow>): boolean {
   return windows.some((w) => timestamp >= w.start && timestamp < w.end);
 }
-
-// --- Project identifier utilities ---
 
 export interface ProjectIdentifiers {
   directory?: string;

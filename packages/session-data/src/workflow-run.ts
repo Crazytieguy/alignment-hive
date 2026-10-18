@@ -1,3 +1,7 @@
+/**
+ * A Workflow run's metadata file as uploaded: a lenient schema for the whole blob, and the small
+ * indexed row the backend lists and groups runs by.
+ */
 import { z } from 'zod';
 
 /**

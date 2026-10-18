@@ -1,3 +1,9 @@
+/**
+ * What an upload keeps of each transcript record, before secret sanitizing: conversation records,
+ * titles and request records whole (toolUseResult pared, base64 payloads stripped), queued messages
+ * pared to what the parser reads, and of any other record with a uuid only its place in the parent
+ * chain.
+ */
 import { z } from 'zod';
 import { isQueuedCommand } from './transcript';
 import { isRequestType } from './records';

@@ -1,3 +1,5 @@
+// The session list page: status filters, multi-select exclude, snooze, and a refetch when a pending
+// wait or snooze ends.
 import { useEffect, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { trpc } from "./trpc";
@@ -8,6 +10,7 @@ import { hive } from "../../hive-cli/src/lib/messages";
 import {
   StatusBadge,
   sessionsKey,
+  shortId,
   useExclude,
   useExcludeMany,
   useInFlight,
@@ -204,7 +207,7 @@ export function SessionList({ filter, onFilterChange, selected, onSelectedChange
           </thead>
           <tbody className="divide-y divide-border">
             {filtered.map((session) => {
-              const id = session.sessionId.slice(0, 8);
+              const id = shortId(session.sessionId);
               const inFlight = excluding.has(session.sessionId);
               return (
                 <tr key={session.sessionId} className="hover:bg-muted/50">

@@ -1,3 +1,5 @@
+// The upload preview of one session or one of its agents, sanitized as it would upload: transcript,
+// request records, the agent and workflow-run sidebar, and Upload and Exclude.
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { trpc } from "./trpc";
@@ -14,10 +16,12 @@ import {
   StatusBadge,
   agentContentKey,
   contentKey,
+  shortId,
   useExclude,
   useInFlight,
   useUpload,
   workflowRunKey,
+  type ContentResult,
 } from "./sessions";
 
 /**
@@ -82,7 +86,6 @@ const bareAgentId = (agentId: string) => agentId.replace(/^agent-/, "");
 // cache keeps an unchanged file cheap).
 const CONTENT_QUERY = { staleTime: 10 * 60_000, refetchOnMount: "always" } as const;
 
-type ContentResult = Awaited<ReturnType<typeof trpc.sessions.content.query>>;
 type Agent = ContentResult["agents"][number];
 type WorkflowRun = ContentResult["workflowRuns"][number];
 
@@ -285,7 +288,7 @@ export function SessionDetail({ sessionId, viewingAgentId, onBack, onSelectAgent
 
   const displayId = viewingAgent ? viewingAgent.sessionId : sessionId;
   const hasSidebar = data.agents.length > 0 || data.workflowRuns.length > 0 || viewingAgent;
-  const id = sessionId.slice(0, 8);
+  const id = shortId(sessionId);
 
   return (
     <div className="space-y-4">

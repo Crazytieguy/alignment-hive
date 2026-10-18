@@ -1,3 +1,4 @@
+// Notices: a small app-wide queue of outcome messages, shown above whichever page is open.
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Alert } from "@alignment-hive/ui";
 

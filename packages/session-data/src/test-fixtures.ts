@@ -505,7 +505,7 @@ export function branchFixtures(): Array<Fixture> {
   return out;
 }
 
-// -fixture-overlap: the session that ended last holds older prompts than the next one (Q3 question 6).
+// Overlapping sessions: the session that ended last holds older prompts than the next one.
 export function overlapFixtures(): Array<Fixture> {
   const cwd = '/fixture/overlap';
   const out: Array<Fixture> = [];

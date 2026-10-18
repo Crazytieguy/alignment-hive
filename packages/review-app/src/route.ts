@@ -1,3 +1,4 @@
+// Hash routing for the review page: the parsed route as a React hook, and navigation.
 import { useSyncExternalStore } from "react";
 
 /** The list's status filters; "pending" is the default and leaves the hash bare. */

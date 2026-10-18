@@ -1,3 +1,5 @@
+// A virtualized, row-per-entry transcript viewer shared by the web app and the review page. It shows
+// every entry it is given, under its parsed number, and applies no noise rules.
 import { useEffect, useState, useRef, useCallback, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { parseTranscript, type Entry } from "@alignment-hive/session-data";
