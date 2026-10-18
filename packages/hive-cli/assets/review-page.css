@@ -271,11 +271,13 @@ p { margin: 0 0 .9em; }
 .review-unseen { color: var(--accent); border-color: var(--accent); }
 /* One change chip per item: changed since this reader's last visit wins over the round's NEW or UPDATED and the stale-seen chip. */
 [data-unseen] .item-meta > .tag-round { display: none; }
-.item-lede { grid-area: lede; color: var(--muted); font-size: 14px; margin: 2px 0 0; line-height: 1.5; }
+/* The lede inherits body ink and size, so it reads as the item's first sentence rather than a caption. */
+.item-lede { grid-area: lede; margin: 2px 0 0; line-height: 1.5; }
 .item-lede code { background: none; padding: 0; }
 .item > summary > .seen { grid-area: seen; justify-self: end; font-size: 11px; color: var(--faint); display: inline-flex; gap: 4px; align-items: center; padding-top: 4px; }
 .item > summary > .seen input { margin: 0; accent-color: var(--accent); }
-.item.is-seen > summary .item-h { color: var(--muted); font-weight: 500; }
+.item.is-seen > summary :is(.item-h, .item-lede) { color: var(--muted); }
+.item.is-seen > summary .item-h { font-weight: 500; }
 .item-body { font-size: 15px; }
 .item-body > p, .item-body > ul, .item-body > ol { max-width: var(--measure); }
 .item-body ul, .item-body ol { padding-left: 22px; margin: 0 0 .9em; }
@@ -475,7 +477,7 @@ p { margin: 0 0 .9em; }
 .item-quiet > summary .item-h, .item-quiet > summary .item-mark { font-size: 14.5px; }
 .item-quiet > summary .item-h { font-weight: 500; color: var(--ink); }
 .item-quiet > summary > .seen { padding-top: 1px; }
-.item-lede-in { color: var(--muted); font-size: 14px; margin: 0 0 12px; max-width: var(--measure); }
+.item-lede-in { margin: 0 0 12px; }
 .nav-items a.nav-rest { color: var(--faint); font-size: 12px; }
 /* Tables in item bodies (e.g. your comments and where each landed). */
 .item-body table { border-collapse: collapse; font-size: 13.5px; margin: 4px 0 14px; width: 100%; max-width: 100%; display: block; overflow-x: auto; }
