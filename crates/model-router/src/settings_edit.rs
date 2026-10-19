@@ -19,7 +19,7 @@ use crate::client_window::{
     client_context_window, next_compaction, next_session, resolve_compaction,
 };
 use crate::config::{
-    Config, ModelRoute, SHIPPED_GPT_ROUTES, is_codex_native_model, is_retired_gpt_route,
+    Config, ModelRoute, SHIPPED_GPT_ROUTES, is_built_in_route, is_retired_gpt_route,
     shipped_picker_rows,
 };
 use crate::context_check::{self, is_superseded_default, recommended_entry};
@@ -948,9 +948,9 @@ fn plan_bypass(home: Option<&Path>, project: &Path, tokens: &[String]) -> Bypass
         return BypassPlan::NotFound;
     }
 
-    // Routed IDs: the shipped and retired GPT routes, every picker row, an
-    // older single-slot option.
-    let mut routed: BTreeSet<String> = SHIPPED_GPT_ROUTES.map(str::to_string).into();
+    // Routed IDs: every picker row and an older single-slot option, plus
+    // (in `is_routed`) every built-in route of any family, enabled or not.
+    let mut routed: BTreeSet<String> = BTreeSet::new();
     for (_, _, doc) in &files {
         let rows = doc.path(&["modelPicker", "options"]).and_then(Doc::items);
         routed.extend(
@@ -976,7 +976,7 @@ fn plan_bypass(home: Option<&Path>, project: &Path, tokens: &[String]) -> Bypass
     };
     let is_routed = |doc: &Doc| {
         doc.str_at(&["model"])
-            .is_some_and(|model| routed.contains(model) || is_codex_native_model(model))
+            .is_some_and(|model| routed.contains(model) || is_built_in_route(model))
     };
 
     let touched: Vec<(PathBuf, String, Doc)> = files
@@ -1322,6 +1322,19 @@ mod tests {
         dirs.project("settings.local.json", r#"{"model":"kimi-k3"}"#);
         assert_eq!(dirs.bypass()["status"], "done");
         assert_eq!(dirs.project_text("settings.local.json"), "{}\n");
+    }
+
+    #[test]
+    fn bypass_clears_a_built_in_default_of_any_family_without_a_picker_row() {
+        // Only the router serves these, whether or not their family is
+        // enabled: left behind, the default would fail against Anthropic.
+        for model in ["muse-wonder-full-1.0", "grok-4.7", "gpt-5.6-luna"] {
+            let dirs = Dirs::new();
+            dirs.user(&format!(r#"{{"env":{{"{BASE_URL}":"{URL}"}}}}"#));
+            dirs.project("settings.local.json", &format!(r#"{{"model":"{model}"}}"#));
+            assert_eq!(dirs.bypass()["status"], "done", "{model}");
+            assert_eq!(dirs.project_text("settings.local.json"), "{}\n", "{model}");
+        }
     }
 
     #[test]

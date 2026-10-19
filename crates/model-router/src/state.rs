@@ -28,6 +28,11 @@ pub const CODEX_AUTH_PREFIX: &str = "codex-";
 /// (`xai-<email>.json`). Note it is `xai-`, not `grok-`.
 pub const GROK_AUTH_PREFIX: &str = "xai-";
 
+/// Filename prefix `CLIProxyAPI` writes for a Meta (Muse Code) OAuth login
+/// (`meta-<email>-<hash>.json`, or `meta-oauth.json`). Note it is `meta-`,
+/// not `muse-`.
+pub const MUSE_AUTH_PREFIX: &str = "meta-";
+
 /// Filesystem layout for everything model-router owns outside the repo.
 ///
 /// XDG-style on both macOS and Linux (deliberately not
@@ -69,7 +74,8 @@ impl Dirs {
     }
 
     /// OAuth material managed by the router's `CLIProxyAPI` child — Codex
-    /// (`codex-*.json`) and, when configured, xAI (`xai-*.json`).
+    /// (`codex-*.json`) and, when configured, xAI (`xai-*.json`) and Meta
+    /// (`meta-*.json`).
     ///
     /// The directory name is a historical misnomer now that it holds more
     /// than Codex logins. Renaming it would strand every existing install's
@@ -384,8 +390,8 @@ pub fn find_auth(dir: &Path, prefix: &str) -> Option<PathBuf> {
 /// `0600`, returning the files that needed it.
 ///
 /// Deliberately prefix-blind. The directory holds nothing but OAuth
-/// credentials, and `CLIProxyAPI` 7.2.110 already writes five kinds
-/// (`codex-`, `xai-`, `claude-`, `kimi-`, `antigravity-`) — of which it
+/// credentials, and `CLIProxyAPI` already writes six kinds (`codex-`,
+/// `xai-`, `meta-`, `claude-`, `kimi-`, `antigravity-`) — of which it
 /// writes the xAI one world-readable. Enumerating a hardcoded list would
 /// leave the next provider silently unprotected, so this covers whatever is
 /// there.
@@ -519,6 +525,7 @@ pub(crate) mod tests {
             "xai-a@example.com.json",
             "notes.txt",
             "codex-ignored.json.bak",
+            "meta-a@example.com-0123456789abcdef.json",
         ] {
             fs::write(root.join(name), b"{}").unwrap();
         }
@@ -537,8 +544,17 @@ pub(crate) mod tests {
                 .unwrap(),
             "xai-a@example.com.json"
         );
+        assert_eq!(
+            find_auth(root, MUSE_AUTH_PREFIX)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "meta-a@example.com-0123456789abcdef.json"
+        );
+        // No family's prefix collides with another's.
         assert_eq!(auth_files(root, CODEX_AUTH_PREFIX).unwrap().len(), 2);
         assert_eq!(auth_files(root, GROK_AUTH_PREFIX).unwrap().len(), 2);
+        assert_eq!(auth_files(root, MUSE_AUTH_PREFIX).unwrap().len(), 1);
     }
 
     #[test]

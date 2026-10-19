@@ -15,9 +15,11 @@
 //! implements it.
 //!
 //! The xAI backend has its own phrase; each backend is a dialect
-//! ([`OverflowDialect`]) and a route only ever matches its own.
+//! ([`OverflowDialect`]) and a route only ever matches its own. Meta's
+//! phrase is generic, so the Meta dialect also needs the request's own
+//! estimate to be near the window ([`OverflowDialect::min_estimate_percent`]).
 //!
-//! Both wire shapes and the client behavior are recorded in
+//! The Codex and xAI wire shapes and the client behavior are recorded in
 //! `plugins/model-router/docs/experiments.md` (measured against Claude Code
 //! 2.1.220 and `CLIProxyAPI` 7.2.92; a version change on either side is a
 //! retest trigger).
@@ -42,7 +44,36 @@ pub(crate) enum OverflowDialect {
     /// [input_too_large] The prompt is too long for this model's context
     /// window (541372 tokens > 500000 tokens)`. Both are accepted.
     Xai,
+    /// Meta backend, captured against `CLIProxyAPI` 8.0.30 (2026-10-15):
+    /// every over-window request is a 400 `invalid_request_error` reading
+    /// `The request contains invalid parameters. Check the request body for
+    /// any errors or inconsistencies.` — no context wording, and the same
+    /// text Meta uses for other invalid parameters. Matched only together
+    /// with [`META_MIN_ESTIMATE_PERCENT`].
+    Meta,
 }
+
+/// How near the window a Muse request's own estimate must be before Meta's
+/// generic invalid-parameters error is read as overflow, in percent of the
+/// route's window (1,007,997 on the built-in Muse routes, so 806,398).
+///
+/// Measured 2026-10-15 on `muse-wonder-1.0`: 999,107 Meta tokens succeeded
+/// and ~1,060,000 failed, so no request under 999,107 Meta tokens overflows.
+/// The router's o200k estimate tracks Meta's count within ~1-2% on text:
+/// o200k counts 0-2% more than Meta's tokenizer on prose and code, and Meta
+/// adds a fixed ~881 formatting tokens for Claude Code's 12 tool definitions
+/// (~0.1% at 1M). The margin is for what the estimate cannot see: images,
+/// which it ignores, and scripts where Meta counts more (Hebrew ~8%, emoji
+/// ~25%; 80% covers an undercount of up to ~19%). An unrelated invalid
+/// parameter on any request estimated under 806,398 tokens (~190K below the
+/// largest request Meta accepted) passes through untouched.
+///
+/// Leaning low is the cheaper mistake. A false positive (a large request
+/// that really had another invalid parameter) costs one compaction, after
+/// which the request is far under the threshold and the real error passes
+/// through. A false negative leaves the session retrying the same oversized
+/// request, the loop this module exists to break.
+const META_MIN_ESTIMATE_PERCENT: u64 = 80;
 
 impl OverflowDialect {
     /// The phrases identifying this backend's overflow message, compared with
@@ -53,7 +84,8 @@ impl OverflowDialect {
     /// Deliberately subject-bearing: a hypothetical "`max_tokens` exceeds
     /// the context window" must NOT match, because compaction cannot fix an
     /// output-limit error and a false positive would re-create the very
-    /// retry loop this module removes.
+    /// retry loop this module removes. Meta's phrase has no subject to bear,
+    /// which is why it also needs [`Self::min_estimate_percent`].
     const fn phrases(self) -> &'static [&'static str] {
         match self {
             Self::Codex => &["input exceeds the context window"],
@@ -61,6 +93,18 @@ impl OverflowDialect {
                 "maximum prompt length is",
                 "prompt is too long for this model's context window",
             ],
+            Self::Meta => &["the request contains invalid parameters"],
+        }
+    }
+
+    /// For a dialect whose phrase does not by itself mean overflow, the
+    /// share of the window, in percent, the request's own estimate must
+    /// reach before the phrase is read as overflow. `None` when the phrase
+    /// alone is proof.
+    const fn min_estimate_percent(self) -> Option<u64> {
+        match self {
+            Self::Codex | Self::Xai => None,
+            Self::Meta => Some(META_MIN_ESTIMATE_PERCENT),
         }
     }
 }
@@ -102,18 +146,30 @@ impl OverflowRewrite {
         }
     }
 
-    /// The canonical Anthropic message. `N` is the request's estimated
-    /// input-token count, computed here when the request path deferred it,
-    /// and clamped above the window: the estimator ignores non-text content
+    /// The request's estimated input-token count, computed here when the
+    /// request path deferred it.
+    fn estimate(&self) -> u64 {
+        match &self.estimate {
+            Estimate::Computed(tokens) => *tokens,
+            Estimate::Deferred(body) => crate::usage::estimate_input_tokens(body),
+        }
+    }
+
+    /// Whether the estimate is near enough the window for this dialect's
+    /// phrase to mean overflow.
+    fn near_window(&self, estimate: u64) -> bool {
+        self.dialect.min_estimate_percent().is_none_or(|percent| {
+            u128::from(estimate) * 100 >= u128::from(self.window) * u128::from(percent)
+        })
+    }
+
+    /// The canonical Anthropic message. `N` is the request's estimate,
+    /// clamped above the window: the estimator ignores non-text content
     /// (images, documents), and a mathematically false `N <= M` would deny
     /// the client's gap-guided compaction a positive overage. A minimal
     /// clamped gap only degrades recovery to one-group-at-a-time
     /// compaction, which still converges.
-    fn message(&self) -> String {
-        let estimate = match &self.estimate {
-            Estimate::Computed(tokens) => *tokens,
-            Estimate::Deferred(body) => crate::usage::estimate_input_tokens(body),
-        };
+    fn message(&self, estimate: u64) -> String {
         let n = estimate.max(self.window + 1);
         format!("prompt is too long: {n} tokens > {} maximum", self.window)
     }
@@ -137,7 +193,11 @@ impl OverflowRewrite {
         if !is_overflow_message(message, self.dialect) {
             return false;
         }
-        error["message"] = Value::from(self.message());
+        let estimate = self.estimate();
+        if !self.near_window(estimate) {
+            return false;
+        }
+        error["message"] = Value::from(self.message(estimate));
         true
     }
 
@@ -261,7 +321,11 @@ pub(crate) mod tests {
             // Not JSON.
             "input exceeds the context window",
         ] {
-            for dialect in [OverflowDialect::Codex, OverflowDialect::Xai] {
+            for dialect in [
+                OverflowDialect::Codex,
+                OverflowDialect::Xai,
+                OverflowDialect::Meta,
+            ] {
                 let rewrite = OverflowRewrite::new(258_400, Estimate::Computed(300_000), dialect);
                 assert!(
                     rewrite.rewrite_body(body.as_bytes()).is_none(),
@@ -318,24 +382,139 @@ pub(crate) mod tests {
 
     #[test]
     fn a_rewrite_never_matches_the_other_backends_dialect() {
-        let codex =
-            OverflowRewrite::new(258_400, Estimate::Computed(300_000), OverflowDialect::Codex);
-        let xai = OverflowRewrite::new(500_000, Estimate::Computed(620_215), OverflowDialect::Xai);
-
-        // Each accepts its own captured body ...
-        assert!(codex.rewrite_body(&Bytes::from(CAPTURED_BODY)).is_some());
-        assert!(xai.rewrite_body(&Bytes::from(CAPTURED_XAI_BODY)).is_some());
-
-        // ... and rejects the other's.
-        assert!(
-            codex
-                .rewrite_body(&Bytes::from(CAPTURED_XAI_BODY))
-                .is_none(),
-            "Codex rewrite must not claim the xAI overflow body"
+        // Every estimate is far past every window, so only the dialect
+        // decides.
+        let codex = OverflowRewrite::new(
+            258_400,
+            Estimate::Computed(2_000_000),
+            OverflowDialect::Codex,
         );
+        let xai =
+            OverflowRewrite::new(500_000, Estimate::Computed(2_000_000), OverflowDialect::Xai);
+        let meta = OverflowRewrite::new(
+            MUSE_WINDOW,
+            Estimate::Computed(2_000_000),
+            OverflowDialect::Meta,
+        );
+        let bodies = [
+            (OverflowDialect::Codex, CAPTURED_BODY),
+            (OverflowDialect::Xai, CAPTURED_XAI_BODY),
+            (OverflowDialect::Meta, CAPTURED_META_BODY),
+        ];
+        for rewrite in [codex, xai, meta] {
+            for (dialect, body) in bodies {
+                // Each accepts its own captured body and rejects the others'.
+                assert_eq!(
+                    rewrite.rewrite_body(&Bytes::from(body)).is_some(),
+                    dialect == rewrite.dialect,
+                    "{:?} rewrite on the {dialect:?} body",
+                    rewrite.dialect
+                );
+            }
+        }
+    }
+
+    /// The body `CLIProxyAPI` 8.0.30 delivered for ~1.06M Meta tokens sent
+    /// to `muse-wonder-1.0` (2026-10-15). Meta's own body was
+    /// `{"error":{"code":null,"message":"<same>","param":null,
+    /// "type":"invalid_request_error"}}`.
+    const CAPTURED_META_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"The request contains invalid parameters. Check the request body for any errors or inconsistencies."}}"#;
+
+    /// The built-in Muse routes' window.
+    const MUSE_WINDOW: u64 = 1_007_997;
+
+    fn meta(estimate: Estimate) -> OverflowRewrite {
+        OverflowRewrite::new(MUSE_WINDOW, estimate, OverflowDialect::Meta)
+    }
+
+    #[test]
+    fn meta_generic_error_is_translated_only_near_the_window() {
+        // The router's estimate of the request that failed live.
+        let rewritten = meta(Estimate::Computed(1_059_908))
+            .rewrite_body(CAPTURED_META_BODY.as_bytes())
+            .expect("an over-window request's generic error is overflow");
+        assert_eq!(
+            message_of(&rewritten),
+            "prompt is too long: 1059908 tokens > 1007997 maximum"
+        );
+        // Between the threshold and the window (the tokenizers may disagree),
+        // N is clamped above the window.
+        let rewritten = meta(Estimate::Computed(900_000))
+            .rewrite_body(CAPTURED_META_BODY.as_bytes())
+            .unwrap();
+        assert_eq!(
+            message_of(&rewritten),
+            "prompt is too long: 1007998 tokens > 1007997 maximum"
+        );
+        // The threshold is 80% of the window, inclusive: 806,397.6.
         assert!(
-            xai.rewrite_body(&Bytes::from(CAPTURED_BODY)).is_none(),
-            "xAI rewrite must not claim the Codex overflow body"
+            meta(Estimate::Computed(806_398))
+                .rewrite_body(CAPTURED_META_BODY.as_bytes())
+                .is_some()
+        );
+        // The same message on a smaller request is some other invalid
+        // parameter, and reaches the client untouched.
+        for small in [806_397, 9_008, 0] {
+            assert!(
+                meta(Estimate::Computed(small))
+                    .rewrite_body(CAPTURED_META_BODY.as_bytes())
+                    .is_none(),
+                "{small}"
+            );
+        }
+        // A deferred estimate is judged the same way.
+        let small_request =
+            br#"{"model":"muse-wonder-1.0","messages":[{"role":"user","content":"hello"}]}"#;
+        assert!(
+            meta(Estimate::Deferred(Bytes::from_static(small_request)))
+                .rewrite_body(CAPTURED_META_BODY.as_bytes())
+                .is_none()
+        );
+        // Codex and xAI need no size evidence: their phrases name overflow.
+        for dialect in [OverflowDialect::Codex, OverflowDialect::Xai] {
+            assert!(OverflowRewrite::new(500_000, Estimate::Computed(1), dialect).near_window(1));
+        }
+    }
+
+    /// Random six-digit numbers, the text of the live Meta probes.
+    fn dense_numbers(count: usize) -> String {
+        let mut state: u64 = 11;
+        (0..count)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (100_000 + (state >> 33) % 900_000).to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The tokenizer comparison behind [`META_MIN_ESTIMATE_PERCENT`]: Meta
+    /// billed 9,104 input tokens for 3,003 such numbers plus a short
+    /// instruction, and 999,107 for 333,003 (live, 2026-10-15). The router
+    /// estimated those bodies at 9,008 and 999,008: exactly 3 per number (a
+    /// space, then two 3-digit groups) as in Meta's count, with Meta ~100
+    /// tokens higher overall. On this text the undercount is ~1% at worst,
+    /// far inside the threshold's margin.
+    #[test]
+    fn the_estimator_counts_dense_numbers_as_meta_does() {
+        let count = 3_003;
+        let body = serde_json::json!({
+            "model": "muse-wonder-1.0",
+            "messages": [{"role": "user",
+                          "content": format!("{}\n\nReply with: ok", dense_numbers(count))}],
+        });
+        let estimate = crate::usage::estimate_input_tokens(body.to_string().as_bytes());
+        let numbers = 3 * count as u64;
+        assert!(
+            (numbers..numbers + 20).contains(&estimate),
+            "estimate {estimate} for {count} numbers"
+        );
+        let meta_billed = 9_104_u64;
+        assert!(
+            estimate * 100 >= meta_billed * 98,
+            "{estimate} vs {meta_billed}"
         );
     }
 }

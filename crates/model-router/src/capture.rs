@@ -28,7 +28,7 @@ pub struct RequestCapture {
     /// readers of existing capture files; `family` says more.
     pub branch: &'static str,
     /// Model family label from `RoutingDecision::family_label` — `claude`,
-    /// `gpt`, `grok`, or `openai-compat`.
+    /// `gpt`, `grok`, `muse`, or `openai-compat`.
     pub family: String,
     pub model: Option<String>,
     pub method: String,

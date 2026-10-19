@@ -139,7 +139,8 @@ impl ToolUseSniffer {
 /// Which model asked for a pending web search.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Origin {
-    /// Any routed model — GPT, Grok, or open-weights — by its routing ID.
+    /// Any routed model — GPT, Grok, Muse, or open-weights — by its routing
+    /// ID.
     Gpt {
         routing_id: String,
     },

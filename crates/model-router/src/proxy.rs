@@ -21,7 +21,7 @@ use serde_json::json;
 use tokio::net::TcpListener;
 
 use crate::capture::{CaptureSink, RequestCapture, StreamingCapture, redact_headers};
-use crate::config::{Config, UpstreamMode, WebSearchMode};
+use crate::config::{Config, ModelFamily, MuseMode, UpstreamMode, WebSearchMode};
 use crate::headers;
 use crate::overflow::OverflowRewrite;
 use crate::routing::{RoutingDecision, decide, substitute_model};
@@ -31,7 +31,7 @@ use crate::websearch;
 
 mod search;
 
-pub use search::XaiSearchTasks;
+pub use search::SearchStreams;
 
 /// Maximum time SIGINT/SIGTERM may spend draining in-flight connections.
 /// Leaves enough of the service manager's 60-second stop budget for managed
@@ -47,8 +47,13 @@ struct AppState {
     /// `WebSearch` invocations observed in model responses, awaiting their
     /// side calls (origin-matched backend routing).
     pending_searches: Arc<websearch::PendingSearches>,
-    /// In-flight xAI search streams, owned so shutdown can wait for them.
-    xai_searches: Arc<XaiSearchTasks>,
+    /// In-flight vendor-native search streams, owned so shutdown can wait
+    /// for them.
+    search_streams: Arc<SearchStreams>,
+    /// The logins seen undoing a model exclusion, or setting the Muse
+    /// Contributor header, since startup ([`login_refusal`]).
+    seen_overrides: Arc<crate::exclusions::Seen>,
+    seen_headers: Arc<crate::muse::SeenHeaders>,
 }
 
 /// Passive response tap: watches a forwarded `/v1/messages` response for
@@ -90,8 +95,10 @@ impl CliproxyUpstream {
                     .api_key
                     .as_deref()
                     .map(headers::GptUpstreamCredential::new)
-                    .transpose()?,
+                    .transpose()?
+                    .map(|credential| credential.for_muse_mode(config.muse.mode())),
             }),
+            // The handle's credential carries the mode from `Supervisor::start`.
             UpstreamMode::Managed => Ok(managed.map_or(Self::ManagedUnavailable, Self::Managed)),
         }
     }
@@ -119,25 +126,36 @@ impl AppState {
             // streams are fine while a blackholed upstream still times out.
             .read_timeout(std::time::Duration::from_mins(10))
             .build()?;
-        let xai_searches = Arc::new(XaiSearchTasks::new());
+        let search_streams = Arc::new(SearchStreams::new());
+        // What the child is about to load: an override or a header there may
+        // outlive a fix made before the first request that relies on it.
+        let seen_overrides = Arc::new(crate::exclusions::Seen::default());
+        let seen_headers = Arc::new(crate::muse::SeenHeaders::default());
+        if let Some(auth_dir) = &config.auth_dir {
+            let mode = config.muse.mode();
+            let logins = crate::logins::walk(auth_dir);
+            let required = crate::exclusions::required(mode, config.gpt.auth);
+            crate::exclusions::record(&seen_overrides, &logins, &required);
+            crate::muse::record(&seen_headers, &logins, mode);
+        }
         Ok(Self {
             config: Arc::new(config),
             client,
             capture,
             cliproxy_upstream,
             pending_searches: Arc::new(websearch::PendingSearches::default()),
-            xai_searches,
+            search_streams,
+            seen_overrides,
+            seen_headers,
         })
     }
 
-    /// Builds the response tap for a `/v1/messages` request when the
-    /// web-search feature is on and the request declares the client
-    /// `WebSearch` tool (cheap byte prefilter; a false positive merely arms
-    /// the passive tap).
+    /// Builds the response tap for a `/v1/messages` request when searches
+    /// from `origin` are intercepted ([`Self::intercepts`]) and the request
+    /// declares the client `WebSearch` tool (cheap byte prefilter; a false
+    /// positive merely arms the passive tap).
     fn websearch_tap(&self, body: &[u8], origin: websearch::Origin) -> Option<SniffTap> {
-        if self.config.web_search.mode == WebSearchMode::Off
-            || !websearch::declares_websearch_tool(body)
-        {
+        if !self.intercepts(&origin) || !websearch::declares_websearch_tool(body) {
             return None;
         }
         Some(SniffTap {
@@ -145,6 +163,17 @@ impl AppState {
             session_id: websearch::session_id(body)?,
             origin,
         })
+    }
+
+    /// Whether `WebSearch` calls from `origin` are intercepted: whenever
+    /// `[web-search] mode` is not `off`, and always for a routed model whose
+    /// searches go to its own vendor's search (Grok, Muse). Those never
+    /// leave the vendor: `off` governs only the other families.
+    fn intercepts(&self, origin: &websearch::Origin) -> bool {
+        self.config.web_search.mode != WebSearchMode::Off
+            || matches!(origin, websearch::Origin::Gpt { routing_id }
+                if self.config.route(routing_id)
+                    .is_some_and(|route| websearch::native_search(route.family).is_some()))
     }
 
     /// The recorded origin of a `WebSearch` sub-call, if its session's
@@ -211,7 +240,7 @@ pub async fn serve_listener_with_drain(
 async fn serve_app(
     listener: TcpListener,
     app: Router,
-    searches: Arc<XaiSearchTasks>,
+    searches: Arc<SearchStreams>,
     shutdown: impl Future<Output = ()> + Send + 'static,
     drain_timeout: std::time::Duration,
 ) -> std::io::Result<()> {
@@ -243,7 +272,7 @@ async fn serve_app(
             // Search streams outlive their requests, so the already-admitted
             // ones are waited for here — with whatever budget the connection
             // drain left, and before the caller tears the managed child down
-            // (see `XaiSearchTasks`).
+            // (see `SearchStreams`).
             searches
                 .wait(drain_timeout.saturating_sub(started.elapsed()))
                 .await;
@@ -261,14 +290,14 @@ pub async fn app(config: Config) -> anyhow::Result<Router> {
     Ok(build(config, None).await?.0)
 }
 
-/// The router plus the handle shutdown needs to wait for in-flight xAI search
+/// The router plus the handle shutdown needs to wait for in-flight search
 /// streams.
 async fn build(
     config: Config,
     managed: Option<crate::supervisor::ManagedHandle>,
-) -> anyhow::Result<(Router, Arc<XaiSearchTasks>)> {
+) -> anyhow::Result<(Router, Arc<SearchStreams>)> {
     let state = AppState::new(config, managed).await?;
-    let searches = Arc::clone(&state.xai_searches);
+    let searches = Arc::clone(&state.search_streams);
     Ok((
         Router::new().fallback(any(handle)).with_state(state),
         searches,
@@ -371,9 +400,77 @@ async fn handle(State(state): State<AppState>, request: Request) -> Response {
         .await;
     }
 
+    if let Some(message) = login_refusal(&state, decision.route).await {
+        return local_error_response(
+            &state,
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &message,
+            capture,
+        )
+        .await;
+    }
+
     match decision.route {
         None => claude_response(&state, &parts, body, &decision, capture).await,
         Some(route) => gpt_response(&state, &parts, body, route, capture).await,
+    }
+}
+
+/// The client-facing refusal for a request to `route` that must not be
+/// forwarded now, from one walk of the managed child's auth dir per request,
+/// off the async workers: a login undoes (or once undid, see
+/// [`crate::exclusions::Seen`]) a model exclusion the route relies on, or,
+/// for a Muse route, the Muse gate refuses ([`crate::muse::refusal`] for the
+/// configured mode, with the headers seen since startup). Without a managed
+/// auth dir only the Muse gate applies: an external child's logins are its
+/// own.
+async fn login_refusal(
+    state: &AppState,
+    route: Option<&crate::config::ModelRoute>,
+) -> Option<String> {
+    let route = route?;
+    let auth_dir = state.config.auth_dir.clone();
+    let mode = state.config.muse.mode();
+    let required = crate::exclusions::required(mode, state.config.gpt.auth);
+    let relied_on = crate::exclusions::relied_on(&required, route);
+    let muse = route.family == ModelFamily::Muse;
+    if !muse && (relied_on.is_empty() || auth_dir.is_none()) {
+        return None;
+    }
+    let seen_overrides = state.seen_overrides.clone();
+    let seen_headers = state.seen_headers.clone();
+    let refused = tokio::task::spawn_blocking(move || {
+        let logins = auth_dir.as_deref().map(crate::logins::walk);
+        if let Some(reason) = logins.as_ref().and_then(|logins| {
+            crate::exclusions::refusal(&seen_overrides, logins, &required, &relied_on)
+        }) {
+            return Some(format!("model-router refused this request: {reason}"));
+        }
+        muse.then(|| crate::muse::refusal(logins.as_ref(), mode, &seen_headers))
+            .flatten()
+            .map(|reason| muse_message(mode, &reason))
+    })
+    .await
+    .unwrap_or_else(|error| Some(format!("the login check failed ({error})")));
+    if let Some(message) = &refused {
+        tracing::warn!(route = %route.routing_id, %message, "refused a request over the logins");
+    }
+    refused
+}
+
+/// The client-facing text for a request the Muse gate refuses in `mode`.
+fn muse_message(mode: MuseMode, reason: &str) -> String {
+    if mode == MuseMode::Contributor {
+        format!(
+            "model-router refused this Muse request in Contributor mode ([muse] \
+             contributor = true): {reason}"
+        )
+    } else {
+        format!(
+            "model-router refused this Muse request so that Meta never receives \
+             Contributor-mode traffic: {reason}"
+        )
     }
 }
 
@@ -386,9 +483,14 @@ async fn claude_response(
 ) -> Response {
     let is_messages_post = parts.method == Method::POST && parts.uri.path() == "/v1/messages";
     let mut tap = None;
-    if state.config.web_search.mode != WebSearchMode::Off && is_messages_post {
+    if is_messages_post {
         if let Some(subcall) = websearch::detect(&body) {
-            if let Some(websearch::Origin::Gpt { routing_id }) = state.origin_of(&body, &subcall) {
+            // Only an intercepted origin was recorded (see `websearch_tap`);
+            // the check keeps that explicit.
+            if let Some(origin) = state.origin_of(&body, &subcall)
+                && state.intercepts(&origin)
+                && let websearch::Origin::Gpt { routing_id } = origin
+            {
                 return search::gpt_origin_on_claude_branch(
                     state,
                     parts,
@@ -445,18 +547,51 @@ const COMPACTION_HEADER: &str = "x-claude-code-compaction";
 /// prompt cache) and asks for a text summary. A GPT subagent answers it by
 /// calling its hand-back tool instead, which Claude Code reads as an empty
 /// summary, so the compaction fails and the agent runs on to the hard limit.
-/// `tool_choice: none` keeps the tools declared and forces text.
-fn rewrite_gpt_body(body: &[u8], display_name: &str, compaction: bool) -> anyhow::Result<Vec<u8>> {
+/// `tool_choice: none` keeps the tools declared and forces text, on the
+/// routes [`crate::config::forces_text_on_compaction`] names; an
+/// openai-compat host gets the request as Claude Code sent it.
+///
+/// A backend that accepts only `auto` ([`ModelFamily::tool_choice_auto_only`])
+/// gets any other choice dropped instead of a guaranteed 400, compaction
+/// included: Muse wrote the summary as text in every live trial with its
+/// tools kept, and keeping them keeps the conversation's cached prefix.
+fn rewrite_gpt_body(
+    body: &[u8],
+    route: &crate::config::ModelRoute,
+    compaction: bool,
+) -> anyhow::Result<Vec<u8>> {
     let mut document: serde_json::Value =
         serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON: {error}"))?;
-    crate::identity::inject_identity_into(&mut document, display_name)?;
-    if compaction
+    crate::identity::inject_identity_into(
+        &mut document,
+        &route.display_name,
+        route.family.maker(),
+    )?;
+    if route.family.tool_choice_auto_only() {
+        let forced = document.get("tool_choice").is_some_and(|choice| {
+            choice.get("type").and_then(serde_json::Value::as_str) != Some("auto")
+        });
+        if forced && let Some(object) = document.as_object_mut() {
+            object.remove("tool_choice");
+            tracing::debug!("dropped a tool_choice the backend accepts only as auto");
+        }
+    } else if compaction
+        && crate::config::forces_text_on_compaction(route)
         && document
             .get("tools")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|tools| !tools.is_empty())
     {
         document["tool_choice"] = serde_json::json!({"type": "none"});
+    }
+    if route.family.rejects_unanswered_reasoning() {
+        let dropped = crate::reasoning_order::drop_unanswered_thinking(&mut document);
+        if dropped > 0 {
+            tracing::debug!(
+                blocks = dropped,
+                "dropped thinking that the history answers with no text or tool call"
+            );
+        }
     }
     let affected = crate::tool_schema::drop_unportable_patterns(&mut document);
     if !affected.is_empty() {
@@ -494,7 +629,7 @@ async fn gpt_response(
         }
     };
     let compaction = parts.headers.contains_key(COMPACTION_HEADER);
-    let rewritten = match rewrite_gpt_body(&rewritten, &route.display_name, compaction) {
+    let rewritten = match rewrite_gpt_body(&rewritten, route, compaction) {
         Ok(body) => Bytes::from(body),
         Err(error) => {
             tracing::warn!(%error, "failed to rewrite routed request body");
@@ -510,10 +645,11 @@ async fn gpt_response(
     };
     let policies = gpt_policies(&rewritten, route);
 
-    if state.config.web_search.mode != WebSearchMode::Off
-        && parts.method == Method::POST
+    // Detected on the inbound body: the rewrite may drop a forced
+    // `tool_choice` that detection keys on (see `rewrite_gpt_body`).
+    if parts.method == Method::POST
         && parts.uri.path() == "/v1/messages"
-        && let Some(subcall) = websearch::detect(&rewritten)
+        && let Some(subcall) = websearch::detect(&body)
     {
         return search::gpt_branch_subcall(
             state, parts, &body, rewritten, route, &subcall, policies, capture,
@@ -1140,7 +1276,7 @@ mod tests {
         let server = tokio::spawn(serve_app(
             listener,
             app,
-            Arc::new(XaiSearchTasks::new()),
+            Arc::new(SearchStreams::new()),
             async move {
                 let _ = shutdown_rx.await;
             },

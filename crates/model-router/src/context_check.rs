@@ -465,6 +465,46 @@ context-window = {window}
     }
 
     #[test]
+    fn muse_routes_are_clipped_to_the_1m_cap_and_recommended_at_it() {
+        // Their real window sits past Claude Code's largest compaction
+        // window, so 1M is both what they get and what doctor asks for.
+        let muse = "[muse]\nenabled = true\n";
+        for route in config(muse)
+            .effective_models()
+            .filter(|route| route.family == crate::config::ModelFamily::Muse)
+        {
+            assert_eq!(recommended_entry(route), Some(MAX_COMPACT_WINDOW));
+        }
+        let with_entries = setup_settings(None).replace(
+            r#"{"modelSettings":{"#,
+            r#"{"modelSettings":{"muse-wonder-1.0":{"autoCompactWindow":1000000},"muse-wonder-full-1.0":{"autoCompactWindow":1000000},"#,
+        );
+        let check = checked(muse, EnvSetting::Settings(1_000_000), &with_entries);
+        assert!(check.ok, "{check:?}");
+        for model in ["muse-wonder-1.0", "muse-wonder-full-1.0"] {
+            assert!(
+                check
+                    .detail
+                    .contains(&format!("{model} clipped to 1000000 (real 1007997)")),
+                "{check:?}"
+            );
+        }
+
+        // Unlike a GPT route, no entry under the 1M declaration is no
+        // overrun either: the declaration is already the cap.
+        let check = checked(muse, EnvSetting::Settings(1_000_000), &setup_settings(None));
+        assert!(check.ok, "{check:?}");
+        assert!(
+            !check.detail.contains("muse-wonder-1.0 OVERRUN"),
+            "{check:?}"
+        );
+        assert!(
+            check.detail.contains("muse-wonder-1.0 clipped to 1000000"),
+            "{check:?}"
+        );
+    }
+
+    #[test]
     fn the_built_in_gpt_routes_overrun_a_1m_declaration_without_per_model_entries() {
         let check = checked("", EnvSetting::Settings(1_000_000), "{}");
         assert!(!check.ok, "{check:?}");

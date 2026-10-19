@@ -4,11 +4,15 @@
 use serde::Serialize;
 
 use crate::acquire::UPSTREAM_VERSION;
-use crate::config::{Config, GptAuth, UpstreamMode};
+use crate::client_window::WindowEnv;
+use crate::config::{Config, GptAuth, ModelRoute, MuseMode, UpstreamMode};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::ModelFamily;
-use crate::state::{Dirs, GROK_AUTH_PREFIX, find_auth, harden_auth_files};
+use crate::logins::Walk;
+use crate::state::{
+    CODEX_AUTH_PREFIX, Dirs, GROK_AUTH_PREFIX, MUSE_AUTH_PREFIX, find_auth, harden_auth_files,
+};
 
 #[derive(Debug, Serialize)]
 pub struct Check {
@@ -29,18 +33,22 @@ pub struct Report {
 }
 
 /// Runs every check and returns the report.
-#[allow(clippy::too_many_lines)]
 pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
+    run_with(dirs, config_path, &WindowEnv::read()).await
+}
+
+/// [`run`] with the process's Claude Code variables `env`, read once.
+#[allow(clippy::too_many_lines)]
+async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -> Report {
     let mut checks = Vec::new();
     let home = crate::state::home_dir();
     let project = std::env::current_dir().unwrap_or_default();
     let settings = crate::claude_settings::settings_by_precedence(home.as_deref(), &project);
-    let env = crate::client_window::WindowEnv::read();
-    let declared = crate::client_window::resolve(&env, &settings);
+    let declared = crate::client_window::resolve(env, &settings);
 
     // Auth-file permissions are a property of the state directory alone, so
     // this runs before — and independently of — the config load, the
-    // upstream mode, and `[grok]`. A credential sitting world-readable is
+    // upstream mode, and the optional families. A credential sitting world-readable is
     // still world-readable when the config is invalid or the upstream is
     // external; gating the repair on any of those would leave it unfixed
     // and, worse, unreported.
@@ -88,6 +96,9 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
         if let Some(upstream) = config.upstreams.get(crate::config::CLIPROXY_UPSTREAM) {
             upstream_checks(dirs, config, upstream, &mut checks);
         }
+        let logins = walk_logins(dirs, config);
+        checks.extend(login_exclusions_check(config, logins.as_ref()));
+        checks.extend(muse_checks(config, logins.as_ref()));
         catalog_request = models_catalog_request(dirs, config);
         if !config.openai_providers.is_empty() {
             let keyless = config
@@ -114,10 +125,7 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
                 .join(", ");
             // Providers only ride the managed child; validation permits stub
             // mode (test backend), so surface the mismatch here instead.
-            let managed = config
-                .upstreams
-                .get(crate::config::CLIPROXY_UPSTREAM)
-                .is_some_and(|upstream| upstream.mode == UpstreamMode::Managed);
+            let managed = config.is_managed();
             checks.push(Check {
                 warn: false,
                 name: "openai-providers",
@@ -231,9 +239,9 @@ pub async fn run(dirs: &Dirs, config_path: &std::path::Path) -> Report {
             config,
             dirs,
             declared,
-            &crate::client_window::resolve_compaction(&env, home.as_deref(), &settings),
+            &crate::client_window::resolve_compaction(env, home.as_deref(), &settings),
             home.as_deref()
-                .map(|home| (&env, home, project.as_path(), settings.as_slice())),
+                .map(|home| (env, home, project.as_path(), settings.as_slice())),
         ));
         checks.extend(fallback_model_check(&settings));
     }
@@ -324,7 +332,7 @@ fn context_window_checks(
 
 /// Fails when a settings `fallbackModel` chain is in effect: Claude Code
 /// re-runs a subagent whose request 404s or 5xxs on that chain, silently,
-/// and the chain can only name Claude models, so every routed GPT/Grok agent
+/// and the chain can only name Claude models, so every routed agent
 /// degrades to Claude whenever the gateway fails it. Entries are reported
 /// raw: Claude Code resolves the chain at session start (dropping ids it
 /// does not recognise, expanding `"default"`, keeping three), and mirroring
@@ -348,7 +356,7 @@ fn fallback_model_check(settings: &[(std::path::PathBuf, serde_json::Value)]) ->
         name: "fallback-model",
         ok: false,
         detail: format!(
-            "`fallbackModel` is set in {} ({}): a routed GPT/Grok subagent whose request the \
+            "`fallbackModel` is set in {} ({}): a routed subagent whose request the \
              gateway fails (404/5xx) silently continues on the first Claude model of that \
              chain instead of erroring; remove the setting and restart Claude Code (the chain \
              is fixed at session start) to keep routed agents on their model",
@@ -386,6 +394,21 @@ fn auth_permission_check(dirs: &Dirs, checks: &mut Vec<Check>) {
     checks.push(check);
 }
 
+/// Whether the managed auth dir holds a `prefix` login, with `missing` as
+/// the failure's detail.
+fn auth_check(dirs: &Dirs, name: &'static str, prefix: &str, missing: &str) -> Check {
+    let auth = find_auth(&dirs.auth_dir(), prefix);
+    Check {
+        warn: false,
+        name,
+        ok: auth.is_some(),
+        detail: auth.map_or_else(
+            || missing.to_string(),
+            |path| format!("login present: {}", path.display()),
+        ),
+    }
+}
+
 fn upstream_checks(
     dirs: &Dirs,
     config: &Config,
@@ -410,18 +433,12 @@ fn upstream_checks(
             });
 
             checks.push(match config.gpt.auth {
-                GptAuth::Subscription => {
-                    let auth = find_auth(&dirs.auth_dir(), crate::state::CODEX_AUTH_PREFIX)
-                        .map(|path| format!("login present: {}", path.display()));
-                    Check {
-                        warn: false,
-                        name: "codex-auth",
-                        ok: auth.is_some(),
-                        detail: auth.unwrap_or_else(|| {
-                            "no Codex login found; run `model-router login`".to_string()
-                        }),
-                    }
-                }
+                GptAuth::Subscription => auth_check(
+                    dirs,
+                    "codex-auth",
+                    CODEX_AUTH_PREFIX,
+                    "no Codex login found; run `model-router login`",
+                ),
                 GptAuth::ApiKey => {
                     let (ok, detail) = match config.gpt.api_key {
                         Some(_) => (
@@ -443,16 +460,20 @@ fn upstream_checks(
             });
 
             if config.grok.enabled {
-                let auth = find_auth(&dirs.auth_dir(), GROK_AUTH_PREFIX);
-                checks.push(Check {
-                    warn: false,
-                    name: "grok-auth",
-                    ok: auth.is_some(),
-                    detail: auth.map_or_else(
-                        || "no xAI login found; run `model-router login grok`".to_string(),
-                        |path| format!("login present: {}", path.display()),
-                    ),
-                });
+                checks.push(auth_check(
+                    dirs,
+                    "grok-auth",
+                    GROK_AUTH_PREFIX,
+                    "no xAI login found; run `model-router login grok`",
+                ));
+            }
+            if config.muse.enabled {
+                checks.push(auth_check(
+                    dirs,
+                    "muse-auth",
+                    MUSE_AUTH_PREFIX,
+                    "no Meta (Muse Code) login found; run `model-router login muse`",
+                ));
             }
         }
         UpstreamMode::External => checks.push(Check {
@@ -471,6 +492,133 @@ fn upstream_checks(
             detail: "stub backend (protocol testing only)".to_string(),
         }),
     }
+}
+
+/// The managed auth dir's walk, shared by the checks of what its logins
+/// hold; `None` without a managed auth dir.
+fn walk_logins(dirs: &Dirs, config: &Config) -> Option<Walk> {
+    config
+        .managed_auth_dir(dirs)
+        .map(|auth_dir| crate::logins::walk(&auth_dir))
+}
+
+/// A failure when a login in the managed auth dir (`logins`, its walk; `None`
+/// without one) undoes one of the model exclusions the child's config
+/// carries, or a file hides whether it does ([`crate::exclusions`]): the
+/// proxy refuses every request that relies on it. Silent otherwise.
+fn login_exclusions_check(config: &Config, logins: Option<&Walk>) -> Option<Check> {
+    let required = crate::exclusions::required(config.muse.mode(), config.gpt.auth);
+    let reason = crate::exclusions::overridden(logins?, &required)?;
+    Some(Check {
+        warn: false,
+        name: "login-exclusions",
+        ok: false,
+        detail: reason,
+    })
+}
+
+/// The Muse checks, whenever some route is in the Muse family.
+fn muse_checks(config: &Config, logins: Option<&Walk>) -> Vec<Check> {
+    let muse_routes: Vec<&ModelRoute> = config
+        .effective_models()
+        .filter(|route| route.family == ModelFamily::Muse)
+        .collect();
+    if muse_routes.is_empty() {
+        return Vec::new();
+    }
+    let mut checks = vec![muse_mode_check(config, logins)];
+    checks.extend(muse_plan_check(&muse_routes, logins));
+    checks
+}
+
+/// The Muse mode, and the proxy's Muse gate for it
+/// ([`crate::muse::refusal`]) as the disk stands now; a running router may
+/// also refuse over a header it saw before. Config validation has already
+/// matched every Muse route's model ID to the mode.
+fn muse_mode_check(config: &Config, logins: Option<&Walk>) -> Check {
+    let mode = config.muse.mode();
+    let refusal = crate::muse::refusal(logins, mode, &crate::muse::SeenHeaders::default());
+    let header = crate::muse::CONTRIBUTOR_HEADER;
+    Check {
+        warn: false,
+        name: "muse-mode",
+        ok: refusal.is_none(),
+        detail: match (mode, refusal) {
+            (MuseMode::Contributor, None) => format!(
+                "Contributor mode ([muse] contributor = true), which Meta trains on: Muse \
+                 routes use the -contributor model IDs, and every Meta login relays {header}: 1"
+            ),
+            (_, None) => {
+                format!(
+                    "Standard mode: Muse routes use plain model IDs, and no Meta login sets {header}"
+                )
+            }
+            (mode, Some(reason)) => {
+                format!(
+                    "{} mode; Muse requests are refused: {reason}",
+                    mode.as_str()
+                )
+            }
+        },
+    }
+}
+
+/// Each Meta login's Muse Code plan, warning when one cannot serve a
+/// configured Muse Wonder Full route: the child lists Full on every plan, so
+/// `routed-models` passes and only the first Full request fails, with
+/// `model_not_found`. A plan name Meta's docs do not list is a note, not a
+/// warning. Silent without a Meta login; the auth checks report that.
+fn muse_plan_check(muse_routes: &[&ModelRoute], logins: Option<&Walk>) -> Option<Check> {
+    use crate::config::{MUSE_WONDER_FULL, names_muse_wonder_full};
+    use crate::muse::Plan;
+
+    let tiers = crate::muse::plan_tiers(logins?.as_ref().ok()?);
+    if tiers.is_empty() {
+        return None;
+    }
+    let full_routes: Vec<&str> = muse_routes
+        .iter()
+        .filter(|route| names_muse_wonder_full(&route.upstream_model))
+        .map(|route| route.routing_id.as_str())
+        .collect();
+    let mut lacks_full = false;
+    let mut all_known = true;
+    let logins = tiers
+        .iter()
+        .map(|(file, name)| {
+            let Some(name) = name else {
+                all_known = false;
+                return format!("no plan recorded ({file})");
+            };
+            if let Some(plan) = Plan::from_tier_name(name) {
+                lacks_full |= !plan.serves_wonder_full();
+                format!("{name} ({file})")
+            } else {
+                all_known = false;
+                format!("{name} ({file}; not a plan model-router knows)")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let only_on =
+        format!("Meta serves {MUSE_WONDER_FULL} only on the Power and Maximum Usage plans");
+    let warn = lacks_full && !full_routes.is_empty();
+    let note = if warn {
+        format!(
+            "{only_on}, so requests to {} will fail with model_not_found",
+            full_routes.join(", ")
+        )
+    } else if lacks_full || !all_known {
+        only_on
+    } else {
+        "serves every Muse route".to_string()
+    };
+    Some(Check {
+        name: "muse-plan",
+        ok: true,
+        warn,
+        detail: format!("{logins}; {note}"),
+    })
 }
 
 /// Compares the upstream model IDs the config routes to against the list
@@ -732,8 +880,30 @@ mod tests {
     use crate::claude_settings::{settings_by_precedence, write_settings};
     use crate::config::parse_and_prepare as config;
 
+    fn login_exclusions_check_in(dirs: &Dirs, config: &Config) -> Option<Check> {
+        login_exclusions_check(config, walk_logins(dirs, config).as_ref())
+    }
+
+    fn muse_check_in(dirs: &Dirs, config: &Config, name: &str) -> Option<Check> {
+        muse_checks(config, walk_logins(dirs, config).as_ref())
+            .into_iter()
+            .find(|check| check.name == name)
+    }
+
+    fn muse_mode_check_in(dirs: &Dirs, config: &Config) -> Option<Check> {
+        muse_check_in(dirs, config, "muse-mode")
+    }
+
+    fn muse_plan_check_in(dirs: &Dirs, config: &Config) -> Option<Check> {
+        muse_check_in(dirs, config, "muse-plan")
+    }
+
     fn grok_enabled() -> Config {
         config("[grok]\nenabled = true\n")
+    }
+
+    fn muse_enabled() -> Config {
+        config("[muse]\nenabled = true\n")
     }
 
     /// The Codex slugs every default config routes to.
@@ -781,6 +951,24 @@ mod tests {
         );
         // The served Codex slugs are not named.
         assert!(!check.detail.contains("gpt-5.6"), "{}", check.detail);
+    }
+
+    #[test]
+    fn every_muse_route_served_passes_and_a_missing_one_is_named() {
+        let body = body_with(&["muse-wonder-1.0", "muse-wonder-full-1.0", "muse-spark-1.3"]);
+        let check = routed_models_check(&muse_enabled(), Ok(&body));
+        assert!(check.ok, "{}", check.detail);
+
+        // A plan without Wonder Full, should the catalog leave it out.
+        let body = body_with(&["muse-wonder-1.0"]);
+        let check = routed_models_check(&muse_enabled(), Ok(&body));
+        assert!(!check.ok);
+        assert!(
+            check.detail.contains("muse: muse-wonder-full-1.0"),
+            "{}",
+            check.detail
+        );
+        assert!(!check.detail.contains("gpt"), "{}", check.detail);
     }
 
     #[test]
@@ -962,6 +1150,355 @@ mod tests {
         );
         let (base_url, _) = models_catalog_request(&dirs, &external).unwrap();
         assert_eq!(base_url, "http://127.0.0.1:9");
+    }
+
+    fn upstream_check_list(dirs: &Dirs, config: &Config) -> Vec<Check> {
+        let mut checks = Vec::new();
+        upstream_checks(dirs, config, config.cliproxy_upstream(), &mut checks);
+        checks
+    }
+
+    #[test]
+    fn grok_and_muse_auth_are_checked_only_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        let names = |config: &Config| -> Vec<&'static str> {
+            upstream_check_list(&dirs, config)
+                .into_iter()
+                .map(|check| check.name)
+                .collect()
+        };
+        let none = names(&config(""));
+        assert!(!none.contains(&"grok-auth"), "{none:?}");
+        assert!(!none.contains(&"muse-auth"), "{none:?}");
+        let grok = names(&grok_enabled());
+        assert!(grok.contains(&"grok-auth"), "{grok:?}");
+        assert!(!grok.contains(&"muse-auth"), "{grok:?}");
+        let muse = names(&muse_enabled());
+        assert!(muse.contains(&"muse-auth"), "{muse:?}");
+        assert!(!muse.contains(&"grok-auth"), "{muse:?}");
+    }
+
+    #[test]
+    fn muse_auth_finds_a_meta_login_and_names_the_fix_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        let muse_auth = || {
+            upstream_check_list(&dirs, &muse_enabled())
+                .into_iter()
+                .find(|check| check.name == "muse-auth")
+                .unwrap()
+        };
+        let check = muse_auth();
+        assert!(!check.ok);
+        assert!(
+            check.detail.contains("model-router login muse"),
+            "{}",
+            check.detail
+        );
+        // An xAI login is not a Meta one.
+        std::fs::write(dirs.auth_dir().join("xai-a@example.com.json"), b"{}").unwrap();
+        assert!(!muse_auth().ok);
+        std::fs::write(dirs.auth_dir().join("meta-oauth.json"), b"{}").unwrap();
+        let check = muse_auth();
+        assert!(check.ok, "{}", check.detail);
+        assert!(check.detail.contains("meta-oauth.json"), "{}", check.detail);
+    }
+
+    #[test]
+    fn muse_mode_runs_only_for_muse_routes_and_follows_the_proxy_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        assert!(muse_mode_check_in(&dirs, &config("")).is_none());
+        assert!(muse_mode_check_in(&dirs, &grok_enabled()).is_none());
+
+        // No login yet.
+        let check = muse_mode_check_in(&dirs, &muse_enabled()).unwrap();
+        assert_eq!(check.name, "muse-mode");
+        assert!(!check.ok);
+        assert!(check.detail.contains("login muse"), "{}", check.detail);
+
+        // A login as the child mints it passes.
+        let login = dirs
+            .auth_dir()
+            .join("meta-a@example.com-0123456789abcdef.json");
+        std::fs::write(&login, br#"{"type":"meta","api_key":"k"}"#).unwrap();
+        let check = muse_mode_check_in(&dirs, &muse_enabled()).unwrap();
+        assert!(check.ok, "{}", check.detail);
+        assert!(
+            check
+                .detail
+                .contains("no Meta login sets X-Tbh-Contributor-Mode"),
+            "{}",
+            check.detail
+        );
+
+        // The Contributor header on it, with any value, fails with the fix.
+        std::fs::write(
+            &login,
+            br#"{"type":"meta","api_key":"k","headers":{"X-Tbh-Contributor-Mode":"0"}}"#,
+        )
+        .unwrap();
+        let check = muse_mode_check_in(&dirs, &muse_enabled()).unwrap();
+        assert!(!check.ok);
+        assert!(check.detail.contains("remove it"), "{}", check.detail);
+        std::fs::write(&login, br#"{"type":"meta","api_key":"k"}"#).unwrap();
+
+        // A hand-written Muse route counts as much as the built-in ones.
+        let hand_written = config(
+            "[muse]\nenabled = true\n[[models]]\nrouting-id = \"m\"\n\
+             upstream-model = \"muse-wonder-1.0\"\ndisplay-name = \"M\"\nfamily = \"muse\"\n",
+        );
+        assert!(muse_mode_check_in(&dirs, &hand_written).unwrap().ok);
+
+        // Only a managed child's logins vouch for Muse requests.
+        let external = config(
+            "[upstreams.cliproxy]\nmode = \"external\"\nbase-url = \"http://127.0.0.1:9\"\n\
+             [muse]\nenabled = true\n",
+        );
+        let check = muse_mode_check_in(&dirs, &external).unwrap();
+        assert!(!check.ok);
+        assert!(check.detail.contains("managed"), "{}", check.detail);
+    }
+
+    #[test]
+    fn muse_mode_check_reports_contributor_mode_and_passes_once_the_logins_relay() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        std::fs::write(
+            dirs.auth_dir().join("meta-a@example.com.json"),
+            br#"{"type":"meta","api_key":"k"}"#,
+        )
+        .unwrap();
+        let contributor = config("[muse]\nenabled = true\ncontributor = true\n");
+
+        // The minted login lacks the relay until the service adds it.
+        let check = muse_mode_check_in(&dirs, &contributor).unwrap();
+        assert!(!check.ok);
+        assert!(
+            check
+                .detail
+                .starts_with("Contributor mode; Muse requests are refused"),
+            "{}",
+            check.detail
+        );
+        assert!(check.detail.contains("service restart"), "{}", check.detail);
+
+        crate::muse::sync_relay(&dirs.auth_dir(), MuseMode::Contributor).unwrap();
+        let check = muse_mode_check_in(&dirs, &contributor).unwrap();
+        assert!(check.ok, "{}", check.detail);
+        assert!(
+            check
+                .detail
+                .starts_with("Contributor mode ([muse] contributor = true)"),
+            "{}",
+            check.detail
+        );
+
+        // Switched back without a restart: Standard mode refuses the relay.
+        let check = muse_mode_check_in(&dirs, &muse_enabled()).unwrap();
+        assert!(!check.ok);
+        assert!(
+            check
+                .detail
+                .starts_with("Standard mode; Muse requests are refused"),
+            "{}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains("remove the relay"),
+            "{}",
+            check.detail
+        );
+        crate::muse::sync_relay(&dirs.auth_dir(), MuseMode::Standard).unwrap();
+        let check = muse_mode_check_in(&dirs, &muse_enabled()).unwrap();
+        assert!(check.ok, "{}", check.detail);
+        assert!(
+            check.detail.starts_with("Standard mode:"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn login_exclusions_check_fails_while_a_login_undoes_an_exclusion() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        let meta = dirs.auth_dir().join("meta-a@example.com.json");
+        let codex = dirs.auth_dir().join("codex-1-a@example.com-pro.json");
+        std::fs::write(&meta, br#"{"type":"meta","excluded_models":["other"]}"#).unwrap();
+        std::fs::write(&codex, br#"{"type":"codex","excluded_models":["other"]}"#).unwrap();
+        let contributor = config("[muse]\nenabled = true\ncontributor = true\n");
+        let api_key = config("[gpt]\nauth = \"api-key\"\n");
+
+        // Muse off and Standard mode rely on the Meta exclusion, API-key
+        // mode on the Codex one; Contributor mode with the subscription on
+        // none.
+        for (config, needle) in [
+            (Config::default(), "\"*\""),
+            (muse_enabled(), "\"*-contributor\""),
+            (api_key, "Codex login"),
+        ] {
+            let check = login_exclusions_check_in(&dirs, &config).expect(needle);
+            assert!(!check.ok);
+            assert_eq!(check.name, "login-exclusions");
+            assert!(check.detail.contains(needle), "{}", check.detail);
+        }
+        assert!(login_exclusions_check_in(&dirs, &contributor).is_none());
+
+        // A list that keeps the router's pattern undoes nothing.
+        std::fs::write(&meta, br#"{"type":"meta","excluded_models":["other","*"]}"#).unwrap();
+        assert!(login_exclusions_check_in(&dirs, &Config::default()).is_none());
+        // Nor does any login of an external child, which is its own.
+        let external = config(
+            "[upstreams.cliproxy]\nmode = \"external\"\nbase-url = \"http://127.0.0.1:1\"\n",
+        );
+        std::fs::write(&meta, br#"{"type":"meta","excluded_models":["other"]}"#).unwrap();
+        assert!(login_exclusions_check_in(&dirs, &external).is_none());
+    }
+
+    #[test]
+    fn muse_plan_check_sees_wonder_full_through_contributor_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        std::fs::write(
+            dirs.auth_dir().join("meta-a@example.com.json"),
+            br#"{"type":"meta","subs_tier_name":"Muse Code High Usage"}"#,
+        )
+        .unwrap();
+        let contributor = config("[muse]\nenabled = true\ncontributor = true\n");
+        let check = muse_plan_check_in(&dirs, &contributor).unwrap();
+        assert!(check.warn, "{}", check.detail);
+        assert!(
+            check
+                .detail
+                .contains("requests to muse-wonder-full-1.0 will fail"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn muse_plan_warns_when_a_login_cannot_serve_a_wonder_full_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        let login = dirs
+            .auth_dir()
+            .join("meta-a@example.com-0123456789abcdef.json");
+        let with_tier = |tier: &str| {
+            std::fs::write(
+                &login,
+                format!(r#"{{"type":"meta","api_key":"k","subs_tier_name":"{tier}"}}"#),
+            )
+            .unwrap();
+        };
+        // No Muse route, or no Meta login yet: nothing to say.
+        with_tier("Muse Code High Usage");
+        assert!(muse_plan_check_in(&dirs, &config("")).is_none());
+        std::fs::remove_file(&login).unwrap();
+        assert!(muse_plan_check_in(&dirs, &muse_enabled()).is_none());
+
+        // The measured plan: Full is routed but not served.
+        with_tier("Muse Code High Usage");
+        let check = muse_plan_check_in(&dirs, &muse_enabled()).unwrap();
+        assert_eq!(check.name, "muse-plan");
+        assert!(check.ok && check.warn, "{check:?}");
+        assert!(
+            check.detail.starts_with("Muse Code High Usage (meta-a@"),
+            "{}",
+            check.detail
+        );
+        assert!(
+            check
+                .detail
+                .contains("requests to muse-wonder-full-1.0 will fail with model_not_found"),
+            "{}",
+            check.detail
+        );
+        with_tier("Muse Code Everyday Usage");
+        assert!(muse_plan_check_in(&dirs, &muse_enabled()).unwrap().warn);
+
+        // Power and Maximum serve every route.
+        for tier in ["Muse Code Power Usage", "Muse Code Maximum Usage"] {
+            with_tier(tier);
+            let check = muse_plan_check_in(&dirs, &muse_enabled()).unwrap();
+            assert!(check.ok && !check.warn, "{check:?}");
+            assert!(
+                check.detail.ends_with("serves every Muse route"),
+                "{}",
+                check.detail
+            );
+        }
+
+        // An unknown plan name, or none at all, is a neutral note.
+        with_tier("Muse Code Ultra");
+        let check = muse_plan_check_in(&dirs, &muse_enabled()).unwrap();
+        assert!(check.ok && !check.warn, "{check:?}");
+        assert!(
+            check.detail.contains("not a plan model-router knows"),
+            "{}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains("only on the Power and Maximum"),
+            "{}",
+            check.detail
+        );
+        std::fs::write(&login, br#"{"type":"meta","api_key":"k"}"#).unwrap();
+        let check = muse_plan_check_in(&dirs, &muse_enabled()).unwrap();
+        assert!(check.ok && !check.warn, "{check:?}");
+        assert!(
+            check.detail.starts_with("no plan recorded"),
+            "{}",
+            check.detail
+        );
+
+        // A hand-written route to Full is named too, however it spells the
+        // model.
+        with_tier("Muse Code High Usage");
+        let full = config(
+            "[muse]\nenabled = true\n[[models]]\nrouting-id = \"f\"\n\
+             upstream-model = \"muse-wonder-full-1.0(high)\"\ndisplay-name = \"F\"\n\
+             family = \"muse\"\n",
+        );
+        let check = muse_plan_check_in(&dirs, &full).unwrap();
+        assert!(check.warn, "{check:?}");
+        assert!(
+            check
+                .detail
+                .contains("requests to f, muse-wonder-full-1.0 will fail"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn a_contributor_route_fails_the_config_check_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(&dirs.config_dir).unwrap();
+        let config_path = dirs.config_dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[muse]\nenabled = true\n[[models]]\nrouting-id = \"m\"\n\
+             upstream-model = \"muse-wonder-1.0-contributor\"\ndisplay-name = \"M\"\n\
+             family = \"muse\"\n",
+        )
+        .unwrap();
+        let report = run_with(&dirs, &config_path, &WindowEnv::default()).await;
+        let check = report.checks.iter().find(|c| c.name == "config").unwrap();
+        assert!(!check.ok);
+        assert!(
+            check.detail.contains("Contributor-mode"),
+            "{}",
+            check.detail
+        );
     }
 
     #[test]
@@ -1149,6 +1686,7 @@ display-name = "Kimi K3"
             "xai-a@example.com.json",
             "codex-1-a@example.com-pro.json",
             "kimi-a@example.com.json",
+            "meta-a@example.com-0123456789abcdef.json",
         ] {
             let path = dirs.auth_dir().join(name);
             std::fs::write(&path, b"{}").unwrap();
@@ -1159,11 +1697,12 @@ display-name = "Kimi K3"
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].name, "auth-permissions");
         assert!(checks[0].ok, "{}", checks[0].detail);
-        assert!(checks[0].detail.contains('3'), "{}", checks[0].detail);
+        assert!(checks[0].detail.contains('4'), "{}", checks[0].detail);
         for name in [
             "xai-a@example.com.json",
             "codex-1-a@example.com-pro.json",
             "kimi-a@example.com.json",
+            "meta-a@example.com-0123456789abcdef.json",
         ] {
             let mode = std::fs::metadata(dirs.auth_dir().join(name))
                 .unwrap()
@@ -1212,7 +1751,7 @@ display-name = "Kimi K3"
         ] {
             let config_path = dirs.config_dir.join("config.toml");
             std::fs::write(&config_path, source).unwrap();
-            let report = run(&dirs, &config_path).await;
+            let report = run_with(&dirs, &config_path, &WindowEnv::default()).await;
             assert!(
                 report.checks.iter().any(|c| c.name == "auth-permissions"),
                 "missing auth-permissions for {source:?}"

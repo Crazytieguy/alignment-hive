@@ -1,0 +1,136 @@
+event: response.created
+data: {"response":{"background":false,"created_at":1792104102.0,"error":null,"id":"resp_6ad156a6b1c6468e33344eb9","incomplete_details":null,"instructions":"","max_tool_calls":1,"model":"muse-wonder-1.0","object":"response","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"low"},"service_tier":"auto","status":"in_progress","store":false,"temperature":1.0,"tool_choice":"auto","tools":[{"type":"web_search"}],"top_logprobs":0,"top_p":1.0,"truncation":"disabled"},"sequence_number":0,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"background":false,"created_at":1792104102.0,"error":null,"id":"resp_6ad156a6b1c6468e33344eb9","incomplete_details":null,"instructions":"","max_tool_calls":1,"model":"muse-wonder-1.0","object":"response","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"low"},"service_tier":"auto","status":"in_progress","store":false,"temperature":1.0,"tool_choice":"auto","tools":[{"type":"web_search"}],"top_logprobs":0,"top_p":1.0,"truncation":"disabled"},"sequence_number":1,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"id":"rs_6ad156a6b1c6468e33344eb9:rs_01a141ba7c2276f5ade63ebceab06fdd","status":"in_progress","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+event: response.output_item.done
+data: {"item":{"encrypted_content":"Q-PaDgEfMtgP8bI31KpeAjk4togr1BqsYf-Othv3HSxWR5MlKwedJ5zXdyYNk8z3ueml-A_7UTq1ScLDMlBHLkyPfiEAIPbQbC3KuMSdEH5AWJFmVyuy2gyZsrIajdGXb7UWfPX1TrowXU0xFreaAZGHz-ud8OvDUuL32yh5YGSL7z9GQArkeRfsu_x2yoJvwG7mPfC9CmnoAQUpc970L7S60mQCKwz55nQhEMwPIyBS6fNtjMsKMz5LIYXdw3eDTKoeyTIFsxr72_y_evW_WZ78gIJO4BpRgos2UWAUMmZxxB44-wQRwyPnIUA4c7lvhyh2ebCTuMyr16WWS6dRlkeQjybGrC_Ej9WH3zMAAh4sT6WmectTjj9M8H4N8nf7xb-QZHNRxwMFB5tpszmVPjvko2C0VliH5iCCMtaLwv09cm4f2YaX8ES-Ziwb3X7TnSysmOCYdjQp8VqbYRXaM5NchcFICi3kc2uRjCrTe0JEaH_PRSc_STYjqC8luIT4F4iGesy-WK70IBtE6bE-03K2jKtAQGWCtP19FUzxM1ntuscYwNAzyF6wuhuDHVDEnbkpAPuWX9NgGfBoLF7rw6q-lfAW-IGXV1U3EN69Pg2Xn64NErBGvBZwoDOEI0EDdRnzR277lU2z-AJU4JsX7jFcDgulsgSNQDjMPVH_ZgxPtV-ko05ZQe6lL5DJGH9yQz760LFDgqBB6PyS2sIwzyCSfCLSNznPuKU_AMjBvfk7p39GkT4Dyats5dWJSfYaUjqt1aqjUnIVNgrN5LS8qTO1ItQetHDOglNRg8BWRd-43UIVUp9-NkfLYFvcF9zi8q3HteiLWmVPZXah-LorOg3NEP7M_V3-Tt-GGHfDvpM5JGkgyOSJWUy7xh87W2kRiZ1egQddDLxcBM66R7Qy9K36t0A8rHFjO-g1iW0UcHF-jvRIA14-dosceU3a387Nt8mumcqBJ1Qtx6Jv-_Ctwssyi_5hey4By5dt8hYzYCJ_S_2qhw5hITHSLQFciW-9PQ8CH990Pc-2ADUCOb_6z8VZAU8JZ5-dXS1eT2Y4bovUb1nB-YIavURnFdP54KcA2tIxtD6SfUZzRQ50tXX1HM8A68ZjN7RAPd3wcpNjhGrKijJoQs0CFgU5TFHS3QL8N0dMUk-SlU6DSNk2m_Jj0eH2scWTyI2gibaQ59q8h7-NQLFuAKuw1hp74OZDoAvyW_s-tXyK2KZ9fz1byqawfnuZyat9uWCrJfPoUlz4vhNkHs-iEmNEur2LkVXxL6M2AlqzlHqPa0bx8Vm4dUDXlKMU11m5wZpL83N8zLIN8Gxc8ML1xj53kcB7s8syVJ7mBLOeciIkj-ZC8Jf_GF7E13zJVxP4qulVGL6WvSL4uQOIXDzlWkvy4nbbd3crSaVnvidtkTfqnTp6o1FC1A","id":"rs_6ad156a6b1c6468e33344eb9:rs_01a141ba7c2276f5ade63ebceab06fdd","status":"completed","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":3,"type":"response.output_item.done"}
+
+event: response.output_item.added
+data: {"item":{"content":[],"id":"rs_01a141ba7c8371c98978abdc186404a1","phase":"commentary","role":"assistant","status":"in_progress","type":"message"},"output_index":1,"sequence_number":4,"type":"response.output_item.added"}
+
+event: response.content_part.added
+data: {"content_index":0,"item_id":"rs_01a141ba7c8371c98978abdc186404a1","output_index":1,"part":{"annotations":[],"logprobs":[],"text":"","type":"output_text"},"sequence_number":5,"type":"response.content_part.added"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"Searching for “Meta Muse Wonder Full model card” — I'll pull the top results as title + URL.","item_id":"rs_01a141ba7c8371c98978abdc186404a1","logprobs":[],"output_index":1,"sequence_number":6,"type":"response.output_text.delta"}
+
+event: response.output_text.done
+data: {"content_index":0,"item_id":"rs_01a141ba7c8371c98978abdc186404a1","logprobs":[],"output_index":1,"sequence_number":7,"text":"Searching for “Meta Muse Wonder Full model card” — I'll pull the top results as title + URL.","type":"response.output_text.done"}
+
+event: response.content_part.done
+data: {"content_index":0,"item_id":"rs_01a141ba7c8371c98978abdc186404a1","output_index":1,"part":{"annotations":[],"logprobs":[],"text":"Searching for “Meta Muse Wonder Full model card” — I'll pull the top results as title + URL.","type":"output_text"},"sequence_number":8,"type":"response.content_part.done"}
+
+event: response.output_item.done
+data: {"item":{"content":[{"annotations":[],"logprobs":[],"text":"Searching for “Meta Muse Wonder Full model card” — I'll pull the top results as title + URL.","type":"output_text"}],"id":"rs_01a141ba7c8371c98978abdc186404a1","phase":"commentary","role":"assistant","status":"completed","type":"message"},"output_index":1,"sequence_number":9,"type":"response.output_item.done"}
+
+event: response.output_item.added
+data: {"item":{"action":{"queries":["Meta Muse Wonder Full model card"],"query":"Meta Muse Wonder Full model card","type":"search"},"id":"ws_call_01a141ba7ce47107a3f4f1715e4e0db0","status":"in_progress","type":"web_search_call"},"output_index":2,"sequence_number":10,"type":"response.output_item.added"}
+
+event: response.web_search_call.in_progress
+data: {"item_id":"ws_call_01a141ba7ce47107a3f4f1715e4e0db0","output_index":2,"sequence_number":11,"type":"response.web_search_call.in_progress"}
+
+event: response.web_search_call.searching
+data: {"item_id":"ws_call_01a141ba7ce47107a3f4f1715e4e0db0","output_index":2,"sequence_number":12,"type":"response.web_search_call.searching"}
+
+event: response.web_search_call.completed
+data: {"item_id":"ws_call_01a141ba7ce47107a3f4f1715e4e0db0","output_index":2,"sequence_number":13,"type":"response.web_search_call.completed"}
+
+event: response.output_item.done
+data: {"item":{"action":{"queries":["Meta Muse Wonder Full model card"],"query":"Meta Muse Wonder Full model card","sources":[{"type":"url","url":"https://d3x-solutions.com/meta-muse-wonder-full-muse-code-only/"},{"type":"url","url":"https://ai-tldr.dev/releases/meta-muse-wonder/"},{"type":"url","url":"https://www.datacamp.com/blog/muse-wonder-and-muse-wonder-full"},{"type":"url","url":"https://oday-bakkour.com/blog/meta-muse-wonder-active-memory-active-focus"},{"type":"url","url":"https://dev.to/gabrielanhaia/metas-muse-wonder-costs-exactly-what-opus-55-costs-it-loses-9-of-metas-own-14-benchmarks-399a"},{"type":"url","url":"https://aiindustrytoday.com/news/ait-20261013-muse-wonder/"},{"type":"url","url":"https://cellcog.ai/blog/muse-wonder/"},{"type":"url","url":"https://news.ssbcrack.com/meta-launches-ai-model-muse-wonder-with-subscription-plans-for-enhanced-digital-assistant-capabilities/"},{"type":"url","url":"https://dataconomy.com/2026/10/13/meta-muse-wonder-full-ai-models/"},{"type":"url","url":"https://o-mega.ai/articles/meta-muse-wonder-benchmarks-price-and-access-2026"},{"type":"url","url":"https://blog.quadmeup.com/2026/10/13/meta-releases-muse-wonder-and-wonder-full-its-first-frontier-models/"},{"type":"url","url":"https://digitalstrategy-ai.com/2026/10/13/ai-news-today-maia-300/"}],"type":"search"},"id":"ws_call_01a141ba7ce47107a3f4f1715e4e0db0","status":"completed","type":"web_search_call"},"output_index":2,"sequence_number":14,"type":"response.output_item.done"}
+
+event: response.in_progress
+data: {"response":{"background":false,"created_at":1792104104.0,"error":null,"id":"resp_6ad156a6b1c6468e33344eb9","incomplete_details":null,"instructions":"","max_tool_calls":1,"model":"muse-wonder-1.0","object":"response","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"low"},"service_tier":"auto","status":"in_progress","store":false,"temperature":1.0,"tool_choice":"auto","tools":[{"type":"web_search"}],"top_logprobs":0,"top_p":1.0,"truncation":"disabled"},"sequence_number":15,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"id":"rs_6ad156a6b1c6468e33344eb9:rs_01a141ba81957298bf4e3a32234964b0","status":"in_progress","summary":[],"type":"reasoning"},"output_index":3,"sequence_number":16,"type":"response.output_item.added"}
+
+event: response.output_item.done
+data: {"item":{"encrypted_content":"Q-PaDgF6p0D8EYPDBMcqHW4skB1qeX6rbL6PptUUZf9qIfrDkxDUzHzZ7qgW4X6kTatDVnC_46nLMWWxfjlAfGWxfPkYUomAhMK2LAgpHKTWSC9Lv9FIgMNOj-34ftGQLfBNm0R8q5avmahJv6ibjYD4Bmdmuotv2svMspgWg7xNiAiwtQzoLqVV7RL1sbfri12_KMOzlVw0OfatJ38wX6d20Fm716fUOvUHz08UzqYSyxE4gC7M8EWrbwrksWtU28ycpBJBeLTn45EP_Cg9P5PqdUvw7gGnd_tTIpx2c9Ru-xhQdFsWNO_7xS2JRlzAWULI-2HmV-bj0vSvWeID9ddgcMRumiYTC_4n5FPhHIcqma5sYpVSSdAHPVHxDe0AjnJx22pSxy44_okl2Me4xIzYKSQpob5J7JgZmTG54kv_0J9lz7Yv5VsF67MJjHlyACejKbdFlKucy6QWZo7HfV0d9fTwL8U-iFLtvLyhhCVOsvlVBorLZ1KuRVA2eCmV5YNauhsIuwbEciJJGFBlMRE8jKHCxjt4Npj4JuMIm9dId12BOtoM_Or_Sq8KjLPKDTLNIgEk11yKagPy9bR2dESrjkO_lQCqf-cI9OFaz88ZNO_B1sa_WoJFsu8abPZ9rc-QE1CmN9Tvfh_hx-jdiPVn9fZ0Scj8xTREDlO1ANxEO6haGNqtgDrRt_BsIwMz8c461wHyQaB4KsKzplUiuTH1P3AXADyT3zeCJmCeN6jwYvWo0Qml9aR2d-Ao1_lAqjPfYxUA9Si8xsbguuGdDhiEu-AFDYXUecjmpC_pBWdQcmtn0kj_CcAdGr9JIIDXX4Kajlro6y-nfxGkBukzXnVnMHWbzVcx2ID10USLeOYgzgv51plDTBtUhdj5dXRsIsT5x7UC5WBR8I0sX-CKQ6u6HVkD-QjM8vS3vqdcJkOWuumUm83bHAyYVy3Ohf0g7v-G6GFk6tJRepsJsKCoxVBmx5c4s0eq58NgUUO9sMIiDVJYUHlq2Gl8p5jWw40tprE7l-02Jj3jTWZhf6-w254cuz6If_aovuxy6u4p43L2e77ShtwHiBY4CNchY9BuVX__UAq3I-9J7ke3vl3lk_27Gp0VEcyZKQoESbZaFBRoCOVIFwbF1IfX2nHn3Ux2RR0EmsoGNETFOe50x7CaH0C3OW5zTgS5N8wp_SGCszC36KWuoUlpvfZJ1oG7NLDO52J_b8VSMcHgdHx_vzTNzW4QeaL2xsqdARgNoYgNPGbL3ZeRPGULWiwRUATG3W26HMwoCMnF2AoBJs2fOZREdNuETWIMsKo18yLwEDv36qAcLCc0YYj7XMJ1eYQ5cqy702g-vauIDQjguQkNIe48wao8WQFiTq2hcnRIDKAb_Dez3Loha6PUiMn2auenMjusCZ6eXQtG3uqwGzRbow","id":"rs_6ad156a6b1c6468e33344eb9:rs_01a141ba81957298bf4e3a32234964b0","status":"completed","summary":[],"type":"reasoning"},"output_index":3,"sequence_number":17,"type":"response.output_item.done"}
+
+event: response.output_item.added
+data: {"item":{"content":[],"id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","role":"assistant","status":"in_progress","type":"message"},"output_index":4,"sequence_number":18,"type":"response.output_item.added"}
+
+event: response.content_part.added
+data: {"content_index":0,"item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","output_index":4,"part":{"annotations":[],"logprobs":[],"text":"","type":"output_text"},"sequence_number":19,"type":"response.content_part.added"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"- **Meta's Muse","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":20,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" Wonder Full scores 56 on AA but isn't on the API - D3X","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":21,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" Solutions LABS** — https://d3x-s","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":22,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"olutions.com\n- **Muse Wonder — Meta's first frontier model, built","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":23,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"… | AI/TLDR** — https://ai-tldr.dev\n-","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":24,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" **Muse Wonder and Muse Wonder Full: Meta’s New AI Agent Models**","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":25,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" — https://datacamp.com\n- **Meta Muse Wonder: Memory,","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":26,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" Agents, Benchmarks, Price** — https://oday-bakkour.com\n","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":27,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"- **Meta's Muse Wonder Costs Exactly What Opus 5.5 Costs","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":28,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":". It Loses 9 of Meta's Own 14 Benchmarks** —","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":29,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" https://dev.to\n- **Meta Launches Muse Wonder With Premium API Pricing and","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":30,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" a Subscription-Only Full Model** — https://aiindustrytoday.com\n-","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":31,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" **Muse Wonder: Meta's Frontier Model, Price and Benchmarks** —","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":32,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" https://cellcog.ai\n- **Meta Launches AI Model Muse Wonder with","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":33,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" Subscription Plans for Enhanced Digital Assistant Capabilities** — https://news.ssbcrack.com","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":34,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"\n- **Meta Launches Muse Wonder And Muse Wonder Full AI Models - Datac","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":35,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"onomy** — https://dataconomy.com\n- **Meta Muse Wonder:","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":36,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":" Benchmarks, Pricing and Access (2026)** — https://o-mega","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":37,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":".ai\n- **Meta Releases Muse Wonder and Wonder Full, Its First Frontier Models","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":38,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"** — https://blog.quadmeup.com\n- **AI News Today","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":39,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":": Maia 300 + 5 Updates | Oct 13, 2026","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":40,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"** — https://digitalstrategy-ai.com","item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","logprobs":[],"output_index":4,"sequence_number":41,"type":"response.output_text.delta"}
+
+event: response.content_part.done
+data: {"content_index":0,"item_id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","output_index":4,"part":{"annotations":[],"logprobs":[],"text":"- **Meta's Muse Wonder Full scores 56 on AA but isn't on the API - D3X Solutions LABS** — https://d3x-solutions.com\n- **Muse Wonder — Meta's first frontier model, built… | AI/TLDR** — https://ai-tldr.dev\n- **Muse Wonder and Muse Wonder Full: Meta’s New AI Agent Models** — https://datacamp.com\n- **Meta Muse Wonder: Memory, Agents, Benchmarks, Price** — https://oday-bakkour.com\n- **Meta's Muse Wonder Costs Exactly What Opus 5.5 Costs. It Loses 9 of Meta's Own 14 Benchmarks** — https://dev.to\n- **Meta Launches Muse Wonder With Premium API Pricing and a Subscription-Only Full Model** — https://aiindustrytoday.com\n- **Muse Wonder: Meta's Frontier Model, Price and Benchmarks** — https://cellcog.ai\n- **Meta Launches AI Model Muse Wonder with Subscription Plans for Enhanced Digital Assistant Capabilities** — https://news.ssbcrack.com\n- **Meta Launches Muse Wonder And Muse Wonder Full AI Models - Dataconomy** — https://dataconomy.com\n- **Meta Muse Wonder: Benchmarks, Pricing and Access (2026)** — https://o-mega.ai\n- **Meta Releases Muse Wonder and Wonder Full, Its First Frontier Models** — https://blog.quadmeup.com\n- **AI News Today: Maia 300 + 5 Updates | Oct 13, 2026** — https://digitalstrategy-ai.com","type":"output_text"},"sequence_number":42,"type":"response.content_part.done"}
+
+event: response.output_item.done
+data: {"item":{"content":[{"annotations":[],"logprobs":[],"text":"- **Meta's Muse Wonder Full scores 56 on AA but isn't on the API - D3X Solutions LABS** — https://d3x-solutions.com\n- **Muse Wonder — Meta's first frontier model, built… | AI/TLDR** — https://ai-tldr.dev\n- **Muse Wonder and Muse Wonder Full: Meta’s New AI Agent Models** — https://datacamp.com\n- **Meta Muse Wonder: Memory, Agents, Benchmarks, Price** — https://oday-bakkour.com\n- **Meta's Muse Wonder Costs Exactly What Opus 5.5 Costs. It Loses 9 of Meta's Own 14 Benchmarks** — https://dev.to\n- **Meta Launches Muse Wonder With Premium API Pricing and a Subscription-Only Full Model** — https://aiindustrytoday.com\n- **Muse Wonder: Meta's Frontier Model, Price and Benchmarks** — https://cellcog.ai\n- **Meta Launches AI Model Muse Wonder with Subscription Plans for Enhanced Digital Assistant Capabilities** — https://news.ssbcrack.com\n- **Meta Launches Muse Wonder And Muse Wonder Full AI Models - Dataconomy** — https://dataconomy.com\n- **Meta Muse Wonder: Benchmarks, Pricing and Access (2026)** — https://o-mega.ai\n- **Meta Releases Muse Wonder and Wonder Full, Its First Frontier Models** — https://blog.quadmeup.com\n- **AI News Today: Maia 300 + 5 Updates | Oct 13, 2026** — https://digitalstrategy-ai.com","type":"output_text"}],"id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","role":"assistant","status":"completed","type":"message"},"output_index":4,"sequence_number":43,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"background":false,"completed_at":1792104105.0,"created_at":1792104102.0,"error":null,"id":"resp_6ad156a6b1c6468e33344eb9","incomplete_details":null,"instructions":"","max_tool_calls":1,"model":"muse-wonder-1.0","object":"response","output":[{"encrypted_content":"Q-PaDgFZ221pEEdUUqW03IKp-FhfFoIfTLiMJGGcAPlaF7Eh069M24-i81_wssAt2RvRsCACmN2dS9T1nPUVDi16JkxezVrepFrlKu8xqCWlKvxMg69CMU_49bSGga6yybNKbBCUSCZu31mOdsOTcv4FLUgTJxXss_FdXbeiyAocHJkGzpjbxbBtHvTAlB8bg0-IDSmFxNtbw3ucF9n44mglmDOqPp3vc2gTIjoJyPkjLqa1IfDWcAh6MhIfxLK3pmj6jZyz6RmMoZSiI7ara_CY0FN6II3bXcsUHCjqiEc54Q21t0Xty9gXMrO6ZKWQVRq_-5LbBt9pF6tGemN_sq52uM8zXmErKyaXC1PnultgNLif_7GLeZlwrH7LZ8DJiFhssdeObmpfQNnC4M6_13F0531Iuw4MA1GXS1I1lcc_ahl-WCA_ymHgiWa41IdNs0GjH0v6bu0EACaQtA8xW3jCYLjp0Hd_umI9iWgDsHPEMzJIoH5yOg-XUEU-IGKA_aboIg2UbC48AMFuZpwYYFgYc6mmIxecLMg-_rCLaPWs0YAtATsTMnukBS08DvufThRdd2DQ-3l0pD_wFZswuyuYSbnzORnKnpM0J0lcRUsODrBVeyl2LPJX8dfTXm5jzcrK8JEuKnwu0uXGOu2THQtNTKc7ya6IJqT_NH3390fWVyG3RTPexlh8Kh4t8cFfFxwC8cWv91N8vftVdHIYRdUfmJS1JykcAx3tkLr5vF0G76nDxvH36AQUqroBuh9ZHeKH-QabwAp0XGOjONFBO08kpB7zE9n2habvh9cLaUSZBnT0sDyDipwuuCLuvzZzlrBRret2J1CAyu__gWWWk7zEH9Pz-ci--0Xloo9IHQ1LVDJ0H4vDkZEtnFKK3oNTbq2Frp-DwY4vDogAgZVY8TMxBlZv_oPmK4CJpMtsdbGQgOXoIhppHuaEUFHyD-YzAbAY2iKL3aaOj6UT1NqdY96noApGvuweOP_fdzKwVhxK3VRm5hPV4IW6CknfCQB1m4Wyf_HUAUWY7KJui8zmqj98uCxa4kyp38_yfPV_sPbbklwHba50q63oRvTXvcphQatAnCyTBzZYrH_oc7hOaDFBwpaU78iU47PMdZ--86oKQnVL9XRoT6VmltaGsYSKjmnt1B8Nf_d4iF7NrTJ7I0nksGEOKQyEn-lUVkOalBS2VAyxhRrquqTZNTtXo2nSkNT7ejcdcD-IiAousyho4Kuod1OGSoAROzEFBAFNit-jcUEYt7qd96exX-P3gGL59LzbeCOpPO4xU8Wg1aMcMhCd1hj11NmoakGxLWGxblKp_3NzMw-8-5VDV9SOYnKRMevjW06Akl9kLGJ-bpvpCFovZTaNe3Pb_GeAZGAV4oiJVWqF3VfjIKprVNnewUONCBByvXuO87QtImHONw","id":"rs_01a141ba7c2276f5ade63ebceab06fdd","status":"completed","summary":[],"type":"reasoning"},{"content":[{"annotations":[],"logprobs":[],"text":"Searching for “Meta Muse Wonder Full model card” — I'll pull the top results as title + URL.","type":"output_text"}],"id":"rs_01a141ba7c8371c98978abdc186404a1","phase":"commentary","role":"assistant","status":"completed","type":"message"},{"action":{"queries":["Meta Muse Wonder Full model card"],"query":"Meta Muse Wonder Full model card","sources":[{"type":"url","url":"https://d3x-solutions.com/meta-muse-wonder-full-muse-code-only/"},{"type":"url","url":"https://ai-tldr.dev/releases/meta-muse-wonder/"},{"type":"url","url":"https://www.datacamp.com/blog/muse-wonder-and-muse-wonder-full"},{"type":"url","url":"https://oday-bakkour.com/blog/meta-muse-wonder-active-memory-active-focus"},{"type":"url","url":"https://dev.to/gabrielanhaia/metas-muse-wonder-costs-exactly-what-opus-55-costs-it-loses-9-of-metas-own-14-benchmarks-399a"},{"type":"url","url":"https://aiindustrytoday.com/news/ait-20261013-muse-wonder/"},{"type":"url","url":"https://cellcog.ai/blog/muse-wonder/"},{"type":"url","url":"https://news.ssbcrack.com/meta-launches-ai-model-muse-wonder-with-subscription-plans-for-enhanced-digital-assistant-capabilities/"},{"type":"url","url":"https://dataconomy.com/2026/10/13/meta-muse-wonder-full-ai-models/"},{"type":"url","url":"https://o-mega.ai/articles/meta-muse-wonder-benchmarks-price-and-access-2026"},{"type":"url","url":"https://blog.quadmeup.com/2026/10/13/meta-releases-muse-wonder-and-wonder-full-its-first-frontier-models/"},{"type":"url","url":"https://digitalstrategy-ai.com/2026/10/13/ai-news-today-maia-300/"}],"type":"search"},"id":"ws_call_01a141ba7ce47107a3f4f1715e4e0db0","status":"completed","type":"web_search_call"},{"encrypted_content":"Q-PaDgFaz9YlAkgrjP4do5VdYEYqbfVMO4rYYFfRLRnxUNUEZVFQnREf2MxtJHsv14P_h5rDIjXEJAQmjfQxGoc7SFhY_YmkblU26OiAAqjYpyJ04N-p6ZjjAJEvRVkvdS-gjAsvqRwBcRxL0rSirz6HTk3aklmE7VsWdnwP8_K6wl3561-EuMXFGN_qeY4qcURGZj6DQDt-n3L7eNoBDNAcQu66_ma4jSPbI5KHaTdMMQrMHPRQM4MX2yZxjHuE1x1xo6JbkXzUP3AAmxU1jGGCqZPotTJf4MUlUyxhR3o41bBRBdM5wrIcAH-ljUF7cC-TRqGdJGaRS3c2EVD5317WH0tmQjzcp_LnHxwETiEw9YgliXo_HyxmqU_eWUH6TWY5oscce6BfHC6oOjfmE5V-3syVZswlYU1lQ-aX_VnxFQ7mo-iiA3LMX1_DjOqbnNDgnaochGl22iFrzqJTuS5ugubRaiywgVrdHOoJCCoTHhkp6P4dOzxGuywGi82kvlRGT5HDjOPFn5zBfQRWgf3hDTjUXSzjSgYnMAqvpggeDcN4tN3XBULFy8YH9XkQO4oPd-jfe2PSkodV0G44ytC1M6vNVd7kqNvDGIuNtKyEyY0dXh4kUCd54q72ZZC2et9TcMvpHkFxrByj9iwGSLIbyLS4S44w_4TmxsuRXsAHMRYhiBd7LEXXR1y2-FtP7jelmVniUE0L5mKTDiLD9JmZMuGLq2PE8-9mwt1UM3SknhBk-KIWOd5c7wjl5Tv0xADpkDRQTg7zDYxDs3YexHmI8t8K-emUkLZpjelsS-3VYBM-_iXXLqAfG8-so2L40h5C7DvE0G_tv3G2kWxCw_cYPK_JjgueBZ3TdT8FcoOKsdhHu0qXljl-lPcCV_lVUx8hvgd1re4k0nwgLuulWNhNYnd41tNnQLL3byHhV0RgENoSbfuOgAVML5qM6gg5-kj6FNESbGJugrDggyCf5BstzmejpMpn7pw1sVkNc121d7APmg6ki1mGLL7wPf-qJiwA3mg8DiI0anHfgOE20Q78wTiocWpvE5EJi8FgCJSPBXZDEv5_bzEbrSlucPWwwC6PdWpDiuR8qfzIUrGBOd1DjJyaYWMmNirGBiI6Shf2Cqfs1BHuBnIV2DyUWAQnU_NHKzOb_JWkQEp0Cji8JszPG19n27f3ipd5WbX5R35IDWnrVDdVSSPvSSeGPoni1Mxqyo7TQ_wMNqK2C1FC4oUOrW_mqLQ6uvydv9DKcbZorKOzpHjDjONHCcY6H6JN2B5mfKewWSo3T-OTMCZLFkCHxa7z5Q5vfcmscMkyL05NEQLXo9TPcBe18dIi32e-E0W7ZS7K630Y9vf1npoAANCQC4PyGIqcBC8GfQsvfE1u1EfWOIvt_ltom7_udOQMBer4cLnf4R-oqLiKlg","id":"rs_01a141ba81957298bf4e3a32234964b0","status":"completed","summary":[],"type":"reasoning"},{"content":[{"annotations":[],"logprobs":[],"text":"- **Meta's Muse Wonder Full scores 56 on AA but isn't on the API - D3X Solutions LABS** — https://d3x-solutions.com\n- **Muse Wonder — Meta's first frontier model, built… | AI/TLDR** — https://ai-tldr.dev\n- **Muse Wonder and Muse Wonder Full: Meta’s New AI Agent Models** — https://datacamp.com\n- **Meta Muse Wonder: Memory, Agents, Benchmarks, Price** — https://oday-bakkour.com\n- **Meta's Muse Wonder Costs Exactly What Opus 5.5 Costs. It Loses 9 of Meta's Own 14 Benchmarks** — https://dev.to\n- **Meta Launches Muse Wonder With Premium API Pricing and a Subscription-Only Full Model** — https://aiindustrytoday.com\n- **Muse Wonder: Meta's Frontier Model, Price and Benchmarks** — https://cellcog.ai\n- **Meta Launches AI Model Muse Wonder with Subscription Plans for Enhanced Digital Assistant Capabilities** — https://news.ssbcrack.com\n- **Meta Launches Muse Wonder And Muse Wonder Full AI Models - Dataconomy** — https://dataconomy.com\n- **Meta Muse Wonder: Benchmarks, Pricing and Access (2026)** — https://o-mega.ai\n- **Meta Releases Muse Wonder and Wonder Full, Its First Frontier Models** — https://blog.quadmeup.com\n- **AI News Today: Maia 300 + 5 Updates | Oct 13, 2026** — https://digitalstrategy-ai.com","type":"output_text"}],"id":"msg_01a141ba84e970edb4cb6c9c815ad1a8","role":"assistant","status":"completed","type":"message"}],"parallel_tool_calls":true,"reasoning":{"effort":"low"},"service_tier":"auto","status":"completed","store":false,"temperature":1.0,"tool_choice":"auto","tools":[{"type":"web_search"}],"top_logprobs":0,"top_p":1.0,"truncation":"disabled","usage":{"input_tokens":2007,"input_tokens_details":{"cached_tokens":0},"output_tokens":597,"output_tokens_details":{"reasoning_tokens":169},"total_tokens":2604}},"sequence_number":44,"type":"response.completed"}
+
+

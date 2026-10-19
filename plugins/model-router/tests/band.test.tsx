@@ -111,6 +111,28 @@ describe('model-router settings buttons', () => {
     await ui.unmount()
   })
 
+  test('Migrate names the Muse windows at the 1M cap', async ($, on) => {
+    const windowsRow = {
+      id: 'windows',
+      severity: 'action',
+      text: 'no context window set for muse-wonder-1.0, muse-wonder-full-1.0',
+      actions: [{ id: 'windows', label: 'Migrate', kind: 'plugin' }, customizeAction],
+    }
+    const { toasts } = await startWithSettings($, on, [windowsRow], {
+      applied: true,
+      file: '/home/me/.claude/settings.json',
+      declared: null,
+      windows: { 'muse-wonder-1.0': 1000000, 'muse-wonder-full-1.0': 1000000 },
+    })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:windows:windows' })
+    expect(toasts[0]).toBe(
+      'Restart Claude Code to compact muse-wonder-1.0, muse-wonder-full-1.0 at 1000K (in ~/.claude/settings.json).',
+    )
+    expect(fitsToast(toasts[0]!)).toBe(true)
+    await ui.unmount()
+  })
+
   test('Update has the binary raise a window Codex raised and names the new one', async ($, on) => {
     const windowsRow = {
       id: 'windows-update',
@@ -181,6 +203,35 @@ describe('model-router settings buttons', () => {
       { id: 'windows', label: 'Migrate', kind: 'plugin' },
       { applied: true, file: '/proj/.claude/settings.local.json', windows: { 'gpt-6-astra': 258400, 'gpt-6-luna': 258400, 'gpt-6.1-sol': 475000, 'grok-4.7': 500000 } },
     ],
+    [
+      'every window set, Muse included',
+      { id: 'windows', label: 'Migrate', kind: 'plugin' },
+      {
+        applied: true,
+        file: '/proj/.claude/settings.local.json',
+        windows: {
+          'gpt-6-astra': 258400,
+          'gpt-6-luna': 258400,
+          'gpt-6.1-sol': 475000,
+          'grok-4.7': 500000,
+          'muse-wonder-1.0': 1000000,
+          'muse-wonder-full-1.0': 1000000,
+        },
+      },
+    ],
+    [
+      'the Muse windows with the GPT ones',
+      { id: 'windows', label: 'Migrate', kind: 'plugin' },
+      {
+        applied: true,
+        windows: { 'gpt-6-astra': 258400, 'gpt-6-luna': 258400, 'gpt-6.1-sol': 475000, 'muse-wonder-1.0': 1000000, 'muse-wonder-full-1.0': 1000000 },
+      },
+    ],
+    [
+      'the Muse rows added',
+      addAction,
+      { applied: true, added: ['muse-wonder-1.0', 'muse-wonder-full-1.0'], windows: { 'muse-wonder-1.0': 1000000, 'muse-wonder-full-1.0': 1000000 } },
+    ],
     ['a refusal', addAction, { applied: false, reason: 'Claude Code 2.1.200 predates per-model windows (2.1.288); update it first' }],
     ['a changed bypass', bypassAction, { status: 'changed', files: ['/home/me/.claude/settings.json', '/proj/.claude/settings.local.json'] }],
     ['a bypass with nothing to edit', bypassAction, { status: 'not-found' }],
@@ -205,6 +256,15 @@ describe('model-router settings buttons', () => {
     expect(toasts).toEqual([
       'Settings changed mid-edit, so Bypass router is not finished: try again. Changed so far: ~/.claude/settings.json',
     ])
+    await ui.unmount()
+  })
+
+  test('windows too many to name still say to restart', async ($, on) => {
+    const [, action, settings] = longest.find(([name]) => name === 'every window set, Muse included')!
+    const { toasts } = await startWithSettings($, on, [{ id: 'row', severity: 'action', text: 'row', actions: [action] }], settings)
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: `model-router:row:${action.id}` })
+    expect(toasts).toEqual(['Windows set; restart Claude Code to use them.'])
     await ui.unmount()
   })
 

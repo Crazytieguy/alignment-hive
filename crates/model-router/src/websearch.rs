@@ -14,26 +14,27 @@
 //! - GPT and open-weights origins: Codex's `/v1/alpha/search` (the endpoint
 //!   the Codex CLI's `web.run` tool uses), structured results in ~1–3s, with
 //!   the legacy LLM path plus link scraping as the fallback.
-//! - Grok origins: xAI's hosted `web_search` tool on `/v1/responses`,
-//!   harvesting the source URLs out of the streamed `web_search_call` item.
-//!   That path is strict — a search that cannot be performed is reported as a
-//!   failed search rather than quietly answered by another vendor.
+//! - Grok and Muse origins: the vendor's own hosted `web_search` tool on
+//!   `/v1/responses` (xAI's or Meta's, both through the child), harvesting the
+//!   source URLs out of the first streamed `web_search_call` search item
+//!   ([`NativeSearch`]). That path is strict — a search that cannot be
+//!   performed is reported as a failed search rather than quietly answered by
+//!   another vendor.
 
 use bytes::Bytes;
 use serde_json::{Value, json};
 
+mod native;
 mod origin;
-mod xai;
 
+#[cfg(test)]
+use native::MAX_REQUEST_ALLOWED_DOMAINS;
+pub use native::{DomainPolicy, Harvested, InvalidDomainRule, SourceHarvester};
+use native::{meta_search_request_body, xai_search_request_body};
 #[cfg(test)]
 use origin::{MAX_PENDING_TOTAL, SniffedSearch};
 pub use origin::{
     Origin, PendingKey, PendingSearches, ToolUseSniffer, declares_websearch_tool, session_id,
-};
-#[cfg(test)]
-use xai::MAX_REQUEST_ALLOWED_DOMAINS;
-pub use xai::{
-    DomainPolicy, Harvested, InvalidDomainRule, XaiSourceHarvester, xai_search_request_body,
 };
 
 /// Claude Code's fixed user-message prefix for the `WebSearch` sub-call.
@@ -142,34 +143,85 @@ fn string_list(value: Option<&Value>) -> Option<Vec<String>> {
     (!list.is_empty()).then_some(list)
 }
 
-/// Whether this family's searches run on xAI's hosted `web_search` rather
-/// than Codex's `/v1/alpha/search`.
+/// A vendor's own search, for the families that have one. Strict: no Codex
+/// search, no scrape, no Anthropic.
+///
+/// Both are the vendor's hosted `web_search` tool on the child's
+/// `/v1/responses`: streamed, harvested by [`SourceHarvester`] and read to
+/// the end. Only the request body differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeSearch {
+    /// xAI's hosted `web_search` through the child.
+    Xai,
+    /// Meta's hosted `web_search` through the child.
+    Meta,
+}
+
+impl NativeSearch {
+    /// The vendor's name, for the failure text the model reads.
+    #[must_use]
+    pub const fn vendor(self) -> &'static str {
+        match self {
+            Self::Xai => "xAI",
+            Self::Meta => "Meta",
+        }
+    }
+
+    /// The backend's name in logs.
+    #[must_use]
+    pub const fn backend(self) -> &'static str {
+        match self {
+            Self::Xai => "xai-web-search",
+            Self::Meta => "meta-web-search",
+        }
+    }
+
+    /// The `/v1/responses` body that runs one hosted search for `subcall`.
+    #[must_use]
+    pub fn request_body(
+        self,
+        subcall: &Subcall,
+        policy: &DomainPolicy,
+        upstream_model: &str,
+    ) -> Value {
+        match self {
+            Self::Xai => xai_search_request_body(subcall, policy, upstream_model),
+            Self::Meta => meta_search_request_body(subcall, upstream_model),
+        }
+    }
+}
+
+/// The family's own search, or `None` for the families searched through
+/// Codex's `/v1/alpha/search` (with the LLM scrape path as fallback).
 ///
 /// Matched exhaustively on purpose: a new family must decide which backend it
 /// belongs to rather than silently inheriting the Codex one.
 #[must_use]
-pub fn uses_native_search(family: crate::config::ModelFamily) -> bool {
+pub const fn native_search(family: crate::config::ModelFamily) -> Option<NativeSearch> {
+    use crate::config::ModelFamily;
     match family {
-        crate::config::ModelFamily::Grok => true,
-        crate::config::ModelFamily::Gpt | crate::config::ModelFamily::OpenAiCompat => false,
+        ModelFamily::Gpt | ModelFamily::OpenAiCompat => None,
+        ModelFamily::Grok => Some(NativeSearch::Xai),
+        ModelFamily::Muse => Some(NativeSearch::Meta),
     }
 }
 
-/// The route whose family sends this sub-call to xAI's own search, if any.
-/// Keyed off the origin, never the carrier: the carrying request's model is
-/// the harness's small-fast pick, not the requesting agent's choice. Only
-/// with no correlation at all does the carrier decide.
+/// The route whose family sends this sub-call to its own vendor's search,
+/// with that search, if any. Keyed off the origin, never the carrier: the
+/// carrying request's model is the harness's small-fast pick, not the
+/// requesting agent's choice. Only with no correlation at all does the
+/// carrier decide.
 pub fn native_search_route<'a>(
     origin: Option<&Origin>,
     carrier: &'a crate::config::ModelRoute,
     lookup: impl FnOnce(&str) -> Option<&'a crate::config::ModelRoute>,
-) -> Option<&'a crate::config::ModelRoute> {
-    let is_native = |route: &&'a crate::config::ModelRoute| uses_native_search(route.family);
-    match origin {
-        Some(Origin::Gpt { routing_id }) => lookup(routing_id).filter(is_native),
-        Some(Origin::Claude { .. }) => None,
-        None => Some(carrier).filter(is_native),
-    }
+) -> Option<(&'a crate::config::ModelRoute, NativeSearch)> {
+    let route = match origin {
+        Some(Origin::Gpt { routing_id }) => lookup(routing_id)?,
+        Some(Origin::Claude { .. }) => return None,
+        None => carrier,
+    };
+    native_search(route.family).map(|native| (route, native))
 }
 
 /// The Codex slug the alpha-search backend is addressed with when the
@@ -1198,13 +1250,14 @@ mod tests {
         assert!(pending.consume(&newest).is_some());
     }
 
-    // ---- xAI-native search ----
+    // ---- Vendor-native search ----
 
     const BASIC_FIXTURE: &str = include_str!("testdata/xai-websearch-basic.sse");
     const DATA_ONLY_FIXTURE: &str = include_str!("testdata/xai-websearch-dataonly.sse");
+    const META_FIXTURE: &str = include_str!("testdata/meta-websearch-basic.sse");
 
     fn harvest_all(fixture: &str, policy: DomainPolicy, chunk_size: usize) -> Option<Harvested> {
-        let mut harvester = XaiSourceHarvester::new(policy);
+        let mut harvester = SourceHarvester::new(policy);
         let mut outcome = None;
         for chunk in fixture.as_bytes().chunks(chunk_size) {
             if let Some(found) = harvester.push(chunk) {
@@ -1240,6 +1293,42 @@ mod tests {
     }
 
     #[test]
+    fn harvests_meta_sources_from_the_captured_stream_whatever_the_chunking() {
+        for chunk_size in [7, 64 * 1024] {
+            let Some(Harvested::Sources(links)) =
+                harvest_all(META_FIXTURE, DomainPolicy::default(), chunk_size)
+            else {
+                panic!("expected a harvest from the Meta capture ({chunk_size}-byte chunks)");
+            };
+            assert_eq!(links.len(), 12);
+            assert_eq!(
+                links[0].url,
+                "https://d3x-solutions.com/meta-muse-wonder-full-muse-code-only/"
+            );
+            assert!(links.iter().all(|link| link.title == link.url));
+        }
+        // Titles appear only in the answer, after the search item the harvest
+        // ends at; they are not waited for.
+        let search_item = META_FIXTURE.find(r#""sources":["#).unwrap();
+        let first_title = META_FIXTURE.find("D3X Solutions LABS").unwrap();
+        assert!(search_item < first_title);
+        // A blocked domain is filtered out of Meta's sources as out of xAI's.
+        let Some(Harvested::Sources(links)) =
+            harvest_all(META_FIXTURE, policy(&[], &["dev.to"]).unwrap(), 64)
+        else {
+            panic!("expected a harvest");
+        };
+        assert_eq!(links.len(), 11);
+        assert!(links.iter().all(|link| !link.url.contains("dev.to")));
+        // An allow-list nothing in the search matches leaves no harvest: the
+        // stream runs out instead (a failed search, never an unfiltered one).
+        assert_eq!(
+            harvest_all(META_FIXTURE, policy(&["docs.rs"], &[]).unwrap(), 64),
+            Some(Harvested::Ended("stream completed without sources"))
+        );
+    }
+
+    #[test]
     fn harvests_from_data_only_events_and_joins_split_data_lines() {
         let Some(Harvested::Sources(links)) =
             harvest_all(DATA_ONLY_FIXTURE, DomainPolicy::default(), 5)
@@ -1261,6 +1350,15 @@ mod tests {
             sse_event(&json!({"type": "response.output_item.done", "item": {
                 "type": "web_search_call", "status": "completed",
                 "action": {"type": "open_page", "url": "https://a.example"}}})),
+            // Only a search action's sources are results, whatever else an
+            // action might carry.
+            sse_event(&json!({"type": "response.output_item.done", "item": {
+                "type": "web_search_call", "status": "completed",
+                "action": {"type": "open_page", "url": "https://a.example",
+                           "sources": [{"type": "url", "url": "https://opened.example"}]}}})),
+            sse_event(&json!({"type": "response.output_item.done", "item": {
+                "type": "web_search_call", "status": "completed",
+                "action": {"sources": [{"type": "url", "url": "https://untyped.example"}]}}})),
             sse_event(&search_item(&[
                 json!({"type": "url", "url": "https://first.example/1"}),
             ])),
@@ -1360,7 +1458,7 @@ mod tests {
 
     #[test]
     fn oversized_streams_end_the_harvest() {
-        let mut harvester = XaiSourceHarvester::new(DomainPolicy::default());
+        let mut harvester = SourceHarvester::new(DomainPolicy::default());
         let big = vec![b'x'; crate::sse::MAX_SCAN_BUFFER_BYTES + 1];
         assert_eq!(
             harvester.push(&big),
@@ -1385,6 +1483,36 @@ mod tests {
         assert_eq!(body["stream"], true);
         // A short allow-list is sent as a filter; the sub-call fixture has one.
         assert_eq!(body["tools"][0]["filters"]["allowed_domains"][0], "docs.rs");
+        assert_eq!(
+            NativeSearch::Xai.request_body(&subcall, &policy, "grok-4.5"),
+            body
+        );
+    }
+
+    #[test]
+    fn meta_body_is_the_measured_shape_with_no_filter_and_low_effort() {
+        let mut subcall = detect(&subcall_body(true)).unwrap();
+        subcall.blocked_domains = Some(vec!["blocked.example".into()]);
+        let policy = DomainPolicy::from_subcall(&subcall).unwrap();
+        // A pinned effort suffix is dropped: the search runs at low effort.
+        let body = NativeSearch::Meta.request_body(&subcall, &policy, "muse-wonder-1.0(high)");
+        assert_eq!(body["model"], "muse-wonder-1.0");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(
+            body["input"][0]["content"],
+            "Search the web for: rust axum. Return the top results as a list of title + URL."
+        );
+        assert_eq!(body["tools"], json!([{"type": "web_search"}]));
+        // Meta 400s anything but auto.
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["max_tool_calls"], 1);
+        assert_eq!(body["include"], json!(["web_search_call.action.sources"]));
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["stream"], true);
+        // Meta has no domain filter: neither list goes upstream, both are
+        // enforced on the harvest.
+        assert!(!body.to_string().contains("docs.rs"));
+        assert!(!body.to_string().contains("blocked.example"));
     }
 
     #[test]
@@ -1639,7 +1767,7 @@ mod tests {
             native_search_route(origin, carrier, |routing_id| {
                 known.iter().find(|route| route.routing_id == routing_id)
             })
-            .map(|route| route.routing_id.clone())
+            .map(|(route, _)| route.routing_id.clone())
         }
         let route = |routing_id: &str, family| ModelRoute {
             routing_id: routing_id.to_string(),
@@ -1649,8 +1777,9 @@ mod tests {
         let known = [
             route("grok-4.5", ModelFamily::Grok),
             route("gpt-5.6-sol", ModelFamily::Gpt),
+            route("muse-wonder-1.0", ModelFamily::Muse),
         ];
-        let (grok, gpt) = (&known[0], &known[1]);
+        let (grok, gpt, muse) = (&known[0], &known[1], &known[2]);
         let resolve = |origin: Option<Origin>, carrier| resolve(&known, origin.as_ref(), carrier);
         let gpt_origin = |routing_id: &str| {
             Some(Origin::Gpt {
@@ -1658,11 +1787,21 @@ mod tests {
             })
         };
         let is = |routing_id: &str| Some(routing_id.to_string());
-        // A Grok origin decides, whatever it is riding on.
+        // A Grok or Muse origin decides, whatever it is riding on.
         assert_eq!(resolve(gpt_origin("grok-4.5"), gpt), is("grok-4.5"));
+        assert_eq!(resolve(gpt_origin("grok-4.5"), muse), is("grok-4.5"));
+        assert_eq!(
+            resolve(gpt_origin("muse-wonder-1.0"), gpt),
+            is("muse-wonder-1.0")
+        );
+        assert_eq!(
+            resolve(gpt_origin("muse-wonder-1.0"), grok),
+            is("muse-wonder-1.0")
+        );
         // A GPT origin never does — not even on a Grok carrier, and the
         // carrier's own arguments are left to the existing arms.
         assert_eq!(resolve(gpt_origin("gpt-5.6-sol"), grok), None);
+        assert_eq!(resolve(gpt_origin("gpt-5.6-sol"), muse), None);
         // An origin whose route has left the config inherits nothing.
         assert_eq!(resolve(gpt_origin("vanished"), grok), None);
         // A Claude origin never reaches xAI, even carried by a Grok route
@@ -1676,8 +1815,31 @@ mod tests {
             ),
             None
         );
+        assert_eq!(
+            resolve(
+                Some(Origin::Claude {
+                    model: "claude-haiku-4-5".into()
+                }),
+                muse
+            ),
+            None
+        );
         // With no correlation, the carrier is the only signal there is.
         assert_eq!(resolve(None, grok), is("grok-4.5"));
+        assert_eq!(resolve(None, muse), is("muse-wonder-1.0"));
         assert_eq!(resolve(None, gpt), None);
+    }
+
+    #[test]
+    fn grok_and_muse_searches_stay_with_their_own_vendor() {
+        use crate::config::ModelFamily;
+        for (family, native) in [
+            (ModelFamily::Gpt, None),
+            (ModelFamily::OpenAiCompat, None),
+            (ModelFamily::Grok, Some(NativeSearch::Xai)),
+            (ModelFamily::Muse, Some(NativeSearch::Meta)),
+        ] {
+            assert_eq!(native_search(family), native, "{family:?}");
+        }
     }
 }

@@ -12,7 +12,7 @@ use axum::response::Response;
 use axum::{Router, routing::any};
 use futures_util::StreamExt;
 use model_router::config::{
-    CaptureConfig, Config, ModelRoute, UpstreamConfig, UpstreamMode, XaiSearchLimits,
+    CaptureConfig, Config, ModelRoute, NativeSearchLimits, UpstreamConfig, UpstreamMode,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
@@ -2145,7 +2145,7 @@ async fn a_timed_out_search_still_reads_its_stream_to_the_end() {
     }
     let (cpa_address, _) = spawn_fake(cpa).await;
     let app = model_router::proxy::app(Config {
-        xai_search: XaiSearchLimits {
+        native_search: NativeSearchLimits {
             harvest_timeout: Duration::from_millis(100),
             ..Default::default()
         },
@@ -2409,48 +2409,81 @@ async fn gpt_turn_drops_tool_schema_patterns_the_codex_validator_rejects() {
     assert_eq!(forwarded[0].body, claude_body.as_bytes());
 }
 
-/// A GPT compaction request keeps its tools but must be answered in text:
-/// Claude Code's compaction header turns tool use off, and only there.
+/// A compaction request keeps its tools but must be answered in text:
+/// Claude Code's compaction header turns tool use off, and only there, and
+/// only for Codex-native GPT models and Grok. An openai-compat host, or a
+/// hand-written `gpt` route to another model, gets the request as sent, and
+/// Muse accepts no `tool_choice` but `auto`.
 #[tokio::test]
-async fn gpt_compaction_request_is_answered_without_tools() {
+async fn compaction_is_answered_without_tools_only_on_codex_native_gpt_and_grok() {
     fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
         plain_message_response()
     }
     let (cpa_address, cpa_observed) = spawn_fake(handler).await;
-    let app = model_router::proxy::app(websearch_config(cpa_address))
-        .await
-        .unwrap();
-    let body = serde_json::json!({
-        "model": "claude-gpt-test", "max_tokens": 16, "tools": artifact_tools(),
-        "messages": [{"role": "user", "content": "Summarize the conversation."}],
-    })
-    .to_string();
-    for compaction in [true, false] {
-        let mut request = Request::builder()
-            .method("POST")
-            .uri("/v1/messages")
-            .header("content-type", "application/json");
-        if compaction {
-            request = request.header("x-claude-code-compaction", "auto");
+    let auth = muse_auth_dir();
+    let mut config = muse_config(cpa_address, Some(auth.path()));
+    config.models.extend([
+        ModelRoute {
+            routing_id: "gpt-6-astra".to_string(),
+            upstream: "cliproxy".to_string(),
+            upstream_model: "gpt-6-astra".to_string(),
+            display_name: "GPT-6 Astra".to_string(),
+            ..Default::default()
+        },
+        ModelRoute {
+            routing_id: "kimi-k3".to_string(),
+            upstream: "cliproxy".to_string(),
+            upstream_model: "openai-compat--kimi-k3".to_string(),
+            display_name: "Kimi K3".to_string(),
+            family: model_router::config::ModelFamily::OpenAiCompat,
+            ..Default::default()
+        },
+    ]);
+    let app = model_router::proxy::app(config).await.unwrap();
+    let cases = [
+        ("gpt-6-astra", true),
+        ("grok-4.5", true),
+        // A hand-written `gpt` route to a model outside the Codex list.
+        ("claude-gpt-test", false),
+        ("kimi-k3", false),
+        ("muse-wonder-1.0", false),
+    ];
+    for (model, _) in cases {
+        let body = serde_json::json!({
+            "model": model, "max_tokens": 16, "tools": artifact_tools(),
+            "messages": [{"role": "user", "content": "Summarize the conversation."}],
+        })
+        .to_string();
+        for compaction in [true, false] {
+            let headers: &[(&str, &str)] = if compaction {
+                &[("x-claude-code-compaction", "auto")]
+            } else {
+                &[]
+            };
+            let (status, response) = send(&app, body.clone(), headers).await;
+            assert_eq!(status, StatusCode::OK, "{model}: {response}");
         }
-        let response = app
-            .clone()
-            .oneshot(request.body(Body::from(body.clone())).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
     }
     let forwarded = cpa_observed.lock().await;
-    let documents: Vec<serde_json::Value> = forwarded
-        .iter()
-        .map(|request| serde_json::from_slice(&request.body).unwrap())
-        .collect();
-    assert_eq!(
-        documents[0]["tool_choice"],
-        serde_json::json!({"type": "none"})
-    );
-    assert_eq!(documents[0]["tools"].as_array().unwrap().len(), 2);
-    assert!(documents[1].get("tool_choice").is_none());
+    assert_eq!(forwarded.len(), cases.len() * 2);
+    for ((model, forced), pair) in cases.iter().zip(forwarded.chunks(2)) {
+        let compaction: serde_json::Value = serde_json::from_slice(&pair[0].body).unwrap();
+        let turn: serde_json::Value = serde_json::from_slice(&pair[1].body).unwrap();
+        if *forced {
+            assert_eq!(
+                compaction["tool_choice"],
+                serde_json::json!({"type": "none"}),
+                "{model}"
+            );
+        } else {
+            assert!(
+                compaction.get("tool_choice").is_none(),
+                "{model}: {compaction}"
+            );
+        }
+        assert_eq!(compaction["tools"].as_array().unwrap().len(), 2, "{model}");
+        assert!(turn.get("tool_choice").is_none(), "{model}");
+    }
 }
 
 /// A forced WebSearch sub-call from a GPT-origin agent, arriving on the
@@ -2542,4 +2575,1042 @@ async fn gpt_origin_forced_subcall_fallback_drops_patterns_without_identity() {
     let properties = &tools[2]["input_schema"]["properties"];
     assert!(properties["field"].get("pattern").is_none());
     assert_eq!(properties["doc_id"]["pattern"], ARTIFACT_DOC_ID_PATTERN);
+}
+
+// ---- Muse (Meta) family ----
+
+/// A fresh auth dir holding one Meta login, `login`.
+fn muse_auth_dir_with(login: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("meta-a@example.com-0123456789abcdef.json"),
+        login,
+    )
+    .unwrap();
+    dir
+}
+
+/// A fresh auth dir holding a Meta login as `CLIProxyAPI` mints it (no
+/// `headers`).
+fn muse_auth_dir() -> tempfile::TempDir {
+    muse_auth_dir_with(r#"{"type":"meta","auth_kind":"oauth","api_key":"k","access_token":"k"}"#)
+}
+
+/// The built-in Muse routes beside Grok and GPT ones, with the Muse gate
+/// reading `auth_dir`.
+fn muse_config(fake_address: std::net::SocketAddr, auth_dir: Option<&std::path::Path>) -> Config {
+    let mut config = grok_websearch_config(fake_address);
+    config.muse.enabled = true;
+    config.auth_dir = auth_dir.map(std::path::Path::to_path_buf);
+    config
+}
+
+/// Sends one `/v1/messages` request and returns its status and body.
+async fn send(app: &axum::Router, body: String, headers: &[(&str, &str)]) -> (StatusCode, String) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+fn effort_body(model: &str) -> String {
+    serde_json::json!({
+        "model": model, "max_tokens": 16,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "high"},
+        "messages": [{"role": "user", "content": "hello"}],
+    })
+    .to_string()
+}
+
+/// The Meta path maps `output_config.effort` to `reasoning.effort` itself,
+/// so a Muse route forwards it untouched under the bare model ID — while
+/// xAI, which drops the field, gets the effort in the model ID.
+#[tokio::test]
+async fn muse_route_forwards_effort_as_output_config_and_grok_as_a_suffix() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let auth = muse_auth_dir();
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+
+    let (status, _) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&app, effort_body("grok-4.5"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let forwarded = cpa_observed.lock().await;
+    let documents: Vec<serde_json::Value> = forwarded
+        .iter()
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect();
+    assert_eq!(documents[0]["model"], "muse-wonder-1.0");
+    assert_eq!(documents[0]["output_config"]["effort"], "high");
+    assert_eq!(documents[0]["thinking"]["type"], "adaptive");
+    assert!(
+        documents[0]["system"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Muse Wonder"),
+        "{}",
+        documents[0]["system"]
+    );
+    assert_eq!(documents[1]["model"], "grok-4.5(high)");
+}
+
+/// Without a Meta login, or while one carries the Contributor header, a Muse
+/// request is refused visibly — in Anthropic's error format, naming the fix —
+/// and nothing reaches the child. Other families are unaffected.
+#[tokio::test]
+async fn muse_requests_are_refused_without_a_meta_login_free_of_the_contributor_header() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let auth = tempfile::tempdir().unwrap();
+    let refused = |body: &str, needle: &str| {
+        let error: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(error["type"], "error", "{body}");
+        assert_eq!(error["error"]["type"], "invalid_request_error", "{body}");
+        let message = error["error"]["message"].as_str().unwrap();
+        assert!(message.contains("Contributor-mode"), "{message}");
+        assert!(message.contains(needle), "{message}");
+    };
+
+    // No auth dir to vouch for the login at all (a non-managed upstream).
+    let app = model_router::proxy::app(muse_config(cpa_address, None))
+        .await
+        .unwrap();
+    let (status, body) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    refused(&body, "managed");
+
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    // No Meta login yet.
+    let (status, body) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    refused(&body, "model-router login muse");
+
+    // A login carrying the Contributor header, even set to "0". The gate
+    // reads the directory per request, so no restart is involved.
+    let login = auth.path().join("meta-a@example.com-0123456789abcdef.json");
+    std::fs::write(
+        &login,
+        r#"{"type":"meta","api_key":"k","headers":{"X-Tbh-Contributor-Mode":"0"}}"#,
+    )
+    .unwrap();
+    let (status, body) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    refused(&body, "remove it from the login's");
+    assert!(
+        cpa_observed.lock().await.is_empty(),
+        "a refused request must not reach the child"
+    );
+
+    // GPT and Grok routes never wait on the Meta login.
+    let (status, _) = send(&app, effort_body("claude-gpt-test"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&app, effort_body("grok-4.5"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The child may still hold the header after the fix, so the refusal
+    // stays until a restart.
+    let before = r#"{"type":"meta","api_key":"k"}"#;
+    std::fs::write(&login, before).unwrap();
+    let (status, body) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    refused(&body, "model-router service restart");
+
+    // After the restart the login as the child mints it lets the request
+    // through, under the plain model ID, and the router adds no Contributor
+    // header of its own.
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    let (status, _) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let forwarded = cpa_observed.lock().await;
+    assert_eq!(forwarded.len(), 3);
+    let document: serde_json::Value = serde_json::from_slice(&forwarded[2].body).unwrap();
+    assert_eq!(document["model"], "muse-wonder-1.0");
+    assert!(
+        !forwarded[2]
+            .headers
+            .keys()
+            .any(|name| name.as_str().starts_with("x-tbh-")),
+        "{:?}",
+        forwarded[2].headers
+    );
+    assert_eq!(std::fs::read_to_string(&login).unwrap(), before);
+}
+
+/// The Contributor trigger header the router sends the child in Contributor
+/// mode (`muse::CONTRIBUTOR_TRIGGER`).
+const CONTRIBUTOR_TRIGGER: &str = "x-model-router-muse-contributor";
+
+/// A Meta login carrying the Contributor relay, as `sync_relay` writes it.
+const RELAYED_META_LOGIN: &str = r#"{"type":"meta","api_key":"k","headers":{"X-Tbh-Contributor-Mode":"$x-model-router-muse-contributor"}}"#;
+
+/// With `[muse] contributor = true`, a Muse request goes out under the
+/// `-contributor` model ID with the trigger the login's relay turns into
+/// Muse Code's header, once every Meta login relays it. Standard mode on the
+/// same relayed login refuses, and never sends the trigger, not even one a
+/// client supplied.
+#[tokio::test]
+async fn contributor_mode_sends_the_contributor_id_and_trigger_and_standard_mode_never_does() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let auth = muse_auth_dir();
+    let contributor = |auth: &std::path::Path| {
+        let mut config = muse_config(cpa_address, Some(auth));
+        config.muse.contributor = true;
+        config
+    };
+
+    // A minted login has no relay yet: refused, naming the fix.
+    let app = model_router::proxy::app(contributor(auth.path()))
+        .await
+        .unwrap();
+    let (status, body) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Contributor mode"), "{body}");
+    assert!(body.contains("service restart"), "{body}");
+    assert!(cpa_observed.lock().await.is_empty());
+
+    // With the relay: the routing ID stays, the upstream ID is the
+    // -contributor one, and the trigger is on.
+    let relayed = muse_auth_dir_with(RELAYED_META_LOGIN);
+    let app = model_router::proxy::app(contributor(relayed.path()))
+        .await
+        .unwrap();
+    let (status, body) = send(&app, effort_body("muse-wonder-full-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Other families carry the trigger too; only a Meta login relays it.
+    let (status, _) = send(&app, effort_body("grok-4.5"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    {
+        let forwarded = cpa_observed.lock().await;
+        assert_eq!(forwarded.len(), 2);
+        let document: serde_json::Value = serde_json::from_slice(&forwarded[0].body).unwrap();
+        assert_eq!(document["model"], "muse-wonder-full-1.0-contributor");
+        assert_eq!(forwarded[0].headers[CONTRIBUTOR_TRIGGER], "1");
+        assert_eq!(forwarded[1].headers[CONTRIBUTOR_TRIGGER], "1");
+        assert!(
+            !forwarded[0]
+                .headers
+                .keys()
+                .any(|name| name.as_str().starts_with("x-tbh-")),
+            "the header itself is the child's to set"
+        );
+    }
+
+    // Switched back to Standard mode without the restart that removes the
+    // relay: Muse is refused, and nothing the router sends carries the
+    // trigger, not even a client's own.
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(relayed.path())))
+        .await
+        .unwrap();
+    let (status, body) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("remove the relay"), "{body}");
+    let (status, _) = send(&app, effort_body("grok-4.5"), &[(CONTRIBUTOR_TRIGGER, "1")]).await;
+    assert_eq!(status, StatusCode::OK);
+    // Once the relay is gone, Muse goes out in Standard mode again.
+    let (status, _) = send(
+        &app,
+        effort_body("muse-wonder-1.0"),
+        &[(CONTRIBUTOR_TRIGGER, "1")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    std::fs::write(
+        relayed
+            .path()
+            .join("meta-a@example.com-0123456789abcdef.json"),
+        r#"{"type":"meta","api_key":"k"}"#,
+    )
+    .unwrap();
+    let (status, _) = send(
+        &app,
+        effort_body("muse-wonder-1.0"),
+        &[(CONTRIBUTOR_TRIGGER, "1")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let forwarded = cpa_observed.lock().await;
+    assert_eq!(forwarded.len(), 4);
+    for request in &forwarded[2..] {
+        assert!(
+            !request.headers.contains_key(CONTRIBUTOR_TRIGGER),
+            "{:?}",
+            request.headers
+        );
+    }
+    let document: serde_json::Value = serde_json::from_slice(&forwarded[3].body).unwrap();
+    assert_eq!(document["model"], "muse-wonder-1.0");
+}
+
+/// A Muse agent's Meta search in Contributor mode is Contributor traffic
+/// too: the -contributor ID, with the trigger.
+#[tokio::test]
+async fn contributor_mode_meta_search_uses_the_contributor_id_and_trigger() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => meta_search_sse(false),
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let auth = muse_auth_dir_with(RELAYED_META_LOGIN);
+    let mut config = muse_config(cpa_address, Some(auth.path()));
+    config.muse.contributor = true;
+    let app = model_router::proxy::app(config).await.unwrap();
+    let body = turn_then_subcall(app, "muse-wonder-1.0", "muse-wonder-1.0").await;
+    assert!(
+        body.contains("https://d3x-solutions.com/meta-muse-wonder-full-muse-code-only/"),
+        "{body}"
+    );
+    let forwarded = cpa_observed.lock().await;
+    let search = forwarded
+        .iter()
+        .find(|request| request.uri == "/v1/responses")
+        .expect("a Meta search");
+    let document: serde_json::Value = serde_json::from_slice(&search.body).unwrap();
+    assert_eq!(document["model"], "muse-wonder-1.0-contributor");
+    assert_eq!(search.headers[CONTRIBUTOR_TRIGGER], "1");
+}
+
+/// The byte-faithful Meta search stream (see `src/testdata/README.md`).
+const META_SEARCH_SSE: &str = include_str!("../src/testdata/meta-websearch-basic.sse");
+
+/// The capture as a child would deliver it: in 1 KB pieces.
+fn meta_search_sse(hold_open: bool) -> Response {
+    let chunks = META_SEARCH_SSE
+        .as_bytes()
+        .chunks(1024)
+        .map(Bytes::copy_from_slice)
+        .collect();
+    sse_response(chunks, hold_open)
+}
+
+/// The Meta search body, as measured to work.
+fn assert_meta_search_body(parts: &axum::http::request::Parts, body: &Bytes) {
+    let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+    assert_eq!(document["model"], "muse-wonder-1.0");
+    assert_eq!(document["tools"][0]["type"], "web_search");
+    assert_eq!(document["tool_choice"], "auto");
+    assert_eq!(document["max_tool_calls"], 1);
+    assert_eq!(document["include"][0], "web_search_call.action.sources");
+    assert_eq!(document["stream"], true);
+    assert!(
+        document["input"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("bun release notes")
+    );
+    assert_eq!(parts.headers["authorization"], "Bearer gateway-secret");
+}
+
+/// A Muse agent's search is answered from Meta's hosted `web_search` on the
+/// child — never Codex's alpha search, xAI's, or Anthropic — whichever model
+/// carries the sub-call.
+#[tokio::test]
+async fn muse_origin_websearch_is_answered_from_meta_native_search() {
+    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => {
+                assert_meta_search_body(parts, body);
+                meta_search_sse(false)
+            }
+            path => panic!("a Muse-origin search must not reach {path}"),
+        }
+    }
+    fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!("Anthropic must not be called, got {}", parts.uri.path());
+    }
+    let auth = muse_auth_dir();
+    // Carried by a Claude model (the Claude branch), and by GPT and Grok
+    // routes (the routed branch): the origin decides every time.
+    for carrier in ["claude-sonnet-4-5", "claude-gpt-test", "grok-4.5"] {
+        let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+        let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
+        let config = Config {
+            anthropic_upstream_base: format!("http://{anthropic_address}"),
+            ..muse_config(cpa_address, Some(auth.path()))
+        };
+        let app = model_router::proxy::app(config).await.unwrap();
+        let body = turn_then_subcall(app, "muse-wonder-1.0", carrier).await;
+
+        assert!(
+            body.contains(r#""type":"web_search_tool_result""#),
+            "{carrier}"
+        );
+        assert!(
+            !body.contains("web_search_tool_result_error"),
+            "{carrier}: {body}"
+        );
+        assert!(
+            body.contains("https://d3x-solutions.com/meta-muse-wonder-full-muse-code-only/"),
+            "{carrier}: {body}"
+        );
+        assert!(
+            body.contains("https://digitalstrategy-ai.com/2026/10/13/ai-news-today-maia-300/"),
+            "{carrier}: {body}"
+        );
+        // Meta's sources carry no titles: the URL is its own label, and the
+        // answer text (where the titles are) never reaches the result.
+        assert!(
+            body.contains(r#""title":"https://ai-tldr.dev/releases/meta-muse-wonder/""#),
+            "{carrier}: {body}"
+        );
+        assert!(!body.contains("D3X Solutions LABS"), "{carrier}");
+        assert_eq!(anthropic_observed.lock().await.len(), 0, "{carrier}");
+        assert_eq!(
+            observed_paths(&cpa_observed.lock().await),
+            ["/v1/messages", "/v1/responses"],
+            "{carrier}: the search goes to the child's /v1/responses and nowhere else"
+        );
+    }
+}
+
+/// A Meta search that errors is reported as a failed search, naming Meta. It
+/// must not fall back to alpha search, xAI, the origin route, or Anthropic.
+#[tokio::test]
+async fn muse_origin_websearch_failure_is_visible_and_never_falls_back() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => {
+                let mut response = Response::new(Body::from("upstream exploded"));
+                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                response
+            }
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!("Anthropic must not be called, got {}", parts.uri.path());
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
+    let auth = muse_auth_dir();
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..muse_config(cpa_address, Some(auth.path()))
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let body = turn_then_subcall(app, "muse-wonder-1.0", "claude-sonnet-4-5").await;
+
+    assert!(body.contains("web_search_tool_result_error"), "{body}");
+    assert!(body.contains(r#""error_code":"unavailable""#), "{body}");
+    assert!(body.contains("Meta search returned HTTP 500"), "{body}");
+    assert!(!body.contains("web_search_requests"));
+    assert_eq!(anthropic_observed.lock().await.len(), 0);
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/messages", "/v1/responses"],
+        "no alpha/search, xAI or scrape fallback is permitted"
+    );
+}
+
+/// The sub-call carrying a Muse agent's search may be a Claude request the
+/// Muse gate never saw, so the Meta search passes the gate itself: once a
+/// Meta login carries the Contributor header, nothing reaches Meta.
+#[tokio::test]
+async fn a_muse_origin_search_is_refused_by_the_muse_gate() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), false),
+            path => panic!("a refused search must not reach {path}"),
+        }
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let auth = muse_auth_dir();
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    // The Muse turn passes the gate and records the origin...
+    let (status, _) = send(&app, websearch_declaring_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    // ...then the login gains the header before the search arrives.
+    std::fs::write(
+        auth.path().join("meta-a@example.com-0123456789abcdef.json"),
+        r#"{"type":"meta","api_key":"k","headers":{"X-Tbh-Contributor-Mode":"0"}}"#,
+    )
+    .unwrap();
+    let (status, body) = send(&app, origin_subcall_body("claude-sonnet-4-5"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("web_search_tool_result_error"), "{body}");
+    assert!(body.contains("Contributor-mode"), "{body}");
+    assert_eq!(observed_paths(&cpa_observed.lock().await), ["/v1/messages"]);
+}
+
+static META_TAIL_CONSUMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The answer arrives at the harvest, and the rest of Meta's stream is still
+/// read to its end, as xAI's is.
+#[tokio::test]
+async fn a_meta_search_is_answered_at_the_harvest_and_the_tail_is_consumed() {
+    fn cpa(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => {
+                // The capture up to and including the completed search item
+                // (the first event carrying sources).
+                let item = META_SEARCH_SSE.find(r#""sources":["#).unwrap();
+                let end = item + META_SEARCH_SSE[item..].find("\n\n").unwrap() + 2;
+                sse_with_observable_tail(
+                    vec![Bytes::from_static(&META_SEARCH_SSE.as_bytes()[..end])],
+                    Duration::ZERO,
+                    Duration::from_millis(300),
+                    &META_TAIL_CONSUMED,
+                )
+            }
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    let (cpa_address, _) = spawn_fake(cpa).await;
+    let auth = muse_auth_dir();
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    let keepalive = app.clone();
+    let body = turn_then_subcall(app, "muse-wonder-1.0", "claude-sonnet-4-5").await;
+    assert!(
+        body.contains("https://cellcog.ai/blog/muse-wonder/"),
+        "{body}"
+    );
+    assert!(
+        wait_for(&META_TAIL_CONSUMED, Duration::from_secs(5)).await,
+        "the stream tail was never consumed: the connection was abandoned"
+    );
+    drop(keepalive);
+}
+
+/// With no observed origin, a sub-call carried by a Muse route is the Muse
+/// agent's own: Meta's search answers it, not alpha search.
+#[tokio::test]
+async fn an_uncorrelated_subcall_on_a_muse_carrier_is_answered_by_meta() {
+    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/responses" => {
+                assert_meta_search_body(parts, body);
+                meta_search_sse(false)
+            }
+            path => panic!("only Meta's search may be reached, got {path}"),
+        }
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let auth = muse_auth_dir();
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    let (status, body) = send(&app, origin_subcall_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("web_search_tool_result_error"), "{body}");
+    assert!(body.contains("https://www.datacamp.com/blog/"), "{body}");
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/responses"]
+    );
+}
+
+/// `[web-search] mode = "off"` stops the GPT-side interception only: a Muse
+/// agent's search still goes to Meta's search whatever carries it, never to
+/// Anthropic or Codex, while a GPT agent's search passes through untouched.
+#[tokio::test]
+async fn muse_origin_websearch_stays_with_meta_when_search_is_off() {
+    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/responses" => {
+                assert_meta_search_body(parts, body);
+                meta_search_sse(false)
+            }
+            path => panic!("a Muse-origin search must not reach {path}"),
+        }
+    }
+    fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        panic!("Anthropic must not be called, got {}", parts.uri.path());
+    }
+    fn passthrough(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), false),
+            path => panic!("unexpected path {path}"),
+        }
+    }
+    let auth = muse_auth_dir();
+    let off = || model_router::config::WebSearchConfig {
+        mode: model_router::config::WebSearchMode::Off,
+    };
+    for carrier in ["claude-sonnet-4-5", "claude-gpt-test"] {
+        let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+        let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
+        let config = Config {
+            anthropic_upstream_base: format!("http://{anthropic_address}"),
+            web_search: off(),
+            ..muse_config(cpa_address, Some(auth.path()))
+        };
+        let app = model_router::proxy::app(config).await.unwrap();
+        let body = turn_then_subcall(app, "muse-wonder-1.0", carrier).await;
+        assert!(
+            body.contains("https://d3x-solutions.com/meta-muse-wonder-full-muse-code-only/"),
+            "{carrier}: {body}"
+        );
+        assert_eq!(anthropic_observed.lock().await.len(), 0, "{carrier}");
+        assert_eq!(
+            observed_paths(&cpa_observed.lock().await),
+            ["/v1/messages", "/v1/responses"],
+            "{carrier}"
+        );
+    }
+
+    // A GPT agent's search under `off` is still not intercepted.
+    let (address, observed) = spawn_fake(passthrough).await;
+    let config = Config {
+        anthropic_upstream_base: format!("http://{address}"),
+        web_search: off(),
+        ..muse_config(address, Some(auth.path()))
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    turn_then_subcall(app, "claude-gpt-test", "claude-sonnet-4-5").await;
+    assert_eq!(
+        observed_paths(&observed.lock().await),
+        ["/v1/messages", "/v1/messages"]
+    );
+}
+
+/// A forced search carrying the caller's other tools, on a Muse carrier: the
+/// Muse rewrite drops the forced `tool_choice`, so detection must read the
+/// inbound body or the sub-call slips past Meta's search.
+#[tokio::test]
+async fn a_forced_subcall_with_other_tools_on_a_muse_carrier_is_answered_by_meta() {
+    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/responses" => {
+                assert_meta_search_body(parts, body);
+                meta_search_sse(false)
+            }
+            path => panic!("only Meta's search may be reached, got {path}"),
+        }
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let auth = muse_auth_dir();
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    let mut subcall: serde_json::Value =
+        serde_json::from_str(&origin_subcall_body("muse-wonder-1.0")).unwrap();
+    subcall["tool_choice"] = serde_json::json!({"type": "tool", "name": "web_search"});
+    let tools = subcall["tools"].as_array_mut().unwrap();
+    tools.extend(artifact_tools().as_array().unwrap().iter().cloned());
+    let (status, body) = send(&app, subcall.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("web_search_tool_result_error"), "{body}");
+    assert!(body.contains("https://www.datacamp.com/blog/"), "{body}");
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/responses"]
+    );
+}
+
+/// A GPT agent searching from a Muse session keeps its own backend.
+#[tokio::test]
+async fn gpt_origin_on_a_muse_carrier_still_uses_alpha_search() {
+    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+            "/v1/alpha/search" => {
+                let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+                assert_eq!(document["model"], "gpt-6-astra");
+                alpha_results_response()
+            }
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let auth = muse_auth_dir();
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    let body = turn_then_subcall(app, "claude-gpt-test", "muse-wonder-1.0").await;
+    assert!(body.contains("https://bun.sh/blog"), "{body}");
+    assert_eq!(
+        observed_paths(&cpa_observed.lock().await),
+        ["/v1/messages", "/v1/alpha/search"]
+    );
+}
+
+/// What `CLIProxyAPI` 8.0.30 delivered for an over-window Muse request
+/// (2026-10-15): Meta's generic invalid-parameters error, which Meta also
+/// sends for other invalid parameters.
+const META_OVERFLOW_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"The request contains invalid parameters. Check the request body for any errors or inconsistencies."}}"#;
+
+/// Meta's generic error becomes Claude Code's overflow error only when the
+/// request's own estimate is near the route's window; on a small request it
+/// is some other invalid parameter and reaches the client untouched. Other
+/// dialects never claim it.
+#[tokio::test]
+async fn muse_overflow_is_translated_only_for_a_request_near_the_window() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        let mut response = Response::new(Body::from(META_OVERFLOW_BODY));
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        response.headers_mut().insert(
+            "content-type",
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        response
+    }
+    let (cpa_address, _) = spawn_fake(handler).await;
+    let auth = muse_auth_dir();
+    let mut config = muse_config(cpa_address, Some(auth.path()));
+    // A Muse route with a 1,000-token window, so a near-window request stays
+    // small enough to tokenize quickly.
+    config.models.push(ModelRoute {
+        routing_id: "muse-small-window".to_string(),
+        upstream: "cliproxy".to_string(),
+        upstream_model: "muse-wonder-1.0".to_string(),
+        display_name: "Muse Small Window".to_string(),
+        family: model_router::config::ModelFamily::Muse,
+        context_window: Some(1_000),
+        ..Default::default()
+    });
+    let app = model_router::proxy::app(config).await.unwrap();
+    let request = |model: &str, text: &str, stream: bool| {
+        serde_json::json!({
+            "model": model, "max_tokens": 16, "stream": stream,
+            "messages": [{"role": "user", "content": text}],
+        })
+        .to_string()
+    };
+    // ~3 tokens per number: ~1,800 tokens, past the 1,000-token window.
+    let large = "123456 ".repeat(600);
+
+    for stream in [false, true] {
+        let (status, body) = send(&app, request("muse-small-window", &large, stream), &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(envelope["error"]["type"], "invalid_request_error");
+        let message = envelope["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("prompt is too long: "), "{message}");
+        assert!(message.ends_with(" tokens > 1000 maximum"), "{message}");
+    }
+    // A small request on the same route, and on the built-in route with its
+    // real ~1M window: some other invalid parameter, passed through.
+    for model in ["muse-small-window", "muse-wonder-1.0"] {
+        let (status, body) = send(&app, request(model, "hello", false), &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, META_OVERFLOW_BODY, "{model}");
+    }
+    // The xAI dialect does not speak Meta's phrase, whatever the size.
+    let (status, body) = send(&app, request("grok-4.5", &large, false), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, META_OVERFLOW_BODY);
+}
+
+/// Meta accepts only `tool_choice: auto`: a Muse compaction keeps its tools
+/// with no forced choice, and a forced choice from the client is dropped.
+#[tokio::test]
+async fn muse_requests_never_carry_a_tool_choice_but_auto() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let auth = muse_auth_dir();
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    let body = serde_json::json!({
+        "model": "muse-wonder-1.0", "max_tokens": 16, "tools": artifact_tools(),
+        "messages": [{"role": "user", "content": "Summarize the conversation."}],
+    })
+    .to_string();
+    let (status, _) = send(&app, body.clone(), &[("x-claude-code-compaction", "auto")]).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut forced: serde_json::Value = serde_json::from_str(&body).unwrap();
+    forced["tool_choice"] = serde_json::json!({"type": "any"});
+    let (status, _) = send(&app, forced.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut auto: serde_json::Value = serde_json::from_str(&body).unwrap();
+    auto["tool_choice"] = serde_json::json!({"type": "auto"});
+    let (status, _) = send(&app, auto.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let forwarded = cpa_observed.lock().await;
+    let documents: Vec<serde_json::Value> = forwarded
+        .iter()
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect();
+    assert_eq!(documents[0]["model"], "muse-wonder-1.0");
+    assert!(documents[0].get("tool_choice").is_none());
+    assert_eq!(documents[0]["tools"].as_array().unwrap().len(), 2);
+    assert!(documents[1].get("tool_choice").is_none());
+    assert_eq!(
+        documents[2]["tool_choice"],
+        serde_json::json!({"type": "auto"})
+    );
+}
+
+/// A Muse history holding a thinking-only assistant turn (an interrupted or
+/// truncated response) reaches the child without it: the child would replay
+/// its reasoning directly before the next user message, which Meta documents
+/// as a 400. Thinking answered by text or a tool call is replayed as sent, as
+/// is the same history on a GPT route.
+#[tokio::test]
+async fn muse_history_loses_only_thinking_that_nothing_answers() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let auth = muse_auth_dir();
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    let thinking = serde_json::json!({"type": "thinking", "thinking": "", "signature": "Q-PaDg"});
+    let answered = serde_json::json!({"role": "assistant", "content": [
+        thinking.clone(), {"type": "text", "text": "Hello!"},
+    ]});
+    let history = serde_json::json!([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [thinking.clone()]},
+        {"role": "user", "content": "continue"},
+        answered.clone(),
+        {"role": "user", "content": "and then?"},
+    ]);
+    for model in ["muse-wonder-1.0", "claude-gpt-test"] {
+        let body = serde_json::json!({"model": model, "max_tokens": 16, "messages": history});
+        let (status, response) = send(&app, body.to_string(), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{model}: {response}");
+    }
+    let forwarded = cpa_observed.lock().await;
+    let muse: serde_json::Value = serde_json::from_slice(&forwarded[0].body).unwrap();
+    assert_eq!(
+        muse["messages"],
+        serde_json::json!([
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": "continue"},
+            answered,
+            {"role": "user", "content": "and then?"},
+        ])
+    );
+    let gpt: serde_json::Value = serde_json::from_slice(&forwarded[1].body).unwrap();
+    assert_eq!(gpt["messages"], history);
+}
+
+/// The router's text for a request refused because a login undoes one of
+/// the child's model exclusions, naming `needle`.
+fn assert_exclusion_refusal(status: StatusCode, body: &str, needle: &str) {
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(error["error"]["type"], "invalid_request_error", "{body}");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("model-router refused this request: "),
+        "{message}"
+    );
+    assert!(message.contains(needle), "{message}");
+}
+
+/// A Meta login in a subdirectory setting the Contributor header when the
+/// router starts is loaded by the child, which never re-reads it while it
+/// runs: removing the header, or the login, keeps Muse requests refused
+/// until a restart.
+#[tokio::test]
+async fn a_contributor_header_seen_at_startup_stays_refused_until_a_restart() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let auth = muse_auth_dir();
+    let nested = auth.path().join("sub/meta-b.json");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    std::fs::write(
+        &nested,
+        r#"{"type":"meta","api_key":"k","headers":{"X-Tbh-Contributor-Mode":"1"}}"#,
+    )
+    .unwrap();
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    std::fs::write(&nested, r#"{"type":"meta","api_key":"k"}"#).unwrap();
+    let (status, body) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("sub/meta-b.json"), "{body}");
+    assert!(body.contains("model-router service restart"), "{body}");
+    std::fs::remove_file(&nested).unwrap();
+    let (status, body) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(cpa_observed.lock().await.is_empty());
+
+    let restarted = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    let (status, body) = send(&restarted, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// In Standard mode a Meta login with its own `excluded_models` list would
+/// replace the child's `*-contributor` exclusion (`CLIProxyAPI` 8.0.33+), so
+/// Muse requests are refused, read per request, and stay refused after the
+/// fix until the router (and with it the child) restarts. GPT and Grok
+/// requests do not rely on it.
+#[tokio::test]
+async fn standard_mode_refuses_muse_while_a_meta_login_lists_its_own_exclusions() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let auth = muse_auth_dir();
+    let login = auth.path().join("meta-a@example.com-0123456789abcdef.json");
+    let app = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    std::fs::write(
+        &login,
+        r#"{"type":"meta","api_key":"k","excluded_models":["muse-wonder-full-1.0"]}"#,
+    )
+    .unwrap();
+    let (status, body) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_exclusion_refusal(status, &body, "\"*-contributor\"");
+    for model in ["claude-gpt-test", "grok-4.5"] {
+        let (status, body) = send(&app, effort_body(model), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{model}: {body}");
+    }
+    assert_eq!(cpa_observed.lock().await.len(), 2);
+
+    std::fs::write(
+        &login,
+        r#"{"type":"meta","api_key":"k","excluded_models":["muse-wonder-full-1.0","*-contributor"]}"#,
+    )
+    .unwrap();
+    let (status, body) = send(&app, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_exclusion_refusal(status, &body, "model-router service restart");
+    assert_eq!(cpa_observed.lock().await.len(), 2);
+
+    let restarted = model_router::proxy::app(muse_config(cpa_address, Some(auth.path())))
+        .await
+        .unwrap();
+    let (status, body) = send(&restarted, effort_body("muse-wonder-1.0"), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(cpa_observed.lock().await.len(), 3);
+}
+
+/// A managed config with no running child: a request the login gate lets
+/// through ends at "supervisor failed to start" instead of reaching a child.
+fn managed_config(auth_dir: &std::path::Path, routes: &[(&str, &str)]) -> Config {
+    let mut config = Config {
+        models: routes
+            .iter()
+            .map(|(routing_id, upstream_model)| ModelRoute {
+                routing_id: (*routing_id).to_string(),
+                upstream: "cliproxy".to_string(),
+                upstream_model: (*upstream_model).to_string(),
+                display_name: (*routing_id).to_string(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Config::default()
+    };
+    config.auth_dir = Some(auth_dir.to_path_buf());
+    config
+}
+
+fn assert_passed_the_gate(status: StatusCode, body: &str) {
+    assert_ne!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("supervisor failed to start"), "{body}");
+}
+
+/// With `[muse]` off the child excludes every Meta model, so `auto` cannot
+/// resolve to one; a Meta login with its own exclusion list would undo that,
+/// so `auto` routes are refused once one exists, until a restart after the
+/// fix. Named GPT routes cannot reach Meta and pass.
+#[tokio::test]
+async fn muse_off_refuses_auto_while_a_meta_login_lists_its_own_exclusions() {
+    let auth = tempfile::tempdir().unwrap();
+    let config = || managed_config(auth.path(), &[("any", "auto"), ("gpt", "gpt-test")]);
+    let app = model_router::proxy::app(config()).await.unwrap();
+    let (status, body) = send(&app, effort_body("any"), &[]).await;
+    assert_passed_the_gate(status, &body);
+
+    let login = auth.path().join("meta-a@example.com.json");
+    std::fs::write(&login, r#"{"type":"meta","excluded-models":"other"}"#).unwrap();
+    let (status, body) = send(&app, effort_body("any"), &[]).await;
+    assert_exclusion_refusal(status, &body, "Meta login meta-a@example.com.json");
+    let (status, body) = send(&app, effort_body("gpt"), &[]).await;
+    assert_passed_the_gate(status, &body);
+
+    std::fs::write(&login, r#"{"type":"meta","excluded-models":"other,*"}"#).unwrap();
+    let (status, body) = send(&app, effort_body("any"), &[]).await;
+    assert_exclusion_refusal(status, &body, "Meta login meta-a@example.com.json");
+    let restarted = model_router::proxy::app(config()).await.unwrap();
+    let (status, body) = send(&restarted, effort_body("any"), &[]).await;
+    assert_passed_the_gate(status, &body);
+}
+
+/// In API-key mode the child excludes every model from the Codex logins so
+/// GPT requests never fall back to the subscription; a Codex login with its
+/// own exclusion list would undo that, so GPT routes are refused once one
+/// exists. The running child keeps what it loaded from a login it can no
+/// longer parse, and applies a fixed one only later, so emptying, breaking
+/// or fixing the file keeps the refusal until a restart; at a restart an
+/// empty or broken file is refused while it hides its login.
+#[tokio::test]
+async fn api_key_mode_refuses_gpt_while_a_codex_login_lists_its_own_exclusions() {
+    let auth = tempfile::tempdir().unwrap();
+    let config = || {
+        let mut config = managed_config(auth.path(), &[("gpt", "gpt-test")]);
+        config.gpt.auth = model_router::config::GptAuth::ApiKey;
+        config.gpt.api_key = Some("sk-test".to_string());
+        config
+    };
+    let app = model_router::proxy::app(config()).await.unwrap();
+    let login = auth.path().join("codex-1-a@example.com-pro.json");
+    std::fs::write(&login, r#"{"type":"codex","excluded_models":["gpt-5"]}"#).unwrap();
+    let (status, body) = send(&app, effort_body("gpt"), &[]).await;
+    assert_exclusion_refusal(status, &body, "Codex login codex-1-a@example.com-pro.json");
+
+    for contents in [
+        "",
+        r#"{"type":"codex","#,
+        r#"{"type":"codex","excluded_models":[]}"#,
+    ] {
+        std::fs::write(&login, contents).unwrap();
+        let (status, body) = send(&app, effort_body("gpt"), &[]).await;
+        assert_exclusion_refusal(status, &body, "model-router service restart");
+    }
+
+    for contents in ["", r#"{"type":"codex","#] {
+        std::fs::write(&login, contents).unwrap();
+        let restarted = model_router::proxy::app(config()).await.unwrap();
+        let (status, body) = send(&restarted, effort_body("gpt"), &[]).await;
+        assert_exclusion_refusal(
+            status,
+            &body,
+            "codex-1-a@example.com-pro.json cannot be checked",
+        );
+    }
+    std::fs::write(&login, r#"{"type":"codex","excluded_models":[]}"#).unwrap();
+    let restarted = model_router::proxy::app(config()).await.unwrap();
+    let (status, body) = send(&restarted, effort_body("gpt"), &[]).await;
+    assert_passed_the_gate(status, &body);
 }

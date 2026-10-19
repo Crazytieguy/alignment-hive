@@ -116,9 +116,11 @@ async function editSettings($: EngineInterface, operation: 'models' | 'windows' 
   if (operation === 'windows') {
     if (!result.applied) return `Not changed, run /model-router:setup: ${result.reason ?? 'no reason given'}`
     if (result.unchanged) return 'Windows already set; restart Claude Code to use them.'
-    if (!Object.keys(result.windows ?? {}).length) return 'Windows set; restart Claude Code to use them.'
+    const set = 'Windows set; restart Claude Code to use them.'
+    if (!Object.keys(result.windows ?? {}).length) return set
     const compact = `Restart Claude Code to compact ${compactsAt(result.windows!)}`
-    return firstFitting(...(result.file ? [`${compact} (in ${shown(result.file)}).`] : []), `${compact}.`)
+    // Too many routes to name (every family enabled at once): what to do still shows.
+    return firstFitting(...(result.file ? [`${compact} (in ${shown(result.file)}).`] : []), `${compact}.`, set)
   }
   if (result.status === 'done') {
     return 'Bypassed the router. Restart Claude Code to get back online, then run /model-router:setup.'

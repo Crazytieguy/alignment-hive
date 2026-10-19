@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use serde::de::IgnoredAny;
 
-use crate::config::{Config, ModelFamily, ModelRoute};
+use crate::config::{Config, ModelRoute};
 
 /// Where a request goes: to the matched route through the `CLIProxyAPI`
 /// child (whatever vendor family the route is), or to Anthropic when
@@ -55,15 +55,17 @@ pub fn decide<'a>(config: &'a Config, body: &[u8]) -> RoutingDecision<'a> {
 /// family needs it.
 ///
 /// Claude Code expresses effort as top-level `output_config.effort`. The
-/// child forwards that field on the Codex and openai-compat paths but drops
-/// it on the xAI path, so the suffix is the only channel that reaches xAI
-/// (measured; see `docs/experiments.md`). The value passes through
-/// unvalidated on purpose: the child owns the per-model clamping table, and
-/// a copy here would drift. A route whose `upstream-model` already pins an
-/// effort is forwarded as written: a second suffix would break the grammar.
+/// child forwards that field on the Codex, openai-compat and Meta paths but
+/// drops it on the xAI path, so the suffix is the only channel that reaches
+/// xAI (measured; see `docs/experiments.md`). Which families take the suffix
+/// is [`crate::config::ModelFamily::effort_via_model_suffix`]. The value
+/// passes through unvalidated on purpose: the child owns the per-model
+/// clamping table, and a copy here would drift. A route whose
+/// `upstream-model` already pins an effort is forwarded as written: a second
+/// suffix would break the grammar.
 #[must_use]
 pub fn effort_qualified_model<'a>(route: &'a ModelRoute, body: &[u8]) -> Cow<'a, str> {
-    if route.family != ModelFamily::Grok || route.split_upstream_model().1.is_some() {
+    if !route.family.effort_via_model_suffix() || route.split_upstream_model().1.is_some() {
         return Cow::Borrowed(&route.upstream_model);
     }
     match requested_effort(body) {
@@ -176,6 +178,7 @@ fn skip_whitespace(bytes: &[u8], mut cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ModelFamily;
 
     fn config() -> Config {
         let mut config = Config::default();
@@ -283,12 +286,16 @@ mod tests {
 
     #[test]
     fn other_families_never_get_a_suffix() {
-        // The Codex and openai-compat paths forward output_config.effort
+        // The Codex, openai-compat and Meta paths forward output_config.effort
         // themselves; suffixing there would be a second, conflicting channel.
         let body = br#"{"model":"r","output_config":{"effort":"high"},"messages":[]}"#;
-        for family in [ModelFamily::Gpt, ModelFamily::OpenAiCompat] {
-            let route = route(family, "gpt-5.6-sol");
-            assert_eq!(effort_qualified_model(&route, body), "gpt-5.6-sol");
+        for (family, model) in [
+            (ModelFamily::Gpt, "gpt-5.6-sol"),
+            (ModelFamily::OpenAiCompat, "gpt-5.6-sol"),
+            (ModelFamily::Muse, "muse-wonder-1.0"),
+        ] {
+            let route = route(family, model);
+            assert_eq!(effort_qualified_model(&route, body), model);
         }
     }
 

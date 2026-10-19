@@ -11,7 +11,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use model_router::config::{Config, GptAuth, UpstreamMode};
 use model_router::{
-    acquire, discovery, doctor, proxy, service, settings_edit, state, supervisor, verify,
+    acquire, discovery, doctor, muse, proxy, service, settings_edit, state, supervisor, verify,
 };
 use state::{Dirs, InstanceLock};
 use supervisor::Supervisor;
@@ -119,6 +119,8 @@ enum LoginProvider {
     #[default]
     Codex,
     Grok,
+    #[value(alias = "meta")]
+    Muse,
 }
 
 /// Everything that differs between the OAuth flows. Adding a provider is one
@@ -163,6 +165,15 @@ impl LoginProvider {
                 disabled: "Grok routing is off; enable it before logging in",
                 // The xAI device flow prints its own verification URL and
                 // code; nothing to add.
+                start_notice: None,
+            },
+            Self::Muse => &LoginDescriptor {
+                label: "Muse",
+                flag: "-meta-login",
+                auth_prefix: state::MUSE_AUTH_PREFIX,
+                is_enabled: |config| config.muse.enabled,
+                disabled: "Muse routing is off; enable it before logging in",
+                // A device flow like xAI's: the child prints the URL and code.
                 start_notice: None,
             },
         }
@@ -371,6 +382,7 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
 
     let managed_config = Some(config.cliproxy_upstream().clone())
         .filter(|upstream| upstream.mode == UpstreamMode::Managed);
+    config.auth_dir = config.managed_auth_dir(dirs);
     // A failing cliproxy upstream must never take down Claude routing: on
     // supervisor-start failure we serve degraded (GPT requests get 502)
     // instead of exiting.
@@ -472,6 +484,13 @@ async fn login(
     // reporting success. Report the file this login added; when the child
     // rewrote an existing one, the first match is the best guess.
     state::harden_auth_files(&paths.auth_dir)?;
+    // A new Meta login gets the relay Contributor mode needs, or none, as
+    // the service's next spawn would give it. Fatal here, unlike in `serve`
+    // (`supervisor::prepare_managed_state`): this login is interactive.
+    muse::sync_relay(&paths.auth_dir, config.muse.mode()).context(
+        "could not bring the Meta logins in line with [muse] contributor; Muse requests are \
+         refused until `model-router service restart` succeeds",
+    )?;
     let files = state::auth_files(&paths.auth_dir, descriptor.auth_prefix)?;
     match files
         .iter()
@@ -487,5 +506,36 @@ async fn login(
             descriptor.auth_prefix,
             paths.auth_dir.display()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn login_provider(args: &[&str]) -> LoginProvider {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let Some(Command::Login { provider }) = cli.command else {
+            panic!("not a login: {args:?}");
+        };
+        provider
+    }
+
+    #[test]
+    fn login_muse_and_its_meta_alias_reach_the_meta_flow() {
+        for args in [
+            ["model-router", "login", "muse"],
+            ["model-router", "login", "meta"],
+        ] {
+            let descriptor = login_provider(&args).descriptor();
+            assert_eq!(descriptor.label, "Muse");
+            assert_eq!(descriptor.flag, "-meta-login");
+            assert_eq!(descriptor.auth_prefix, state::MUSE_AUTH_PREFIX);
+        }
+        let config = |source: &str| -> Config { toml::from_str(source).unwrap() };
+        let is_enabled = LoginProvider::Muse.descriptor().is_enabled;
+        assert!(!is_enabled(&config("")));
+        assert!(!is_enabled(&config("[grok]\nenabled = true\n")));
+        assert!(is_enabled(&config("[muse]\nenabled = true\n")));
     }
 }

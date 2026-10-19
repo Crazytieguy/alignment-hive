@@ -36,12 +36,15 @@ pub fn is_credential_header(name: &str) -> bool {
     CREDENTIAL_HEADERS.contains(&name)
 }
 
-/// The local gateway secret GPT-bound requests present to `CLIProxyAPI`, in
-/// both the `x-api-key` and bearer forms, each marked sensitive.
+/// What every request to the `CLIProxyAPI` upstream carries: the local
+/// gateway secret, in both the `x-api-key` and bearer forms, each marked
+/// sensitive, and, in Muse Contributor mode, the trigger for the Contributor
+/// header relay ([`crate::muse::CONTRIBUTOR_TRIGGER`]).
 #[derive(Clone)]
 pub struct GptUpstreamCredential {
     api_key: HeaderValue,
     authorization: HeaderValue,
+    muse_contributor: bool,
 }
 
 impl GptUpstreamCredential {
@@ -57,14 +60,32 @@ impl GptUpstreamCredential {
         Ok(Self {
             api_key,
             authorization,
+            muse_contributor: false,
         })
     }
 
-    /// Attaches both credential forms: the one implementation behind the
-    /// forwarded request headers and every reqwest side call.
+    /// The same credential, adding [`crate::muse::CONTRIBUTOR_TRIGGER`] to
+    /// every request when `mode` is Contributor.
+    #[must_use]
+    pub fn for_muse_mode(self, mode: crate::config::MuseMode) -> Self {
+        Self {
+            muse_contributor: mode == crate::config::MuseMode::Contributor,
+            ..self
+        }
+    }
+
+    /// Attaches both credential forms, and the Contributor trigger when on:
+    /// the one implementation behind the forwarded request headers and every
+    /// reqwest side call.
     pub fn insert_into(&self, headers: &mut HeaderMap) {
         headers.insert("x-api-key", self.api_key.clone());
         headers.insert(header::AUTHORIZATION, self.authorization.clone());
+        if self.muse_contributor {
+            headers.insert(
+                crate::muse::CONTRIBUTOR_TRIGGER,
+                HeaderValue::from_static("1"),
+            );
+        }
     }
 
     /// [`Self::insert_into`] for a reqwest side call.
@@ -105,11 +126,15 @@ pub fn request_headers(
     body_changed: bool,
     gpt_credential: Option<&GptUpstreamCredential>,
 ) -> HeaderMap {
+    // A client's Contributor trigger never passes: only the credential
+    // decides it.
     let mut output = filter(input, |name| {
         name == header::HOST
             || (body_changed && name == header::CONTENT_LENGTH)
             || (strip_credentials
-                && (is_credential_header(name.as_str()) || name == "anthropic-beta"))
+                && (is_credential_header(name.as_str())
+                    || name == "anthropic-beta"
+                    || name == crate::muse::CONTRIBUTOR_TRIGGER))
     });
     if strip_credentials && let Some(credential) = gpt_credential {
         credential.insert_into(&mut output);
@@ -235,5 +260,38 @@ mod tests {
         assert_eq!(headers["x-api-key"], "local-gateway-secret");
         assert!(!headers.contains_key("anthropic-beta"));
         assert_eq!(headers["anthropic-version"], "2023-06-01");
+    }
+
+    #[test]
+    fn only_a_contributor_mode_credential_carries_the_contributor_trigger() {
+        use crate::config::MuseMode;
+        use crate::muse::CONTRIBUTOR_TRIGGER;
+        let mut inbound = sample_headers();
+        inbound.insert(CONTRIBUTOR_TRIGGER, HeaderValue::from_static("1"));
+        for mode in [MuseMode::Off, MuseMode::Standard] {
+            let credential = GptUpstreamCredential::new("secret")
+                .unwrap()
+                .for_muse_mode(mode);
+            // A client's trigger is stripped on the way to the child...
+            let headers = request_headers(&inbound, true, true, Some(&credential));
+            assert!(!headers.contains_key(CONTRIBUTOR_TRIGGER), "{mode:?}");
+            let headers = request_headers(&inbound, true, true, None);
+            assert!(!headers.contains_key(CONTRIBUTOR_TRIGGER), "{mode:?}");
+            // ...and side calls carry none.
+            let mut side_call = HeaderMap::new();
+            credential.insert_into(&mut side_call);
+            assert!(!side_call.contains_key(CONTRIBUTOR_TRIGGER), "{mode:?}");
+        }
+        let credential = GptUpstreamCredential::new("secret")
+            .unwrap()
+            .for_muse_mode(MuseMode::Contributor);
+        let headers = request_headers(&sample_headers(), true, true, Some(&credential));
+        assert_eq!(headers[CONTRIBUTOR_TRIGGER], "1");
+        let mut side_call = HeaderMap::new();
+        credential.insert_into(&mut side_call);
+        assert_eq!(side_call[CONTRIBUTOR_TRIGGER], "1");
+        // The Claude branch forwards to Anthropic as it came.
+        let headers = request_headers(&inbound, false, false, None);
+        assert_eq!(headers[CONTRIBUTOR_TRIGGER], "1");
     }
 }

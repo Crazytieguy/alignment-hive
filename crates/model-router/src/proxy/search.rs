@@ -1,8 +1,9 @@
 //! The proxy's answers to Claude Code's `WebSearch` sub-call
 //! ([`crate::websearch`] recognizes it and builds the replies). A sub-call is
 //! steered to the backend of the agent that asked for the search, whichever
-//! branch carried it. Grok origins are answered strictly by xAI's hosted
-//! search (a failure is a failed-search result, never another vendor). A
+//! branch carried it. Grok and Muse origins are answered strictly by their
+//! vendor's hosted search (a failure is a failed-search result, never another
+//! vendor), even with `[web-search] mode = "off"`. A
 //! Claude origin on the GPT branch is tried at Anthropic first and, on a
 //! transport error, 429 or 5xx, continues to the GPT path. Other routed
 //! origins go to the Codex alpha search in `alpha` mode, then the scrape
@@ -18,7 +19,8 @@ use futures_util::StreamExt;
 
 use super::{
     AppState, ForwardTarget, cache_identity_headers, forward_gpt, forward_to_anthropic,
-    frame_message, gpt_forward_target, local_response, require_identity_encoding, upstream_url,
+    frame_message, gpt_forward_target, local_response, login_refusal, require_identity_encoding,
+    upstream_url,
 };
 use crate::capture::RequestCapture;
 use crate::config::WebSearchMode;
@@ -35,8 +37,8 @@ const SUBCALL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(4);
 const LOG_TARGET: &str = "model_router::proxy";
 
 /// A sub-call arriving on the Claude branch whose `WebSearch` was invoked by
-/// a routed agent (GPT, Grok, or open-weights): answer from the matching
-/// backend. `alpha` mode asks the Codex search backend and, on failure,
+/// a routed agent (GPT, Grok, Muse, or open-weights): answer from the
+/// matching backend. `alpha` mode asks the Codex search backend and, on failure,
 /// falls back to the origin route's own scrape path — never straight to
 /// Anthropic, which would silently move the work and the bill to a vendor
 /// the user did not choose. `scrape` mode goes to that same path directly.
@@ -49,18 +51,30 @@ pub(super) async fn gpt_origin_on_claude_branch(
     subcall: &websearch::Subcall,
     mut capture: Option<RequestCapture>,
 ) -> Response {
-    let route = state
-        .config
-        .effective_models()
-        .find(|route| route.routing_id == routing_id);
-    // A Grok origin is served by xAI's own search, strictly: no alpha, no
-    // scrape, no Anthropic — not even when the gateway is unavailable. An
-    // origin whose route has since left the config has no known family, so it
-    // keeps the existing behaviour below.
-    if let Some(route) = route
-        && websearch::uses_native_search(route.family)
+    let route = state.config.route(routing_id);
+    // A Grok or Muse origin is served by its own vendor's search, strictly:
+    // no alpha, no scrape, no Anthropic — not even when the gateway is
+    // unavailable. An origin whose route has since left the config has no
+    // known family, so it keeps the existing behaviour below.
+    if let Some((route, native)) =
+        route.and_then(|route| Some((route, websearch::native_search(route.family)?)))
     {
-        return grok_native_websearch_response(state, &body, route, subcall, capture).await;
+        return native_websearch_response(state, &body, route, native, subcall, capture).await;
+    }
+    // The ingress gate saw only this Claude carrier, so the origin's route
+    // passes it here, as the native arm's search does: a refusal is a
+    // failed-search result, never Anthropic.
+    if let Some(route) = route
+        && let Some(message) = login_refusal(state, Some(route)).await
+    {
+        let failed = websearch::synthesize_error_message(
+            &route.routing_id,
+            subcall,
+            websearch::search_error::UNAVAILABLE,
+            &message,
+            estimate_input_tokens(&body),
+        );
+        return message_response(state, &failed, subcall.stream, capture).await;
     }
     // A forced search may carry the caller's full tool set alongside
     // `web_search` (see `websearch::detect`), and `legacy_websearch` forwards
@@ -102,7 +116,8 @@ pub(super) async fn gpt_origin_on_claude_branch(
 
 /// A `WebSearch` sub-call that arrived on the GPT branch: answered by the
 /// origin's own backend, else through the alpha/scrape ladder, else
-/// forwarded to the GPT upstream.
+/// forwarded to the GPT upstream. With search `off`, only the vendor-native
+/// answer remains; everything else is forwarded untouched.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn gpt_branch_subcall(
     state: &AppState,
@@ -119,23 +134,27 @@ pub(super) async fn gpt_branch_subcall(
     // this only supplies the config lookup.
     let native_search_route =
         websearch::native_search_route(origin.as_ref(), route, |routing_id| {
-            state
-                .config
-                .effective_models()
-                .find(|candidate| candidate.routing_id == routing_id)
+            state.config.route(routing_id)
         });
     // The Anthropic-native path needs no GPT upstream — attempt it even when
     // the GPT target is unavailable.
-    if let Some(websearch::Origin::Claude { model }) = origin {
-        match claude_origin_on_gpt_branch(state, parts, body, &model, subcall, capture).await {
+    if let Some(origin) = &origin
+        && state.intercepts(origin)
+        && let websearch::Origin::Claude { model } = origin
+    {
+        match claude_origin_on_gpt_branch(state, parts, body, model, subcall, capture).await {
             Ok(response) => return response,
             Err(returned) => capture = returned,
         }
     }
-    if let Some(grok) = native_search_route {
-        return grok_native_websearch_response(state, &rewritten, grok, subcall, capture).await;
+    if let Some((route, native)) = native_search_route {
+        return native_websearch_response(state, &rewritten, route, native, subcall, capture).await;
     }
-    if let Some(target) = gpt_forward_target(&state.cliproxy_upstream) {
+    // Past the native arm no origin searches natively, so only `[web-search]
+    // mode` decides, as `AppState::intercepts` would for any origin.
+    if state.config.web_search.mode != WebSearchMode::Off
+        && let Some(target) = gpt_forward_target(&state.cliproxy_upstream)
+    {
         match gpt_backend_answer(state, parts, &rewritten, route, subcall, &target, capture).await {
             Ok(response) => return response,
             Err(returned) => capture = returned,
@@ -346,8 +365,9 @@ async fn gpt_backend_answer(
     }
 }
 
-/// Why an xAI-native search could not be answered. Carries its own mapping to
-/// the client-visible failed-search result, so the taxonomy lives in one place.
+/// Why a vendor-native search could not be answered. Carries its own mapping
+/// to the client-visible failed-search result, so the taxonomy lives in one
+/// place.
 enum SearchFailure {
     Status(u16),
     Transport(anyhow::Error),
@@ -358,32 +378,37 @@ enum SearchFailure {
     ShuttingDown,
     /// The sub-call's domain filter cannot be honored.
     InvalidFilter(websearch::InvalidDomainRule),
+    /// The login gate refuses the route's requests right now; the reason names
+    /// the fix ([`login_refusal`]).
+    Refused(String),
 }
 
 impl SearchFailure {
     /// `(error_code, detail)` for [`websearch::synthesize_error_message`].
-    fn rendered(&self) -> (&'static str, String) {
+    fn rendered(&self, native: websearch::NativeSearch) -> (&'static str, String) {
+        let vendor = native.vendor();
         match self {
             Self::Status(429) => (
                 websearch::search_error::TOO_MANY_REQUESTS,
-                "xAI search is rate-limited".to_string(),
+                format!("{vendor} search is rate-limited"),
             ),
             Self::Status(status) => (
                 websearch::search_error::UNAVAILABLE,
-                format!("xAI search returned HTTP {status}"),
+                format!("{vendor} search returned HTTP {status}"),
             ),
             Self::Transport(error) => (
                 websearch::search_error::UNAVAILABLE,
-                format!("xAI search could not be reached ({error})"),
+                format!("{vendor} search could not be reached ({error})"),
             ),
             Self::TimedOut => (
                 websearch::search_error::UNAVAILABLE,
-                "xAI search did not return sources in time".to_string(),
+                format!("{vendor} search did not return sources in time"),
             ),
             Self::NoSources(reason) => (
                 websearch::search_error::UNAVAILABLE,
-                format!("xAI search returned no sources ({reason})"),
+                format!("{vendor} search returned no sources ({reason})"),
             ),
+            Self::Refused(message) => (websearch::search_error::UNAVAILABLE, message.clone()),
             Self::GatewayUnavailable => (
                 websearch::search_error::UNAVAILABLE,
                 "the model gateway is not ready".to_string(),
@@ -402,24 +427,27 @@ impl SearchFailure {
     }
 }
 
-/// Owns every in-flight xAI search stream.
+/// Owns every in-flight vendor-native search stream.
 ///
 /// Each search runs in a task that reads its response to completion no matter
 /// what the request handler does, because dropping a live stream disconnects
 /// the client mid-response and makes the child quarantine the xAI auth entry
-/// for 30–60s (measured). The handler's deadline therefore stops it WAITING;
-/// it never cancels the HTTP read. Shutdown stops admitting new searches and
-/// waits for the running ones, so a restart cannot orphan a stream either.
+/// for 30–60s (measured). Meta searches are drained the same way: whether the
+/// child quarantines a Meta login too is unmeasured, and with
+/// `max_tool_calls: 1` the rest of the stream costs ~2s. The handler's
+/// deadline therefore stops it WAITING; it never cancels the HTTP read.
+/// Shutdown stops admitting new searches and waits for the running ones, so a
+/// restart cannot orphan a stream either.
 ///
 /// How many searches may run at once is not the router's business: a parallel
-/// sweep should meet the limits the user's own xAI subscription imposes, not
-/// an invented one. Admission is a shutdown gate, nothing more.
-pub struct XaiSearchTasks {
+/// sweep should meet the limits the user's own subscription imposes, not an
+/// invented one. Admission is a shutdown gate, nothing more.
+pub struct SearchStreams {
     closed: std::sync::atomic::AtomicBool,
     tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
-impl XaiSearchTasks {
+impl SearchStreams {
     pub(super) fn new() -> Self {
         Self {
             closed: std::sync::atomic::AtomicBool::new(false),
@@ -460,25 +488,26 @@ impl XaiSearchTasks {
             tracing::warn!(
                 target: LOG_TARGET,
                 timeout_seconds = budget.as_secs_f64(),
-                "xAI search drain expired; remaining streams are dropped"
+                "search drain expired; remaining streams are dropped"
             );
         }
     }
 }
 
-/// Answers a Grok-origin sub-call from xAI's hosted `web_search`, or returns
-/// the failure to render. Strict by construction: this function never reaches
-/// another vendor's backend.
-async fn grok_native_websearch_response(
+/// Answers a Grok- or Muse-origin sub-call from the origin family's own
+/// hosted `web_search`, or returns the failure to render. Strict by
+/// construction: this function never reaches another vendor's backend.
+async fn native_websearch_response(
     state: &AppState,
     body: &Bytes,
     route: &crate::config::ModelRoute,
+    native: websearch::NativeSearch,
     subcall: &websearch::Subcall,
     capture: Option<RequestCapture>,
 ) -> Response {
     let started = std::time::Instant::now();
     let outcome = match gpt_forward_target(&state.cliproxy_upstream) {
-        Some(target) => xai_native_search(state, &target, &route.upstream_model, subcall).await,
+        Some(target) => native_search(state, &target, route, native, subcall).await,
         None => Err(SearchFailure::GatewayUnavailable),
     };
     let input_tokens = estimate_input_tokens(body);
@@ -488,22 +517,22 @@ async fn grok_native_websearch_response(
                 target: LOG_TARGET,
                 links = links.len(),
                 origin = %route.routing_id,
-                backend = "xai-web-search",
+                backend = native.backend(),
                 elapsed_ms = started.elapsed().as_millis(),
-                "answered routed-origin web search from xAI native search"
+                "answered routed-origin web search from the vendor's native search"
             );
             // No commentary text: the synthesized prose is never read, so it
             // can never leak into the result.
             websearch::synthesize_message(&route.routing_id, subcall, &links, "", input_tokens)
         }
         Err(failure) => {
-            let (error_code, detail) = failure.rendered();
+            let (error_code, detail) = failure.rendered(native);
             tracing::warn!(
                 target: LOG_TARGET,
                 origin = %route.routing_id,
-                backend = "xai-web-search",
+                backend = native.backend(),
                 %detail,
-                "xAI native search failed; returning a failed-search result"
+                "native search failed; returning a failed-search result"
             );
             websearch::synthesize_error_message(
                 &route.routing_id,
@@ -517,25 +546,29 @@ async fn grok_native_websearch_response(
     message_response(state, &message, subcall.stream, capture).await
 }
 
-/// One search against xAI's hosted `web_search` tool through the same
+/// One search against the vendor's hosted `web_search` tool through the same
 /// `CLIProxyAPI` child, streamed. This function only waits for the sources
-/// (~3s); the stream itself is owned by a task that reads it to the end
-/// whatever happens here (see [`XaiSearchTasks`]).
-async fn xai_native_search(
+/// (~2–3s); the stream itself is owned by a task that reads it to the end
+/// whatever happens here (see [`SearchStreams`]).
+///
+/// A Meta search passes the same Muse gate as a Muse turn first: the
+/// sub-call that carries it may be a Claude or GPT request the gate never
+/// saw.
+async fn native_search(
     state: &AppState,
     target: &ForwardTarget,
-    upstream_model: &str,
+    route: &crate::config::ModelRoute,
+    native: websearch::NativeSearch,
     subcall: &websearch::Subcall,
 ) -> Result<Vec<websearch::Link>, SearchFailure> {
+    if let Some(message) = login_refusal(state, Some(route)).await {
+        return Err(SearchFailure::Refused(message));
+    }
     let policy =
         websearch::DomainPolicy::from_subcall(subcall).map_err(SearchFailure::InvalidFilter)?;
-    let body = serde_json::to_vec(&websearch::xai_search_request_body(
-        subcall,
-        &policy,
-        upstream_model,
-    ))
-    .expect("JSON values always serialize");
-    let limits = state.config.xai_search;
+    let body = serde_json::to_vec(&native.request_body(subcall, &policy, &route.upstream_model))
+        .expect("JSON values always serialize");
+    let limits = state.config.native_search;
     let url = format!("{}/v1/responses", target.base_url.trim_end_matches('/'));
     let mut request = state
         .client
@@ -552,9 +585,9 @@ async fn xai_native_search(
     // exists that it does not own — and none is opened once shutdown has been
     // signalled.
     let admitted = state
-        .xai_searches
+        .search_streams
         .spawn(async move {
-            xai_search_worker(request, policy, limits, harvested_tx).await;
+            search_worker(request, native, policy, limits, harvested_tx).await;
         })
         .await;
     if !admitted {
@@ -572,10 +605,11 @@ async fn xai_native_search(
 
 /// Owns one search stream start to finish: reports the harvest as soon as it
 /// appears, then keeps reading until the upstream ends the response.
-async fn xai_search_worker(
+async fn search_worker(
     request: reqwest::RequestBuilder,
+    native: websearch::NativeSearch,
     policy: websearch::DomainPolicy,
-    limits: crate::config::XaiSearchLimits,
+    limits: crate::config::NativeSearchLimits,
     outcome_tx: tokio::sync::oneshot::Sender<Result<Vec<websearch::Link>, SearchFailure>>,
 ) {
     let mut outcome_tx = Some(outcome_tx);
@@ -593,14 +627,14 @@ async fn xai_search_worker(
     if response.status() != reqwest::StatusCode::OK {
         return report(Err(SearchFailure::Status(response.status().as_u16())));
     }
-    let mut harvester = websearch::XaiSourceHarvester::new(policy);
+    let mut harvester = websearch::SourceHarvester::new(policy);
     let mut stream = response.bytes_stream();
     let read = async {
         while let Some(chunk) = stream.next().await {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(error) => {
-                    tracing::debug!(target: LOG_TARGET, %error, "xAI search stream ended early");
+                    tracing::debug!(target: LOG_TARGET, %error, backend = native.backend(), "search stream ended early");
                     report(Err(SearchFailure::Transport(error.into())));
                     return;
                 }
@@ -624,8 +658,9 @@ async fn xai_search_worker(
         tracing::warn!(
             target: LOG_TARGET,
             budget_seconds = limits.drain_timeout.as_secs(),
-            "xAI search stream exceeded the drain budget and was dropped; the child may \
-             quarantine the xAI auth"
+            backend = native.backend(),
+            "search stream exceeded the drain budget and was dropped; the child may \
+             quarantine the login"
         );
     }
 }
@@ -735,11 +770,12 @@ async fn message_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
     use std::sync::Arc;
 
     #[tokio::test]
     async fn search_admission_closes_at_shutdown_and_running_streams_are_awaited() {
-        let tasks = XaiSearchTasks::new();
+        let tasks = SearchStreams::new();
         let running = Arc::new(tokio::sync::Notify::new());
         let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -780,5 +816,142 @@ mod tests {
             !rejected.load(std::sync::atomic::Ordering::SeqCst),
             "a refused search still ran"
         );
+    }
+
+    /// Serves `/v1/messages` as a response calling `WebSearch` and records
+    /// every path it is asked for; anything else is a 500.
+    async fn fake_child(paths: Arc<std::sync::Mutex<Vec<String>>>) -> String {
+        let events = [
+            serde_json::json!({"type":"content_block_start","index":0,
+                "content_block":{"type":"tool_use","id":"toolu_1","name":"WebSearch","input":{}}}),
+            serde_json::json!({"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta",
+                         "partial_json":"{\"query\":\"bun release notes\"}"}}),
+            serde_json::json!({"type":"content_block_stop","index":0}),
+        ]
+        .map(|data| format!("event: x\ndata: {data}\n\n"))
+        .concat();
+        let app = axum::Router::new().fallback(axum::routing::any(
+            move |request: axum::extract::Request| {
+                let (paths, events) = (paths.clone(), events.clone());
+                async move {
+                    let path = request.uri().path().to_string();
+                    paths.lock().unwrap().push(path.clone());
+                    if path == "/v1/messages" {
+                        ([(header::CONTENT_TYPE, "text/event-stream")], events).into_response()
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    }
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}")
+    }
+
+    async fn send(app: &axum::Router, body: serde_json::Value) -> (StatusCode, String) {
+        use tower::ServiceExt;
+        let request = axum::http::Request::post("/v1/messages")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    /// The sub-call carrying a routed agent's search may be a Claude request
+    /// the login gate never refused, so the origin's route passes the gate
+    /// before either search backend: a login that undoes an exclusion the
+    /// origin relies on, appearing after the agent's turn, makes the search a
+    /// failed result that reaches neither the child nor Anthropic.
+    async fn assert_claude_carried_search_refused(
+        mut config: crate::config::Config,
+        routing_id: &str,
+        login: (&str, &str),
+        needle: &str,
+    ) {
+        let auth = tempfile::tempdir().unwrap();
+        let child_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let anthropic_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let child = fake_child(child_paths.clone()).await;
+        config.anthropic_upstream_base = fake_child(anthropic_paths.clone()).await;
+        config.auth_dir = Some(auth.path().to_path_buf());
+        config.models = vec![crate::config::ModelRoute {
+            routing_id: routing_id.to_string(),
+            upstream: "cliproxy".to_string(),
+            upstream_model: routing_id.to_string(),
+            display_name: routing_id.to_string(),
+            ..Default::default()
+        }];
+        let handle = crate::supervisor::ManagedHandle::ready_for_tests(child);
+        let (app, _) = super::super::build(config, Some(handle)).await.unwrap();
+        let metadata = serde_json::json!({"user_id":
+            r#"{"device_id":"d","account_uuid":"a","session_id":"sess-1"}"#});
+        let turn = serde_json::json!({
+            "model": routing_id, "max_tokens": 64, "stream": true, "metadata": metadata,
+            "messages": [{"role": "user", "content": "find bun release notes"}],
+            "tools": [{"name": "WebSearch", "description": "Search the web",
+                       "input_schema": {"type": "object"}}],
+        });
+        let (status, body) = send(&app, turn).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("content_block_stop"), "{body}");
+
+        std::fs::write(auth.path().join(login.0), login.1).unwrap();
+        let subcall = serde_json::json!({
+            "model": "claude-sonnet-4-5", "max_tokens": 4096, "stream": true,
+            "metadata": metadata,
+            "messages": [{"role": "user", "content": [{"type": "text",
+                "text": "Perform a web search for the query: bun release notes"}]}],
+            "system": [{"type": "text",
+                "text": "You are an assistant for performing a web search tool use"}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
+        });
+        let (status, body) = send(&app, subcall).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("web_search_tool_result_error"), "{body}");
+        assert!(body.contains("model-router refused this request"), "{body}");
+        assert!(body.contains(needle), "{body}");
+        assert_eq!(*child_paths.lock().unwrap(), ["/v1/messages"]);
+        assert!(anthropic_paths.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_claude_carried_gpt_search_is_refused_while_a_codex_login_lists_exclusions() {
+        let mut config = crate::config::Config::default();
+        config.gpt.auth = crate::config::GptAuth::ApiKey;
+        config.gpt.api_key = Some("sk-test".to_string());
+        assert_claude_carried_search_refused(
+            config,
+            "gpt-test",
+            (
+                "codex-1-a@example.com-pro.json",
+                r#"{"type":"codex","excluded_models":["gpt-5"]}"#,
+            ),
+            "Codex login codex-1-a@example.com-pro.json",
+        )
+        .await;
+    }
+
+    /// With `[muse]` off, `auto` relies on the child excluding every Meta
+    /// model.
+    #[tokio::test]
+    async fn a_claude_carried_auto_search_is_refused_while_a_meta_login_lists_exclusions() {
+        assert_claude_carried_search_refused(
+            crate::config::Config::default(),
+            "auto",
+            (
+                "meta-a@example.com.json",
+                r#"{"type":"meta","excluded-models":"other"}"#,
+            ),
+            "Meta login meta-a@example.com.json",
+        )
+        .await;
     }
 }

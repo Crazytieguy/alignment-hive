@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn a_leading_constant_block_leaves_budget_for_the_discriminating_one() {
-        let identity = crate::identity::identity_text("GPT Test").replace('"', "");
+        let identity = crate::identity::identity_text("GPT Test", None).replace('"', "");
         let a = body(
             "gpt-5.6-luna",
             &format!(

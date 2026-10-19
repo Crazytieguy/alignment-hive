@@ -1,8 +1,9 @@
-//! The Grok-origin search backend: xAI's hosted `web_search` on
-//! `/v1/responses`, with the source URLs harvested from the streamed
-//! `web_search_call` item. The sub-call's domain filters are enforced here,
-//! on every harvested URL, because the request-side filter only steers the
-//! search.
+//! The vendor-native search backends for Grok and Muse origins: xAI's or
+//! Meta's hosted `web_search` on `/v1/responses`, with the source URLs
+//! harvested from the streamed `web_search_call` item (both vendors stream
+//! the same shape). The sub-call's domain filters are enforced here, on every
+//! harvested URL, because xAI's request-side filter only steers the search
+//! and Meta's search has none.
 
 use serde_json::{Value, json};
 
@@ -16,8 +17,9 @@ pub(super) const MAX_REQUEST_ALLOWED_DOMAINS: usize = 5;
 /// The domain constraints a harvested URL must satisfy, taken from the
 /// sub-call's `allowed_domains` / `blocked_domains`.
 ///
-/// This is the authoritative filter: the request-side `filters.allowed_domains`
-/// only steers the upstream search, and blocked domains are never sent at all.
+/// This is the authoritative filter: xAI's request-side
+/// `filters.allowed_domains` only steers the upstream search, Meta has no
+/// such filter, and blocked domains are never sent at all.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DomainPolicy {
     pub(super) allowed: Vec<String>,
@@ -146,8 +148,7 @@ impl DomainPolicy {
 /// is `required` so a missing `web_search_call` means the search failed
 /// rather than that the model chose not to search — verified against a child
 /// whose advertised hosted-tool set is exactly `web_search`.
-#[must_use]
-pub fn xai_search_request_body(
+pub(super) fn xai_search_request_body(
     subcall: &Subcall,
     policy: &DomainPolicy,
     upstream_model: &str,
@@ -171,7 +172,45 @@ pub fn xai_search_request_body(
     })
 }
 
-/// What a chunk fed to [`XaiSourceHarvester`] produced.
+/// Builds the Meta Responses body that runs one hosted `web_search`, as
+/// measured against Meta through `CLIProxyAPI` 8.0.30 (2026-10-15).
+///
+/// - `tool_choice` is `auto` because Meta rejects every other value with a
+///   400. The model may therefore answer without searching; a stream with no
+///   search item is a failed search, as on xAI.
+/// - `max_tool_calls: 1` ends the response after the one search the harvest
+///   needs instead of following it with `open_page` actions: 4.7s and ~2K
+///   input tokens end to end, against 23s and ~22K uncapped. The search item
+///   arrives at ~2s either way.
+/// - `include` asks for `action.sources`, which carry URLs only; titles exist
+///   only on the answer's `url_citation` annotations.
+/// - No domain filter: Meta's hosted search has none (its Messages surface
+///   rejects `allowed_domains` with a 400), so [`DomainPolicy::admits`]
+///   alone enforces the policy, as for an xAI allow-list too long to send.
+/// - Low reasoning effort, with a pinned `(effort)` suffix dropped: the
+///   model only has to issue the query.
+pub(super) fn meta_search_request_body(subcall: &Subcall, upstream_model: &str) -> Value {
+    let (model, _) = crate::config::split_effort_suffix(upstream_model);
+    json!({
+        "model": model,
+        "input": [{
+            "role": "user",
+            "content": format!(
+                "Search the web for: {}. Return the top results as a list of title + URL.",
+                subcall.query
+            ),
+        }],
+        "tools": [{"type": "web_search"}],
+        "tool_choice": "auto",
+        "max_tool_calls": 1,
+        "include": ["web_search_call.action.sources"],
+        "reasoning": {"effort": "low"},
+        "stream": true,
+        "store": false,
+    })
+}
+
+/// What a chunk fed to [`SourceHarvester`] produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Harvested {
     /// The first completed hosted search carrying admissible URLs.
@@ -180,18 +219,20 @@ pub enum Harvested {
     Ended(&'static str),
 }
 
-/// Streams an xAI Responses SSE body and yields the source URLs of the first
-/// completed hosted `web_search_call` that carries any admissible one.
+/// Streams a [`NativeSearch`](super::NativeSearch) Responses SSE body and
+/// yields the source URLs of the first completed hosted `web_search_call`
+/// search that carries any admissible one. xAI and Meta stream the same item
+/// shape.
 ///
 /// Event-name agnostic — only the `data:` payload's `type` field is trusted.
 /// The child has always been observed to send `event:` lines; tolerating their
 /// absence is defensive, since SSE permits it.
-pub struct XaiSourceHarvester {
+pub struct SourceHarvester {
     policy: DomainPolicy,
     events: crate::sse::SseEventBuffer,
 }
 
-impl XaiSourceHarvester {
+impl SourceHarvester {
     #[must_use]
     pub fn new(policy: DomainPolicy) -> Self {
         Self {
@@ -243,8 +284,9 @@ impl XaiSourceHarvester {
     }
 }
 
-/// The admissible, deduplicated URLs of a completed `web_search_call` item.
-/// Titles do not exist on this path, so the URL is its own label.
+/// The admissible, deduplicated URLs of a completed `web_search_call` whose
+/// action is a search; the other actions (`open_page`) name a page, not
+/// results. Titles do not exist on this path, so the URL is its own label.
 fn links_from_item(policy: &DomainPolicy, item: Option<&Value>) -> Vec<Link> {
     let Some(item) = item else {
         return Vec::new();
@@ -254,11 +296,13 @@ fn links_from_item(policy: &DomainPolicy, item: Option<&Value>) -> Vec<Link> {
     {
         return Vec::new();
     }
-    let Some(sources) = item
+    let Some(action) = item
         .get("action")
-        .and_then(|action| action.get("sources"))
-        .and_then(Value::as_array)
+        .filter(|action| action.get("type").and_then(Value::as_str) == Some("search"))
     else {
+        return Vec::new();
+    };
+    let Some(sources) = action.get("sources").and_then(Value::as_array) else {
         return Vec::new();
     };
     let mut links = Links::default();

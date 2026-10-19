@@ -20,7 +20,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 
 use crate::config::{
-    Config, GptAuth, GptConfig, OpenAiProvider, ProviderModel, UpstreamConfig, derived_alias,
+    Config, GptAuth, GptConfig, MuseMode, OpenAiProvider, ProviderModel, UpstreamConfig,
+    derived_alias,
 };
 use crate::headers::GptUpstreamCredential;
 use crate::state::{Dirs, create_private_dir, load_or_create_secret, write_private_atomic};
@@ -98,6 +99,17 @@ impl ManagedHandle {
     pub fn is_ready(&self) -> bool {
         *self.ready.borrow()
     }
+
+    /// A ready handle for a fake child at `base_url`, so tests can exercise
+    /// what only managed mode does.
+    #[cfg(test)]
+    pub(crate) fn ready_for_tests(base_url: String) -> Self {
+        Self {
+            base_url,
+            credential: GptUpstreamCredential::new("test-secret").unwrap(),
+            ready: watch::channel(true).1,
+        }
+    }
 }
 
 /// Owns the supervision task. Dropping it ends the loop, which terminates
@@ -152,6 +164,9 @@ const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 pub struct ChildCredentials {
     pub providers: Vec<OpenAiProvider>,
     pub gpt: GptConfig,
+    /// Which Meta models the child serves, and which relay its Meta logins
+    /// carry ([`crate::muse::sync_relay`]).
+    pub muse: MuseMode,
 }
 
 impl ChildCredentials {
@@ -160,6 +175,7 @@ impl ChildCredentials {
         Self {
             providers: config.openai_providers.clone(),
             gpt: config.gpt.clone(),
+            muse: config.muse.mode(),
         }
     }
 }
@@ -208,15 +224,22 @@ routing:
         empty = yaml_quote(""),
         strategy = yaml_quote("round-robin"),
     );
-    if credentials.gpt.auth == GptAuth::ApiKey {
-        // Exclude every model from the Codex logins so round-robin never
-        // alternates paid API calls with subscription ones, and a missing key
-        // fails rather than falling back to the subscription.
-        let _ = write!(
+    // One `oauth-excluded-models` mapping holds every exclusion: a second
+    // key would replace the first. Why each is there, and the logins that
+    // can undo one: model-router's exclusions module.
+    let exclusions = crate::exclusions::required(credentials.muse, credentials.gpt.auth);
+    if !exclusions.is_empty() {
+        yaml.push_str("\noauth-excluded-models:\n");
+    }
+    for exclusion in &exclusions {
+        let _ = writeln!(
             yaml,
-            "\noauth-excluded-models:\n  codex:\n    - {}\n",
-            yaml_quote("*")
+            "  {}:\n    - {}",
+            exclusion.provider.key,
+            yaml_quote(exclusion.pattern)
         );
+    }
+    if credentials.gpt.auth == GptAuth::ApiKey {
         // The Codex executor otherwise adds an image_generation tool, which
         // OpenAI rejects for API orgs without image generation enabled.
         yaml.push_str("\ndisable-image-generation: true\n");
@@ -291,11 +314,14 @@ routing:
 }
 
 /// Prepares managed-mode state on disk and returns the paths involved.
-/// Idempotent; shared by `serve` and `login`.
+/// Idempotent; shared by `serve` (before every spawn, so the child loads
+/// each Meta login with its relay already in line) and `login`.
 ///
 /// # Errors
 /// Returns an error when directories, the secret, or the config cannot be
-/// created.
+/// created. A Meta login that cannot be brought in line is logged instead:
+/// the Muse gate refuses Muse requests until it is, and GPT and Grok
+/// traffic should not wait on it.
 pub fn prepare_managed_state(
     dirs: &Dirs,
     upstream: &UpstreamConfig,
@@ -304,6 +330,12 @@ pub fn prepare_managed_state(
     let secret = load_or_create_secret(dirs)?;
     create_private_dir(&dirs.auth_dir())?;
     create_private_dir(&dirs.log_dir())?;
+    sync_muse_relay(&dirs.auth_dir(), credentials.muse);
+    let exclusions = crate::exclusions::required(credentials.muse, credentials.gpt.auth);
+    let logins = crate::logins::walk(&dirs.auth_dir());
+    if let Some(reason) = crate::exclusions::overridden(&logins, &exclusions) {
+        tracing::error!("{reason}");
+    }
     let yaml = upstream_config_yaml(upstream.port, &dirs.auth_dir(), &secret, credentials);
     write_private_atomic(&dirs.upstream_config_file(), yaml.as_bytes())?;
     Ok(ManagedPaths {
@@ -311,6 +343,24 @@ pub fn prepare_managed_state(
         auth_dir: dirs.auth_dir(),
         log_file: dirs.log_dir().join("cliproxyapi.log"),
     })
+}
+
+/// [`crate::muse::sync_relay`], logged.
+fn sync_muse_relay(auth_dir: &Path, mode: MuseMode) {
+    match crate::muse::sync_relay(auth_dir, mode) {
+        Ok(rewritten) if rewritten.is_empty() => {}
+        Ok(rewritten) => tracing::info!(
+            logins = ?rewritten,
+            mode = mode.as_str(),
+            "brought the Meta logins' Contributor header relay in line with the Muse mode"
+        ),
+        Err(error) => tracing::error!(
+            %error,
+            mode = mode.as_str(),
+            "could not bring the Meta logins in line with the Muse mode; Muse requests are \
+             refused until they are"
+        ),
+    }
 }
 
 pub struct ManagedPaths {
@@ -336,7 +386,8 @@ impl Supervisor {
     ) -> anyhow::Result<Self> {
         let secret = load_or_create_secret(dirs)?;
         let credential = GptUpstreamCredential::new(&secret)
-            .context("generated secret is not a valid header value")?;
+            .context("generated secret is not a valid header value")?
+            .for_muse_mode(credentials.muse);
         let base_url = managed_base_url(upstream.port);
         let (ready_tx, ready_rx) = watch::channel(false);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1073,7 +1124,7 @@ mod tests {
         let yaml = upstream_config_yaml(1, Path::new("/a"), "s", &ChildCredentials::default());
         let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         assert!(parsed["codex-api-key"].is_null());
-        assert!(parsed["oauth-excluded-models"].is_null());
+        assert!(parsed["oauth-excluded-models"]["codex"].is_null());
         assert!(parsed["disable-image-generation"].is_null());
     }
 
@@ -1083,7 +1134,10 @@ mod tests {
             1,
             Path::new("/a"),
             "s",
-            &with_gpt(GptAuth::ApiKey, Some("sk-test")),
+            &ChildCredentials {
+                muse: MuseMode::Standard,
+                ..with_gpt(GptAuth::ApiKey, Some("sk-test"))
+            },
         );
         let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         let keys = parsed["codex-api-key"].as_sequence().unwrap();
@@ -1098,6 +1152,12 @@ mod tests {
             parsed["oauth-excluded-models"]["codex"][0],
             serde_yaml::Value::from("*")
         );
+        // One mapping holds both exclusions; a second key would drop Meta's.
+        assert_eq!(
+            parsed["oauth-excluded-models"]["meta"][0],
+            serde_yaml::Value::from("*-contributor")
+        );
+        assert_eq!(yaml.matches("oauth-excluded-models:").count(), 1);
         assert_eq!(
             parsed["disable-image-generation"],
             serde_yaml::Value::from(true)
@@ -1112,6 +1172,70 @@ mod tests {
             parsed["oauth-excluded-models"]["codex"][0],
             serde_yaml::Value::from("*")
         );
+    }
+
+    #[test]
+    fn meta_exclusions_follow_the_muse_mode() {
+        let excluded = |muse, gpt: GptAuth| {
+            let credentials = ChildCredentials {
+                muse,
+                ..with_gpt(gpt, Some("sk-test"))
+            };
+            let yaml = upstream_config_yaml(1, Path::new("/a"), "s", &credentials);
+            assert!(
+                yaml.matches("oauth-excluded-models:").count() <= 1,
+                "{yaml}"
+            );
+            let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+            parsed["oauth-excluded-models"].clone()
+        };
+        let list = |pattern: &str| serde_yaml::Value::from(vec![pattern]);
+        // Off: no Meta model at all, so `auto` and a left-behind login reach
+        // none. Standard: no Contributor-mode model. Contributor: no
+        // exclusion, so the -contributor IDs are served.
+        assert_eq!(
+            excluded(MuseMode::Off, GptAuth::Subscription)["meta"],
+            list("*")
+        );
+        assert_eq!(
+            excluded(MuseMode::Standard, GptAuth::Subscription)["meta"],
+            list("*-contributor")
+        );
+        assert!(excluded(MuseMode::Contributor, GptAuth::Subscription).is_null());
+        let with_codex = excluded(MuseMode::Contributor, GptAuth::ApiKey);
+        assert!(with_codex["meta"].is_null());
+        assert_eq!(with_codex["codex"], list("*"));
+    }
+
+    #[test]
+    fn prepare_managed_state_brings_meta_logins_in_line_with_the_muse_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(root.path());
+        create_private_dir(&dirs.state_dir).unwrap();
+        create_private_dir(&dirs.auth_dir()).unwrap();
+        let login = dirs.auth_dir().join("meta-a@example.com.json");
+        std::fs::write(&login, r#"{"type":"meta","api_key":"k"}"#).unwrap();
+        let upstream = UpstreamConfig::default();
+        let prepare = |muse| {
+            let credentials = ChildCredentials {
+                muse,
+                ..ChildCredentials::default()
+            };
+            prepare_managed_state(&dirs, &upstream, &credentials).unwrap();
+            let login: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&login).unwrap()).unwrap();
+            login.get("headers").cloned()
+        };
+        assert_eq!(prepare(MuseMode::Standard), None);
+        assert_eq!(
+            prepare(MuseMode::Contributor),
+            Some(serde_json::json!({
+                "X-Tbh-Contributor-Mode": "$x-model-router-muse-contributor"
+            }))
+        );
+        assert_eq!(prepare(MuseMode::Off), None);
+        assert!(prepare(MuseMode::Contributor).is_some());
+        assert_eq!(prepare(MuseMode::Standard), None);
     }
 
     fn test_provider(name: &str, routing_id: &str) -> OpenAiProvider {
@@ -1159,6 +1283,11 @@ mod tests {
             assert_eq!(
                 value["usage-statistics-enabled"],
                 serde_yaml::Value::from(false)
+            );
+            // With Muse off, Meta logins serve nothing.
+            assert_eq!(
+                value["oauth-excluded-models"]["meta"],
+                serde_yaml::from_str::<serde_yaml::Value>("[\"*\"]").unwrap()
             );
             let compat = &value["openai-compatibility"];
             if providers.is_empty() {

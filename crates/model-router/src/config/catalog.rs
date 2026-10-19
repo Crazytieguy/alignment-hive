@@ -1,6 +1,7 @@
-//! The built-in routes: the GPT and Grok models the router serves by default
-//! (Grok only when enabled), which of them the `/model` picker ships, and the
-//! context windows assumed for them.
+//! The built-in routes: the GPT, Grok and Muse models the router serves by
+//! default (Grok and Muse only when enabled), which of them the `/model`
+//! picker ships, the context windows assumed for them, and the model-ID
+//! predicates config validation keys off.
 
 use super::{CLIPROXY_UPSTREAM, ModelFamily, ModelRoute, split_effort_suffix};
 
@@ -110,10 +111,44 @@ pub(crate) fn overflow_dialect(route: &ModelRoute) -> Option<crate::overflow::Ov
         ModelFamily::Grok => {
             is_built_in(&GROK_MODELS, &route.upstream_model).then_some(OverflowDialect::Xai)
         }
-        // Any host can sit behind an openai-compat route; their error
+        ModelFamily::Muse => {
+            is_built_in_muse_model(&route.upstream_model).then_some(OverflowDialect::Meta)
+        }
+        // Any host can sit behind an openai-compat route, and their error
         // strings are unknown.
         ModelFamily::OpenAiCompat => None,
     }
+}
+
+/// Whether a compaction request on this route gets `tool_choice: none` (see
+/// `proxy::rewrite_gpt_body`): Codex-native GPT models, which answer
+/// compaction with their hand-back tool otherwise, and Grok as it always
+/// has. An openai-compat host is left as it is, as is a hand-written `gpt`
+/// route to a model outside the Codex list, and Muse accepts only `auto`.
+///
+/// Matched exhaustively on purpose: a new family must decide.
+#[must_use]
+pub(crate) fn forces_text_on_compaction(route: &ModelRoute) -> bool {
+    match route.family {
+        ModelFamily::Gpt => is_codex_native_model(&route.upstream_model),
+        ModelFamily::Grok => true,
+        ModelFamily::Muse | ModelFamily::OpenAiCompat => false,
+    }
+}
+
+/// Whether `model` is one of the router's built-in routes in any family,
+/// enabled or not. Config-free on purpose: `settings bypass` runs when the
+/// router is down or its config is broken, and must still recognise a
+/// default `model` that only the router can serve.
+#[must_use]
+pub(crate) fn is_built_in_route(model: &str) -> bool {
+    [
+        CODEX_NATIVE_MODELS.as_slice(),
+        GROK_MODELS.as_slice(),
+        MUSE_MODELS.as_slice(),
+    ]
+    .into_iter()
+    .any(|table| is_built_in(table, model))
 }
 
 /// The xAI-native upstream model IDs behind the built-in Grok routes, with
@@ -131,6 +166,99 @@ pub(super) const GROK_MODELS: [(&str, &str); 3] = [
 /// The context window `CLIProxyAPI`'s embedded model registry declares for
 /// the built-in Grok routes.
 pub(super) const GROK_CONTEXT_WINDOW: u64 = 500_000;
+
+/// The Meta-native upstream model IDs behind the built-in Muse routes, with
+/// their display names. Wonder Full is served only on the Power and Maximum
+/// Muse Code plans; a lower plan's login gets `model_not_found` for it.
+///
+/// Their `-contributor` twins (Meta trains on Contributor-mode traffic) are
+/// the upstream IDs only under `[muse] contributor = true`, behind the same
+/// routing IDs ([`super::MuseMode::Contributor`]). Absent: the older `muse-spark-*`
+/// models, which the same login also serves but nobody has characterised
+/// for this use.
+pub(super) const MUSE_MODELS: [(&str, &str); 2] = [
+    (MUSE_WONDER_FULL, "Muse Wonder Full"),
+    ("muse-wonder-1.0", "Muse Wonder"),
+];
+
+/// The suffix Meta's Contributor-mode model IDs carry.
+pub(super) const MUSE_CONTRIBUTOR_SUFFIX: &str = "-contributor";
+
+/// The Muse model only the Power and Maximum Muse Code plans serve.
+pub(crate) const MUSE_WONDER_FULL: &str = "muse-wonder-full-1.0";
+
+/// The context window `CLIProxyAPI`'s model registry declares for the
+/// built-in Muse routes. Meta's docs say 1,048,576; the registry value is
+/// the smaller one, and both sit above Claude Code's 1M compaction cap.
+pub(super) const MUSE_CONTEXT_WINDOW: u64 = 1_007_997;
+
+/// Whether `upstream_model` names a Contributor-mode model: Meta's
+/// `<model>-contributor` IDs, whose traffic Meta trains on. The one
+/// predicate config validation and the tests share.
+///
+/// Matched on the suffix alone, after dropping a pinned `(effort)` and any
+/// `provider/` prefix, and regardless of the route's declared family: no
+/// other backend uses the suffix, so a false positive costs a visible
+/// config error while a false negative would be silent training traffic.
+#[must_use]
+pub(crate) fn is_muse_contributor_model(upstream_model: &str) -> bool {
+    bare_model_name(upstream_model).ends_with(MUSE_CONTRIBUTOR_SUFFIX)
+}
+
+/// Whether `upstream_model` is a built-in Muse model, in Standard or
+/// Contributor mode (effort suffix allowed). Exact, like [`is_built_in`]
+/// for every family: other spellings a hand-written route may use are the
+/// `names_*` predicates' business.
+fn is_built_in_muse_model(upstream_model: &str) -> bool {
+    is_built_in(
+        &MUSE_MODELS,
+        standard_twin(split_effort_suffix(upstream_model).0),
+    )
+}
+
+/// A Muse model ID without its `-contributor` suffix, if any.
+fn standard_twin(model: &str) -> &str {
+    model.strip_suffix(MUSE_CONTRIBUTOR_SUFFIX).unwrap_or(model)
+}
+
+/// Whether `upstream_model` names a Meta Muse model (`muse-*`). Such a route
+/// must declare `family = "muse"`: the Standard-mode gate and the Meta search
+/// backend key off the family, and a route that skipped them would send
+/// Muse traffic unchecked and its searches to another vendor.
+#[must_use]
+pub(crate) fn names_muse_model(upstream_model: &str) -> bool {
+    bare_model_name(upstream_model).starts_with("muse-")
+}
+
+/// Whether `upstream_model` names [`MUSE_WONDER_FULL`] or its Contributor
+/// twin, however a hand-written route spells it.
+#[must_use]
+pub(crate) fn names_muse_wonder_full(upstream_model: &str) -> bool {
+    standard_twin(&bare_model_name(upstream_model)) == MUSE_WONDER_FULL
+}
+
+/// Whether `upstream_model` is `CLIProxyAPI`'s `auto` (effort suffix
+/// allowed), which the child resolves to the newest model any login serves:
+/// with a Meta login, a Muse model the route's family does not vouch for.
+/// A `provider/auto` is another host's model name, not this one.
+#[must_use]
+pub(crate) fn names_auto_model(upstream_model: &str) -> bool {
+    let (base, _) = split_effort_suffix(upstream_model.trim());
+    base.trim().eq_ignore_ascii_case("auto")
+}
+
+/// `upstream_model` without a pinned `(effort)`, a `provider/` prefix or
+/// surrounding whitespace (which the child trims), lowercased: the model
+/// name the Muse predicates compare.
+fn bare_model_name(upstream_model: &str) -> String {
+    let (base, _) = split_effort_suffix(upstream_model.trim());
+    let base = base.trim();
+    base.rsplit('/')
+        .next()
+        .unwrap_or(base)
+        .trim()
+        .to_ascii_lowercase()
+}
 
 /// The built-in routes of one family: one bare routing ID per model.
 pub(super) fn built_in_routes(

@@ -8,11 +8,16 @@ use serde_json::{Value, json};
 ///
 /// Copy is deliberately short: identity (never present as Claude) plus
 /// context that the surrounding system prompt is Claude Code's standard one,
-/// so references to "Claude" in it are intelligible.
+/// so references to "Claude" in it are intelligible. `maker` is named only
+/// for families whose models misattribute their maker without it
+/// ([`crate::config::ModelFamily::maker`]).
 #[must_use]
-pub fn identity_text(display_name: &str) -> String {
+pub fn identity_text(display_name: &str, maker: Option<&str>) -> String {
+    let maker = maker
+        .map(|maker| format!(", a {maker} model"))
+        .unwrap_or_default();
     format!(
-        "You are {display_name}, working inside Claude Code's \
+        "You are {display_name}{maker}, working inside Claude Code's \
          agent harness alongside Claude models. Do not present yourself as \
          Claude. The rest of this system prompt is Claude Code's standard \
          system prompt, so it may address the assistant as Claude; read it \
@@ -84,12 +89,16 @@ fn is_subagent(system: Option<&Value>) -> bool {
 /// # Errors
 /// Returns an error when the body is not a JSON object or `system` has an
 /// unsupported shape.
-pub(crate) fn inject_identity_into(document: &mut Value, display_name: &str) -> anyhow::Result<()> {
+pub(crate) fn inject_identity_into(
+    document: &mut Value,
+    display_name: &str,
+    maker: Option<&str>,
+) -> anyhow::Result<()> {
     let object = document
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("request body is not a JSON object"))?;
 
-    let mut text = identity_text(display_name);
+    let mut text = identity_text(display_name, maker);
     if is_subagent(object.get("system")) {
         text.push(' ');
         text.push_str(SUBAGENT_TEXT);
@@ -117,12 +126,20 @@ mod tests {
     /// Byte-level convenience over [`inject_identity_into`].
     fn inject_identity(body: &[u8], display_name: &str) -> anyhow::Result<Vec<u8>> {
         let mut document: Value = serde_json::from_slice(body)?;
-        inject_identity_into(&mut document, display_name)?;
+        inject_identity_into(&mut document, display_name, None)?;
         Ok(serde_json::to_vec(&document)?)
     }
 
     fn parsed(bytes: &[u8]) -> Value {
         serde_json::from_slice(bytes).unwrap()
+    }
+
+    #[test]
+    fn a_maker_is_named_only_when_given() {
+        assert!(identity_text("Muse Wonder", Some("Meta")).starts_with(
+            "You are Muse Wonder, a Meta model, working inside Claude Code's agent harness"
+        ));
+        assert!(identity_text("GPT Test", None).starts_with("You are GPT Test, working inside"));
     }
 
     #[test]
@@ -132,7 +149,7 @@ mod tests {
         let system = result["system"].as_array().unwrap();
         assert_eq!(system.len(), 1);
         assert_eq!(system[0]["type"], "text");
-        assert_eq!(system[0]["text"], identity_text("GPT Test"));
+        assert_eq!(system[0]["text"], identity_text("GPT Test", None));
     }
 
     #[test]
@@ -180,7 +197,7 @@ mod tests {
         let result = parsed(&inject_identity(body, "GPT Test").unwrap());
         assert_eq!(
             result["system"][0]["text"],
-            format!("{} {SUBAGENT_TEXT}", identity_text("GPT Test"))
+            format!("{} {SUBAGENT_TEXT}", identity_text("GPT Test", None))
         );
     }
 
