@@ -1694,3 +1694,48 @@ version. Only the edited file and those below it are checked, so an entry
 at 258400 in a file above it (a checked-in project file) is not moved. Retest trigger: the live catalog changes a built-in
 model's `context_window` (diff `codex debug models` against
 `CODEX_DEFAULT_WINDOW_CHANGES`).
+
+## Grok CLI version floor and CLIProxyAPI 8.0.32 (2026-10-19, router 0.1.27)
+
+Every Grok route failed on the live 0.1.27 router: xAI's
+`cli-chat-proxy.grok.com` rejects `Your Grok CLI version (0.2.120) is
+outdated. Please update to version 1.0.13 or later`. The floor went up
+around 2026-10-01 (upstream #6249); 7.3.16 hard-codes client version
+0.2.120 and the 7.3 line never got the fix. Upstream bumped it to 1.0.44 in
+v8.0.8 and, from v8.0.19, fetches the current Grok CLI version from npm at
+startup and every 3h, falling back to a pinned value (1.0.44 in 8.0.32).
+The pin moves 7.3.16 → 8.0.32; the four archive sha256s were computed
+from downloads and matched the release's `checksums.txt`. Archive names
+and layout (`cli-proxy-api` at the root) are unchanged across the major.
+
+### Pin audit
+
+- Every YAML key the generated child config writes, and the `-config`,
+  `-codex-login`, `-xai-login` and `-no-browser` flags, exist in 8.0.32's
+  source as in 7.3.16's (an unknown key would be silently ignored).
+- Existing auth files load unchanged; `/v1/models` is populated by the
+  first probe after startup on both pins, so readiness is unaffected.
+- Codex identity unchanged: `Originator: codex-tui`, UA 0.154.0.
+- Grok identity: `User-Agent: xai-grok-workspace/1.0.62`,
+  `X-Grok-Client-Version: 1.0.62` (npm), `X-Grok-Client-Identifier:
+  grok-shell`.
+
+### Live verification
+
+Sandbox: worktree binary in managed mode on 8897 with private XDG dirs (it
+downloaded and verified 8.0.32 itself) and copied auth files; a separate
+private 8.0.32 child with `request-log: true` for provider-bound evidence.
+Curl only; the live service was not touched.
+
+| check | result |
+|---|---|
+| smoke | grok-4.7, 4.6, 4.5 answer as `grok-4.x-build`; gpt-6.1-sol, gpt-6-luna, gpt-6-astra unchanged |
+| effort | upstream `reasoning.effort` = requested for grok-4.7 low/high and grok-4.6 high; `max` → `xhigh` (as on 7.3.16) |
+| streaming | grok-4.7 thinking + text blocks, signature delta, clean `message_stop` |
+| tool use | two-turn round trip correct on grok-4.7 and gpt-6.1-sol |
+| WebSearch | grok-4.7 10 results in 2s, grok-4.5 10 in 6s; gpt-6.1-sol 35 in 2s |
+| xAI overflow | 540K tokens to grok-4.7 → translated `prompt is too long: 540084 tokens > 500000 maximum` |
+| doctor | all green, `upstream-binary CLIProxyAPI v8.0.32 cached` |
+
+Not re-measured: API-key GPT auth and `[[openai-providers]]` routes (config
+keys present; no live key or provider in the sandbox).
