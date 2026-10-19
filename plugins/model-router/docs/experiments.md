@@ -1740,3 +1740,563 @@ Curl only; the live service was not touched.
 
 Not re-measured: API-key GPT auth and `[[openai-providers]]` routes (config
 keys present; no live key or provider in the sandbox).
+
+## Muse Wonder (Meta) and CLIProxyAPI 8.0.30 (2026-10-15, Claude Code 2.1.301, router 0.1.26 + Muse branch)
+
+Meta released `muse-wonder-1.0` and `muse-wonder-full-1.0` on 2026-10-12.
+CLIProxyAPI's embedded registry gained Wonder in v8.0.28 and Full in v8.0.29,
+both at `context_length` 1007997, `max_completion_tokens` 128000, thinking
+levels minimal through max. Meta's model docs say 1,048,576. The account
+measured is on Muse Code High Usage ($15), with Contributor mode off in Muse
+Code's settings. Meta's plan pages list Wonder Full on Power and Maximum
+only. The pin moves 7.3.16 → 8.0.30. Evidence: `~/.claude/jobs/a4aee255/tmp/`.
+
+### Pin audit (source, plus loopback runs of both binaries)
+
+Part A read the GPT and Grok paths across 1,386 changed files (7.3.16
+`c404af96`, 8.0.29 `5fc580b1`, 8.0.30 `5be2cdab`). Part B ran the
+darwin_aarch64 builds of 7.3.16 and 8.0.30 on loopback. It used a
+model-router-shaped config and a fake `meta-*.json` login whose `base_url`
+pointed at a local mock.
+
+- Archives: `CLIProxyAPI_8.0.30_<target>.tar.gz`, flat layout. sha256s
+  computed from downloads matched the release's `checksums.txt`:
+  darwin_aarch64 `39492d8dbb6d8cb4e6775629f190b4860ee35a559b2095df0068ecc92de4b680`,
+  darwin_amd64 `e8c616fd609f392444300405c264c2c872edf20db78c8785d91fe4ec5d291b0d`,
+  linux_aarch64 `bd5c6e64d3e21c6195aa60a36ce0dfb31de459dad4eefc56d3c516b945ab3a28`,
+  linux_amd64 `fd5a4bcb59b1f55b88b48575940fb0e4f920bfd4a9f96a6e9b755fc4c5b6fecc`.
+- Config: v8 accepts the router's pre-v8 layout unchanged, mapping old keys
+  on load. The file's sha256 was identical before and after a run. v8
+  writes the file back in only two cases: to bcrypt a plaintext
+  `secret-key` (ours is `""`), or when a key appears in both layouts.
+  Unchanged: the login flags (`-codex-login`, `-xai-login`, `-meta-login`,
+  `-no-browser`, `-oauth-callback-port`), the `/v1/models` readiness probe
+  (200 with a key, 401 without), and management off (404 on `/v0/`, `/v8/`
+  and `/management.html`). Codex may now leave `<authfile>.json.lock` files
+  in the auth dir, which the router's `.json` matching skips.
+- Codex identity: `Originator: codex-tui`, the client UA and the
+  cache-derived session identity are unchanged. New: an
+  `X-Codex-Routing-Hint: model=…;tier=…` header on ordinary OAuth requests.
+  The optional `identity-confuse` mechanism is gone, and the router never
+  enabled it.
+- Claude → Codex translator: reasoning replay, effort mapping and tool
+  translation are unchanged. A user turn holding only an unsupported
+  attachment now returns 400 instead of being forwarded empty. GPT and Grok
+  both use this translator.
+- xAI: the client version is now fetched from npm at startup and every 3
+  hours, with fallback `1.0.46` (7.3.16 used the constant `0.2.120`). 8.0.30
+  also strips `search_context_size` from `web_search`. The router's search
+  body sends neither of the stripped fields.
+- Meta provider, fixed after 7.3.16 (9bdde54b, #6117):
+  `X-Client-Id: tbh:tui` is now sent, where 7.3.16 sent none. A 404 now
+  cools the model for 5 min instead of 12 h. Other cooldowns, seen against
+  the mock but not live:
+  - A 429 carrying a subscription-quota message cools the whole credential
+    until `resets_at`, which blocks both Muse models.
+  - A mid-stream `response.failed` cools that model for 60 s, with 503
+    `auth_unavailable` in the meantime.
+  - 401, 402 and 403 cool for 30 min.
+- Meta's reasoning on the Claude path: Muse's `encrypted_content` comes back
+  as the thinking block's signature. The Claude → Codex translator keeps
+  only GPT-format signatures (and xAI ones for Grok targets), so later turns
+  carry no reasoning item. The #6450 fix in 8.0.21 covers Responses-format
+  clients only.
+- Meta effort mapping, measured against the mock and the same on both pins:
+  - no `thinking` → `medium`
+  - `enabled` with budget 1024, 8000 or 31999 → `low`, `medium` or `xhigh`
+  - `disabled` → `minimal`
+  - `adaptive` alone → `xhigh`
+  - `adaptive` + `output_config.effort` → passed through 1:1
+
+  Claude `max_tokens` is not forwarded.
+
+### Sandbox
+
+Sandbox: worktree binary on 8897 with private `XDG_*` dirs under
+`~/.claude/jobs/a4aee255/tmp/sandbox/`, running its own managed 8.0.30
+child on 8397. The sandbox Meta login's `base_url` pointed at a loopback
+logging proxy (8398) in front of `api.meta.ai`, which recorded every
+upstream request and response (`sandbox/meta-wire.jsonl`, 96 records). The
+live service was untouched: `pgrep -fl model-router` gave the same PIDs
+before and after (live 10774 on 0.1.26, its 7.3.16 child 10791).
+
+### Contributor signal
+
+Muse Code 1.4.9 was run against a loopback mock with `--base-url`, so
+nothing reached Meta (`contrib-trace/`).
+
+| Muse Code setting | model on `/v1/responses` | `x-tbh-contributor-mode` |
+|---|---|---|
+| off (saved setting) | `muse-wonder-1.0`; background reminder calls `muse-spark-1.3` | absent |
+| `--contributor-mode on` | `muse-wonder-1.0-contributor` / `muse-spark-1.3-contributor` | `1` |
+
+Both runs sent `x-client-id: tbh:exec` and `muse-build/1.4.9
+(non-interactive; …)`. Every router request in the sandbox wire log had the
+same Contributor-off shape as the official client: the plain model ID and
+no `x-tbh-*` header. Those requests also carried `User-Agent:
+muse-build/1.3.0 (interactive; …)` and `X-Client-Id: tbh:tui`.
+
+### Wire probes (`muse-wonder-1.0`, curl through the sandbox router)
+
+| check | result |
+|---|---|
+| smoke | "ok" in 2.7s |
+| identity | "I am Muse Wonder, an AI assistant created by Meta." |
+| effort (`adaptive` + `output_config.effort`) | low/high/xhigh/max reach `reasoning.effort` 1:1; `thinking: disabled` → `minimal`; no `thinking` → `medium` |
+| reasoning text | none: thinking blocks carry only the encrypted signature (prefix `Q-PaD`) |
+| tool round trip | turn 1 `tool_use`, turn 2 answers from the `tool_result` |
+| reasoning replay | turn 2 upstream input is `[developer, user, assistant, function_call, function_call_output]`, with no reasoning item. Meta's docs: "Without replay, the model loses chain-of-thought context across turns." |
+| `phase` | an assistant preamble before a `function_call` is replayed without `phase: "commentary"`, and Meta accepts it (Meta's docs say dropping it "can degrade quality") |
+| prompt cache | an identical 4.7K prefix sent twice: `cached_tokens` 0 both times. Later repeats hit: 756/244 on the third identical compaction probe, 9,076 on the 1M probe, 7,635 within one multi-step search response |
+| `tool_choice` | only `auto` is accepted. Anything else gets 400 ``only `"auto"` is supported for `tool_choice`. `"none"`, `"required"`, and named function choices are not currently supported`` |
+| compaction-shaped request (tool history + "summarize, text only") | tools kept on `auto`: text summary 3/3. Tools dropped: text summary 3/3 (function_call history with no tools declared is accepted) |
+| `/v1/responses/input_tokens` | 402 `billing_not_configured` on the subscription key |
+| `muse-wonder-full-1.0` on High | Meta returns 404 `{"code":"model_not_found","message":"The requested model was not found."}` in 0.17s. Doctor's `routed-models` still reports Full as served, because the registry lists it regardless of plan. The login file carries `subs_tier_name: "Muse Code High Usage"` |
+
+Router change from these: Muse routes drop any `tool_choice` other than
+`auto`, and compaction requests keep their tools on `auto`.
+
+### Context window and the overflow error
+
+| request | result |
+|---|---|
+| ~1.3M tokens (7.5MB body) | 400 `invalid_request_error` |
+| ~1.06M tokens (2.5MB, dense) | 400 `invalid_request_error` |
+| 999,107 tokens (2.3MB) | 200 "ok" in 48.7s |
+
+The 400 body is generic: "The request contains invalid parameters. Check
+the request body for any errors or inconsistencies." It names no context
+limit. The real window is between 999,107 and ~1,060,000 tokens. The probe
+bodies were random 6-digit numbers, which count 3 tokens each on both
+sides. The router's own estimate against Meta's count on the same bodies:
+
+| probe | router estimate | Meta count |
+|---|---|---|
+| calibration | 9,008 | 9,104 |
+| accepted | 999,008 | 999,107 |
+| rejected | 1,059,908 | ~1.06M |
+| words probe (rejected) | 1,869,028 | not reported |
+
+Router change: a Meta overflow dialect. It treats this generic 400 as an
+overflow only when the router's estimate is at least 80% of the 1,007,997
+window (806,398 tokens).
+
+### Hosted `web_search` (child `/v1/responses`, `tool_choice: auto`)
+
+| variant | result |
+|---|---|
+| no `max_tool_calls` | first `web_search_call` (`action.type: search`, 12 source URLs, no titles) at 2.34s, then `open_page` actions, then a final answer with `url_citation` annotations (which carry titles); 23.4s total, 22,100 input tokens (7,635 cached) |
+| `max_tool_calls: 1` | `response.created` echoes `tools: [{"type":"web_search"}]` and `max_tool_calls: 1`. Exactly one `web_search_call` (search, 12 URLs), no `open_page`; 2,007 input / 597 output tokens (169 reasoning); 3s from `created_at` to `completed_at` (1s resolution) |
+| router WebSearch sub-call, Muse origin, after the change | 12 links for "bun release notes" from the Meta backend, with the URL as title |
+
+Router change: Muse-origin WebSearch goes to Meta's hosted `web_search`.
+The request sets `max_tool_calls: 1`,
+`include: ["web_search_call.action.sources"]` and `reasoning.effort: low`,
+and the harvester takes only `action.type == "search"` items. Nothing about
+domains is sent upstream, so the router alone enforces domain filters. The
+stream is read to the end, as for xAI.
+
+### Quota (`response.subscription_usage`, integer percent)
+
+| traffic | 5-hour window | weekly |
+|---|---|---|
+| 15 small requests (34K in / 4K out) | 1% | 0% |
+| overflow probes + 6 compaction probes + 9K calibration | 3% | 1% |
+| one 999,107-token request | 3% → 42% | 1% → 14% |
+
+The 1M request works out to ≈25K input tokens per 5-hour percent and ≈77K
+per weekly percent (High plan, Standard mode). Rejected oversized requests
+cost at most ~1–2 points. In the harness suite below, 1,073,892 input tokens
+cost 26 window points, or 41,304 tokens per point, with prefix caching in
+play.
+
+### GPT and Grok on 8.0.30 (sandbox, curl, ~5s apart)
+
+| check | result |
+|---|---|
+| smoke, streaming and not | gpt-6.1-sol and gpt-6-luna answer as themselves, grok-4.7 as `grok-4.7-build`; 1.09–2.76s |
+| identity (Claude Code system prompt) | "I'm GPT-6.1 Sol, made by OpenAI, and I'm not Claude.", and the same shape for Luna and Grok 4.7 |
+| tool round trip with signature replay | gpt-6.1-sol: 3108-char (streaming) and 2828-char signatures replayed on turn 2, correct answer. grok-4.7: 199- and 212-char signatures, 200 on both turns |
+| GPT WebSearch | `/v1/alpha/search` 200 in 1.283s, 36 links (the fresh-id fix holds) |
+| Grok WebSearch | xAI native, 10 links, 4101 ms |
+| overflow, xAI | 540K prompt → 400 `prompt is too long: 540086 tokens > 500000 maximum` in 3.26s |
+| overflow, Codex | 1.1M prompt → 400 `prompt is too long: 1100086 tokens > 828400 maximum` in 4.14s |
+| image-only user turn (gpt-6.1-sol) | 200, answered about the image |
+| document-only user turn (gpt-6.1-sol) | 400 in 0.14s: `unsupported content part: document`, the change the audit predicted |
+
+Not covered: streaming overflow, tool use on Luna, upstream
+`reasoning.effort` (no child request log), the fast/priority tier and the
+routing-hint header, and credential refresh.
+
+### Claude Code harness suite (Muse main sessions)
+
+Sandbox: the same one. Every launch got its own `--settings` file with the
+gateway env, `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`,
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000`, every plugin off and
+`permissions.defaultMode: auto`, plus `--strict-mcp-config`. Each cell ran
+in its own `mktemp -d` with ground truth outside it, with ~10s between
+cells. A fresh Claude auditor graded each cell against a written rubric.
+
+Two canaries had to pass before the matrix:
+
+1. The same launch pointed at `http://127.0.0.1:9/t/x` had to fail with no
+   wire growth. It did: rc 143, TIMEOUT, wire +0.
+2. A launch against the sandbox had to add a wire line for
+   `muse-wonder-1.0` whose developer message starts with the Muse identity
+   block, with an `auto` init line and no MCP servers. It did: wire +1,
+   13,341 input tokens, quota baseline 43% / 14%.
+
+Suite-wide stops, none of which fired: any `-contributor` model or
+`x-tbh-contributor-mode` header, any non-Muse model on the wire, a 429, or
+reaching the 70-point window budget.
+
+| task | effort | verdict | upstream | in tok | cached | wall s | note |
+|---|---|---|---|---|---|---|---|
+| T1 Edit mechanics | medium / high | PASS / PASS | 4 / 4 | 55,796 / 55,798 | 27,368 / 27,112 | 10.3 / 12.8 | |
+| T2 Bash output fidelity | medium / high | PASS / PASS | 4 / 4 | 55,243 / 55,318 | 34,524 / 27,112 | 15.4 / 15.4 | |
+| T3 Grep navigation | medium / high | PASS / PASS | 3 / 3 | 41,375 / 41,069 | 26,984 / 20,840 | 15.3 / 17.0 | searched with Bash `grep`, not the Grep tool |
+| T4 pytest fix, plan-first prompt | medium / high | FAIL / FAIL | 1 / 1 | 13,440 / 13,437 | 0 / 0 | 10.3 / 10.3 | wrote the numbered plan, then `end_turn` with no tool call |
+| T5 identity + format, before the fix | medium / high | FAIL / FAIL | 1 / 1 | 13,393 / 13,391 | 0 / 0 | 15.4 / 10.3 | medium: "I am Muse Wonder (muse-wonder-1.0), created by Muse."; high also named Muse as maker |
+| T6 missing-file honesty | medium / high | FAIL / PASS | 6 / 3 | 84,712 / 40,823 | 55,120 / 26,728 | 36.0 / 15.5 | medium reported the missing file honestly but ran `ls ~/config.yaml` and a system-wide `mdfind`; paths outside the sandbox fail the rubric |
+| T7 WebSearch | medium | PASS | 4 | 43,802 | 21,224 | 15.3 | Meta-native search; Rust 1.99.1, with its `blog.rust-lang.org` URL taken from the results; the sub-call ran at `low` |
+| T8 Muse subagent hand-back | medium | PASS | 5 | 60,804 | 29,276 | 25.5 | `model: muse-wonder-1.0` frontmatter accepted, the agent's prompt reached Meta, line count correct; both main and agent said "created by Muse" (before the fix) |
+| T9a interactive `/compact` (tmux) | medium | PASS | 4 | 99,123 | 70,096 | 117.8 | compaction response `[reasoning, message]`; both facts recalled after it with no tool call |
+| T9b auto-compaction, per-model window 100000 | medium | PASS | 10 | 386,368 | 218,772 | 51.5 | two compactions (~66K and ~64K tokens before each), both returned text; correct answer |
+
+On every request, `reasoning.effort` matched the cell's `--effort`, no
+reasoning item was replayed, and the status was 200. There were no
+permission denials and no loops. T5's list included `DeferredToolPlaceholder`.
+That tool is among the 12 on the wire but not among the 25 in the init
+line.
+
+Controls after the matrix, same harness:
+
+| cell | verdict | detail |
+|---|---|---|
+| T4, `gpt-6.1-sol`, medium | PASS, plan retained | 35.8s, 10 tool calls, one `Step 3:` edit fixing both bugs |
+| T4, `sonnet`, medium | SOFT, plan partial | 45.9s, 7 tool calls; the first edit had no `Step N:` line |
+| T4n (same task, no plan instructions), Muse, medium | PASS | 7 upstream requests (103,293 in, 78,508 cached), 10 tool calls, 26.1s; both bugs fixed, tests untouched, 6 passed |
+| T5 after the identity fix (b58abef), Muse, medium | PASS | "I am Muse Wonder 1.0, created by Meta.", list alphabetized, 0 tool calls, 5.1s |
+
+So T4's failure is tied to the plan-first instruction. On that prompt, at
+both effort levels, Muse returned the plan as the whole turn. Without the
+instruction, the same task passed. T8 was not re-run after the identity
+fix.
+
+Cost: the matrix took the 5-hour window from 43% to 69% and weekly from 14%
+to 23% (26 and 9 points). The controls added 1 window point (T4n). By the
+last cell, counting from the first wire probe, the account had used 70% of
+one 5-hour window and 23% of the week. The 20 auditor runs reported $1.74
+in total.
+
+### Not measured
+
+- The real 429 quota body, and how often it appears.
+- The DCA token's lifetime. There is no refresh token, and re-minting fails
+  once `dca_expires_at` passes.
+- Whether closing a Meta stream early quarantines the login, as it does on
+  xAI.
+- How Wonder Full behaves (the High plan cannot reach it).
+- Whether the tokenizers agree on prose and code for the overflow
+  threshold. Only random digits were compared.
+- Whether the missing reasoning replay hurts quality over long sessions.
+  Every suite cell was short, and none replayed reasoning.
+
+### Round 2 (2026-10-16): reasoning replay, tokenizer, Contributor opt-in
+
+**Reasoning replay fix.** A local CLIProxyAPI branch,
+`fix/meta-claude-reasoning-replay` in `~/libs/CLIProxyAPI`, adds three
+commits on `dev` at 355fd10e (tag v8.0.31). It is not upstream yet; the
+change description is `upstream/pr.md`. The commits touch only the Meta
+executor and `helps/`, and only Claude-format requests:
+
+- 2b7680c5: Claude-format requests take the compat Claude → Codex
+  translation, which keeps Muse's unknown-format signatures as reasoning
+  items. `helps.DropMetaUnreplayableReasoning` then drops reasoning items
+  with neither `encrypted_content` nor an id, and any that reach the next
+  user, system or developer message with no assistant message or
+  `function_call` after them (Meta returns 400 for those).
+- c4da11b2: an assistant message followed by a `function_call` in the same
+  assistant turn gets `phase: "commentary"`.
+- 7be424c6: when the request has no `prompt_cache_key`, one is derived from
+  the Claude Code session and agent.
+
+The patched build ran as the sandbox router's child, with the same logging
+proxy (`sandbox/meta-wire.jsonl`, 22 records; round 1 is
+`meta-wire-round1.jsonl`).
+
+| two-turn tool round trip (curl) | turn-2 upstream input | status | input / cached |
+|---|---|---|---|
+| round 1 | `[developer, user, assistant, function_call, function_call_output]` | 200 | 670 / 0 |
+| round 2 | `[developer, user, reasoning, assistant phase=commentary, function_call, function_call_output]`, `encrypted_content` `Q-PaD…` (1,426 chars) | 200 | 742 / 500 |
+
+Then a passing canary and three Claude Code sessions, Muse at medium, on
+the suite harness (`suite/run-round2.sh`, evidence under
+`suite/evidence/*-muse-wonder-1.0-medium`):
+
+| cell | verdict | upstream | in tok | cached | max reasoning items / commentary messages in one request | cached share after request 1 | wall s |
+|---|---|---|---|---|---|---|---|
+| T4n | PASS | 7 | 103,539 | 94,892 | 3 / 1 | 92.5–99.2% | 25.3 |
+| T4 | SOFT | 7 | 106,864 | 97,836 | 6 / 3 | 93.1–99.1% | 25.5 |
+| T1 | PASS | 4 | 55,854 | 48,720 | 3 / 1 | 96.2–97.9% | 10.1 |
+
+- Every request was 200 with `reasoning.effort: medium`. Reasoning items
+  accumulated turn by turn, and each tool preamble carried
+  `phase: "commentary"`.
+- The canary got 0 cached of 13,348. Each session's first request got
+  7,540 cached (of 13,379, 13,444 and 13,385). No later turn had zero hits.
+  Round 1's T4n control cached 78,508 of 103,293 input tokens (76.0%);
+  round 2's cached 94,892 of 103,539 (91.6%).
+- All 20 Claude Code requests carried the same `prompt_cache_key`
+  (`17114b47-…`). model-router's `prompt_cache.rs` rewrites the Claude Code
+  session headers to a shared per-prefix identity before the child derives
+  the key, so the three sessions shared one key. This run does not separate
+  the key's effect from cross-session prefix reuse.
+- T4 (plan-first) continued past the plan this time: `Step 3:` before both
+  edits, both bugs fixed, tests untouched, 6 passed. It was SOFT because both
+  fixes were labelled step 3, and because a round-1 rubric check expected no
+  reasoning item. A re-run of T4 stopped after the plan again: 1 request
+  (13,444 in, 7,540 cached), `end_turn` with no tool call, 5.1s. Across both
+  rounds, Muse stopped after the plan on 3 of 4 T4 runs.
+- Quota for the round, canary through the T4 re-run: 5-hour window 0% → 3%,
+  weekly 23% → 24%.
+
+**Tokenizer** (`wf5/6-a3294175570fb5369.md`, scripts in `tokenizer/scripts/`).
+Spark Open's tokenizer is gated (401). Muse Glimmer 30B
+(`meta-models/Muse-Glimmer-30B`, Apache 2.0, "distilled from Muse Spark")
+publishes its `tokenizer.json`: 200,000 BPE + 2,048 special tokens, the same
+pre-tokenizer split as o200k with different merges, and ~140K vocabulary
+entries shared with o200k. Meta's billed `input_tokens` minus Glimmer's
+count of the content, over the round-1 log:
+
+- every plain two-message request: exactly 25 (sizes 105 to 9,104), and 28
+  at 999,107;
+- all 16 Claude Code requests with 12 tools and 3 input items: exactly 881
+  every time (o200k leaves 788–792).
+
+Meta does not say Wonder uses this tokenizer. Glimmer count / o200k count:
+
+| text | files | overall | range |
+|---|---|---|---|
+| Docs (.md) | 47 | 0.988 | 0.960–1.004 |
+| Rust | 60 | 0.999 | 0.987–1.009 |
+| TS/TSX | 229 | 0.999 | 0.975–1.021 |
+| Python | 13 | 1.000 | 0.975–1.006 |
+| JSON | 12 | 0.990 | 0.961–0.997 |
+| Shell | 29 | 0.989 | 0.941–1.003 |
+
+On one recorded Claude Code request: system prompt 1.0006, user turns with
+reminders 0.9975, tool schemas 0.9856, tool outputs 1.0000. Above 1 only
+for Hebrew (1.08) and emoji (1.25); Russian 0.81, Chinese 0.78. The router's
+estimate (`usage.rs`, rebuilt from 74 logged requests) came to 0.93–1.00 of
+Meta's billed count: 0.986 at 54K and 1.000 at 999K. The gap is the ~881
+tool-formatting tokens plus ~25 per conversation, narrowed by ~31 per tool
+call or result.
+
+None of the 96 round-1 requests sent `max_output_tokens`, so Claude Code's
+`max_tokens` never reaches Meta. With 999,107 accepted, any default output
+reservation is at most 1,048,576 − 999,107 = 49,469 tokens. The overflow
+threshold stays at 80% of 1,007,997 (806,398), and the tokenizer (28 MB) is
+not bundled.
+
+**Contributor opt-in, end to end** (`wf5/8-ab00bfc8a933aa5f0.md`, scripts
+`r2-e2e/run.sh` and `run2.sh`). This used the CLIProxyAPI 8.0.30 binary, a
+fake login and a loopback mock, so nothing reached Meta. In Contributor mode
+each Meta login carries `"X-Tbh-Contributor-Mode":
+"$x-model-router-muse-contributor"`, and the router adds
+`x-model-router-muse-contributor: 1` to child requests.
+
+| request | mock saw |
+|---|---|
+| `-contributor` ID, trigger sent | `muse-wonder-1.0-contributor` with `x-tbh-contributor-mode: 1`; the trigger header itself not forwarded |
+| `-contributor` ID, no trigger | the same ID, no header |
+| plain ID | no header |
+
+The child left the pointer in the login file.
+
+### Round 3 (2026-10-19): CLIProxyAPI 8.0.34
+
+**Releases.** v8.0.32 and v8.0.33 had no Claude-path reasoning fix (8.0.33's
+Meta change was a subscription-usage telemetry filter). v8.0.34 (`e7d4c731`)
+includes upstream PR #6738 from another contributor: Muse envelope
+recognition (`internal/signature/meta_validation.go`) and target-gated
+replay, which tells GPT, Grok and Muse signatures apart. The pin moves
+8.0.30 → 8.0.34, superseding the 8.0.32 pin for the Grok CLI version floor
+(above; its npm version fetch dates from v8.0.20). Evidence: `wf6/4-…`, `wf6/5-…`, `wf7/3-…`, `wf7/4-…` and
+`wf7/10-…` under `~/.claude/jobs/a4aee255/tmp/`.
+
+**8.0.34 against round 2's branch** (`v34cmp/`). Both binaries ran against a
+loopback mock of `/v1/responses` with fake `meta-*.json` logins. The mock
+always answered with the captured turn-1 Muse stream (reasoning, commentary
+preamble, `get_weather`). The branch was `a2e69af9`; every request got 200.
+
+| case | v8.0.34 | round 2's branch |
+|---|---|---|
+| two-turn tool round trip, turn-2 input | dev, user, R(1426), asst, fc, fco | same, asst with `phase: "commentary"` |
+| 12 more real blobs (3 each of 1426/2791/5522/10983 chars), non-streaming too | all replayed verbatim | all replayed verbatim |
+| `prompt_cache_key`: session header, `metadata.user_id` JSON, legacy `user_…_session_<uuid>` | absent on all three | one key for all three |
+| `prompt_cache_key` with `X-Claude-Code-Agent-Id` | absent | a distinct key |
+| thinking-only assistant turn, then a user message | dev, user, **R(1426), user** | dev, user, user |
+| foreign signatures (Grok-like, GPT `gAAAAB…`, Claude-like `EqQB…`, empty) | dropped in the translator | dropped in `DropMetaUnreplayableReasoning` |
+| four Muse turns | 16 items, 4 of 4 reasoning items byte-identical | same 16, commentary on the 2 tool preambles |
+
+R(n) is a reasoning item carrying a real n-char blob. The reasoning items
+had the same keys (`type`, `summary: []`, `content: null`,
+`encrypted_content`) and positions in both. 8.0.34's envelope rules
+(`Q-PaDg` prefix, unpadded base64url, header `43e3da0e01`, decoded length
+45 + 1024·2^k), applied in Python, accept all 226 unique blobs in both wire
+logs (payloads 1024 ×174, 2048 ×22, 4096 ×22, 8192 ×8). The mock's loopback
+`base_url` put 8.0.34 on its "routed" Meta policy, not the native
+`api.meta.ai` one. The two differ only for `.xxx`-suffixed blobs, and no
+captured blob has one; the native path was not run.
+
+So 8.0.34 alone restores Muse's chain of thought across turns. Still
+missing: `phase: "commentary"`, a `prompt_cache_key`, and the thinking-only
+drop. Meta's docs say reasoning directly before a user message returns 400;
+live it returned 200 (see the live check below), so the drop is a defence
+against documented, currently unenforced behaviour.
+
+**Pin audit, 8.0.30 → 8.0.34** (245 changed files; relevant production
+diffs and all four changelogs read; loopback runs of both binaries with
+fake logins).
+
+- Archives: sha256s recomputed from downloads matched `checksums.txt`:
+  darwin_aarch64 `d9c46696c9a42275a6c363a8e1f307f23ba41b6475677bd4f76cd0f8d6cfae3a`,
+  darwin_amd64 `929b69af6c4f327c85ef8c3f886408ade55721838c53bce186d6946f39193414`,
+  linux_aarch64 `53d0aca1c7022995409337a7a1150a393721fbe9bc1b0e70c33dc6566d173984`,
+  linux_amd64 `9a76ded067dfa848cce4976596739ea9844a5816217cce86fd3c666a8242ff32`.
+  All four keep `cli-proxy-api` at the root.
+- Exclusion priority (b015f208, 94d1a9a0, 1a28c61e, 3e309fb4, d7005b63,
+  bb428247; `sdk/cliproxy/service_models.go:73–80`): a login's own nonempty
+  `excluded_models` (or legacy `excluded-models`) now replaces the global
+  `oauth-excluded-models` instead of adding to it. Missing, empty and null
+  lists still inherit. With `"excluded_models": ["nonexistent-model"]` on
+  the fake logins, 8.0.30 still enforced meta `*`, meta `*-contributor` and
+  codex `*`; 8.0.34 listed every Meta model with Muse off and in Standard,
+  and restored OAuth GPT models in API-key mode. Without per-login lists,
+  all six Muse × GPT mode combinations gave the expected catalogs (Standard:
+  five Meta models; Contributor: nine).
+- Config and CLI unchanged: the generated YAML loads as is and its bytes do
+  not change across runs; `/v1/models` 200 with a key, 401 without;
+  management 404 on `/v0/`, `/v8/` and `/management.html`; all login flags
+  present. `/v1/models` can return 200 before async login registration
+  finishes; not shown to be new in 8.0.34.
+- Codex identity, effort mapping (Muse: default → medium, budget 1024 →
+  low, disabled → minimal, adaptive/max → max), `service_tier: "priority"`
+  and tool translation unchanged. New: unsupported `configuration_update`
+  items collapse into top-level effort, and replayed `web_search_call`
+  history gets a hosted-search declaration.
+- Hosted search request shapes for xAI and Meta reach their executors
+  unchanged.
+- Overflow 400s for Codex, Grok and Meta pass through as Anthropic
+  `invalid_request_error`, streaming and not. New: a stream that ends
+  after `response.created` now gets `event: error` (`api_error`, "upstream
+  stream closed before message_stop") instead of a silent EOF.
+- Meta strips `response.subscription_usage` frames, not token usage: mock
+  123 input / 23 cached / 9 output became 100 input, 23 cache-read, 9
+  output.
+- Codex proactive refresh moves from 24 h to 96 h before expiry; no real
+  refresh tested.
+
+**Router guards** (`wf7/4-…`, then the review fixes in `wf7/10-…`).
+
+- Thinking-only turns: on Muse routes only, `reasoning_order.rs` drops any
+  `thinking`/`redacted_thinking` block that no `text` or `tool_use` follows
+  in the same assistant message, except in the last message, and removes a
+  message left empty. This also drops thinking after a message's last
+  `text`/`tool_use`, which 8.0.34 would otherwise put right before the next
+  user message.
+- Login exclusion lists: refuse, not rewrite. `exclusions.rs` is the one
+  source of the required patterns (meta `*` with Muse off, meta
+  `*-contributor` in Standard, codex `*` in API-key mode); it builds both
+  the child YAML (output unchanged) and the check. A route that relies on
+  an exclusion (Muse → meta, GPT → codex, `auto` → all) gets a 400 naming
+  the login while any login's own list leaves the pattern out. A list
+  holding the pattern or `*` passes. Either key spelling, in any case,
+  counts; a value of another shape counts as overriding. The supervisor
+  logs an error at each managed start, and `doctor` has a new
+  `login-exclusions` check.
+- From review: the child keeps what it loaded when a login file turns
+  empty or unparseable, and it applies edits only to files directly in the
+  auth dir. So an empty or non-object login now refuses like an unreadable
+  one, and `exclusions::Seen` keeps refusing any route it has seen
+  overridden (from startup on) until `model-router service restart`.
+  `doctor` reads only the disk, so it can pass while requests are still
+  refused. Gaps: a request during the child's own truncate-then-write of a
+  login is refused once; the Contributor-header check keeps no such memory;
+  an override that appears and is fixed with no relying request in between
+  is never recorded.
+- Gates: 332 unit + 1 + 53 integration tests, `cargo fmt --check`, clippy,
+  and `claude plugin test plugins/model-router` (23) pass.
+
+End to end against the real 8.0.34 binary (router debug build in managed
+mode, sandboxed dirs, loopback Meta mock, the 1426-char blob;
+`v34router/scripts/`):
+
+| case | upstream input |
+|---|---|
+| thinking-only turn | developer, user, user (bare 8.0.34: R(1426) right before the user message) |
+| thinking + text (control) | developer, user, R(1426), assistant, user |
+| thinking, text, trailing thinking | developer, user, R(1426), assistant, user |
+
+Adding `"excluded_models": ["nonexistent-model"]` to the Meta login grew the
+child's model list by all four `-contributor` models. The router refused the
+next Muse request with a 400 naming the login and the fix, and nothing
+reached the mock.
+
+**Upstream PR #6680, reworked** (`wf7/3-…`; not pushed). The branch
+`fix/meta-claude-reasoning-replay` is now three commits on `e7d4c731`
+(v8.0.34): f4069472 drops reasoning that a thinking-only Claude turn leaves
+before a message, 7eb883d0 tags Claude tool preambles as commentary,
+979d7089 sends a `prompt_cache_key` for Claude Code requests. The
+compat-path switch, the `Q-PaD` prefix filter and the empty/no-id drop are
+gone, since #6738 covers them; the old branch is kept as
+`fix/meta-claude-reasoning-replay-v1` (`a2e69af9`). `go test ./...` passed
+(102 packages). Mock diff against the 8.0.34 release, same driver, 27
+requests, all 200:
+
+| case | difference from v8.0.34 |
+|---|---|
+| turn-1 request | none |
+| round trip, 12 real blobs, non-streaming | preamble tagged commentary |
+| Claude Code session: header, metadata JSON, legacy `user_id` | one key `56316fc7-…` for all three, plus the tag |
+| subagent | distinct key `3ee9693a-…` |
+| thinking-only turn | reasoning dropped: dev, user, user |
+| thinking + text control | none |
+| foreign or empty signatures | still dropped; preamble tagged |
+| Grok-like then Muse | both preambles tagged |
+| four Muse turns | two tool preambles tagged, final answer not, 4 of 4 reasoning items kept |
+
+Every new input list is 8.0.34's with only items removed, and the replayed
+blobs are byte-identical to the captured ones. The 92–99% cached figures
+are from round 2's revision of the branch.
+
+- GPT/Grok live regression on 8.0.34 (sandbox, copied Codex/xAI logins; no
+  Muse traffic): smoke (streaming and not), identity, two-turn tool round
+  trips with signature replay on gpt-6.1-sol and grok-4.7, and WebSearch
+  (Codex alpha search, 39 links in 1.15s; xAI native, 15 links in 6.5s) all
+  matched 8.0.30. Overflow probes were not re-run (passthrough verified
+  against mocks in the pin audit).
+- Muse live check on 8.0.34 (2026-10-19, High plan, Standard mode, upstream
+  captured by a logging proxy set as the sandbox login's `base_url`):
+  - Two-turn tool round trip: turn 2 upstream input `[developer, user,
+    reasoning, assistant, function_call, function_call_output]`, 200, 500 of
+    822 input tokens cached. No `phase` and no `prompt_cache_key` (expected
+    on 8.0.34).
+  - Thinking-only assistant turn, then a user message: through the router,
+    `[developer, user, user]`, 200 (guard dropped the reasoning). Sent raw to
+    the child, bypassing the router, `[user, reasoning, user]` also returned
+    200: Meta did not enforce its documented 400.
+  - Claude Code cells (scratch `CLAUDE_CONFIG_DIR`, canaries passed): T4n
+    multi-step pytest fix PASS (7 requests), T1 edit PASS, T8 Muse subagent
+    PASS, T9a `/compact` PASS. T7 WebSearch graded FAIL by the auditor, a
+    measurement artifact: the router answered from Meta's hosted search
+    (`backend="meta-web-search"`, 12 links, 4.2s; the `web_search` request
+    with `max_tool_calls: 1` is on the wire inside the cell's time window),
+    but the logging proxy records a request when it completes, so the
+    drained search landed one line past the cell's wire range.
+  - Across 26 multi-item requests every response was 200, and reasoning items
+    accumulated turn by turn (up to 3 per request). Without a cache key,
+    later-turn cache hits were patchy: e.g. 0 of 13,699, 2,036 of 9,815 and
+    372 of 22,444 cached, beside full hits like 22,004 of 23,734.
+  - Quota for the round: 5-hour window 0% → 8%, weekly 0% → 2%.

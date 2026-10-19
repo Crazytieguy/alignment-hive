@@ -5,8 +5,10 @@ deciding factor (e.g. legitimate bio/cyber research that frontier-lab
 classifiers refuse). Anthropic tiers per model under
 [RSP v3.4, eff. 2026-07-08](https://www.anthropic.com/rsp); OpenAI under the
 [Preparedness Framework v2](https://deploymentsafety.openai.com/gpt-6-astra);
-xAI publishes a framework without quantitative thresholds; Kimi and GLM
-publish no vendor safety framework.
+xAI publishes a framework without quantitative thresholds; Meta assesses
+under its
+[Meta Superintelligence Scaling Framework](https://research.meta.ai/static/meta-superintelligence-scaling-framework);
+Kimi and GLM publish no vendor safety framework.
 
 - **Fable 5.1 / Mythos 5.1** — the same model at two safeguard levels:
   Fable 5.1 is generally available, Mythos 5.1 only through trusted-access
@@ -81,7 +83,7 @@ publish no vendor safety framework.
   [Sol/Luna appendix, 2026-09-22](https://deploymentsafety.openai.com/gpt-6-astra/sec:appendix-sol-luna/);
   [GPT-5.6 card, Jul 2026](https://deploymentsafety.openai.com/gpt-5-6).
 - **Grok 4.7 (xAI)** — the lightest safeguard stack of the
-  framework-backed vendors: refusal training plus runtime input and
+  framework-backed vendors above: refusal training plus runtime input and
   topical filters that vary by deployment surface (CSAM, self-harm,
   bio/chem weapons pathways, and cyber-specific input controls). The
   [xAI Frontier AI Framework, eff. 2026-06-30](https://media.x.ai/v1/website/xai-frontier-artificial-intelligence-framework-30-june-2026-99c40684.pdf)
@@ -95,6 +97,28 @@ publish no vendor safety framework.
   general refusals in line with 4.6. The legacy grok-4.6 route has its own
   [card](https://media.x.ai/v1/website/card-4p6-4cd2dc57.pdf); grok-4.5
   shipped with none, so what is deployed on it is uncertain.
+- **Muse Wonder / Muse Wonder Full (Meta)** — one
+  [model card, 2026-10-12](https://research.meta.ai/static/muse-wonder-model-card),
+  whose results are on Wonder Full and, per Meta, cover the family. Under
+  the Meta Superintelligence Scaling Framework, Meta does not rule out the
+  unmitigated model reaching its high-risk threshold in chemical and
+  biological, and applies safety post-training plus system-level
+  classifiers there; cyber and loss of control sit at "moderate or lower"
+  before mitigations, and every domain after. Cyber capability: CyberGym
+  88.4%, ExploitBench 58.9%, ExploitGym 92 flags, of which a verification
+  pass found 21 used the intended vulnerability (the figure comparable to
+  the published ranking). Adversarial refusal, as attack success rate
+  (lower is better): CyberBench 0.8% single and multi-turn, PolyGuard cyber
+  1.1% / 2.3%, RedCode 9.0% / 8.0%. Bio/chem refusals: BioTIER 98.7%
+  English and multilingual, 98.2% adversarial; internal chemistry 99.8% to
+  100%; two ABC Bench bio-design tasks went unscored for high refusal
+  rates. The card does not say which controls run on the subscription-OAuth
+  path this plugin uses. Data use: a Muse Code subscription defaults to
+  Contributor mode, under which Meta trains on prompts, code, files and
+  responses; Standard mode does not train on content. The router stays in
+  Standard mode unless `[muse] contributor = true`, but the terms tie the
+  designation to the Muse Code account setting, not the model ID; setup's
+  `references/muse.md` covers it.
 - **Kimi K2.7 / K3** — no published vendor safety framework or model-card
   safety section (checked 2026-07-21:
   [github.com/moonshotai/kimi-k2](https://github.com/moonshotai/kimi-k2)).

@@ -1,6 +1,6 @@
 ---
 name: delegating-to-models
-description: This skill should be read before delegating work to subagents or Workflow agents. Covers picking a model from the Claude, GPT, and optionally Grok families (strengths, cost dynamics), setting the effort level, prompt hygiene per family, combining independent runs, and the mechanics of routing to non-Claude models through model-router.
+description: This skill should be read before delegating work to subagents or Workflow agents. Covers picking a model from the Claude, GPT, and optionally Grok and Muse families (strengths, cost dynamics), setting the effort level, prompt hygiene per family, combining independent runs, and the mechanics of routing to non-Claude models through model-router.
 ---
 
 # Delegating to models
@@ -182,6 +182,33 @@ subscription billing makes latency its only cost; it also accepts xhigh.
 Its web search returns fewer, title-less results than the Claude and GPT
 backends — prefer another family for search-heavy tasks.
 
+## Muse models (optional)
+
+Like Grok, use Meta's Muse models on the user's request or stated
+preference, not autonomously. Likely reasons to ask: how the models
+write, a decorrelated opinion from another model family, and work that
+the other families' safeguards get in the way of, which may be worth a
+try here (`references/safeguards.md`; Meta's model card claims strong
+cyber safeguards, so no promise). The subscription quota goes too
+quickly to count as a spare billing pool.
+Two routes: `muse-wonder-1.0` (Muse Wonder) and `muse-wonder-full-1.0`
+(Muse Wonder Full). Meta serves Full only on its Power and Maximum
+plans, so setup creates its agent only when the login's plan allows it.
+Early reports (launch week, October 2026; not measured here) put Full
+ahead of Wonder on harder tasks, near frontier level on agentic coding
+and following instructions, and weak at UI work; some users like how
+Full writes (direct, concise; long-form got mixed marks), which
+suggests human-facing text, or Full as a main agent that delegates.
+
+Short Claude Code tasks on Wonder mostly went well. Give it clear stop
+conditions and boundaries, same as the GPT models, and when asking for
+a plan first, say to continue into the work.
+Quota: the subscription has 5-hour and weekly windows; one near-1M
+request took about 40% of a High plan's 5-hour window. One small
+outside test put Full at 2-3x Wonder's quota per task. Effort: every
+level passes through unchanged; Muse Code defaults to high and advises
+the lowest level that gives acceptable results.
+
 ## Open-weights models
 
 Open-weights models (Kimi, GLM, ...) are optional; `model-router:setup`
@@ -193,10 +220,12 @@ is no strengths/weaknesses guidance for them yet.
 
 The Agent tool's `model` parameter only accepts Claude models. For GPT,
 use the shipped agents — `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` — or
-Workflow's `agent(prompt, {model: 'gpt-6-luna', effort: 'medium'})`. With
-the Grok family configured, `grok-4.7` agents and
-`{model: 'grok-4.7', effort: 'high'}` work the same way.
+Workflow's `agent(prompt, {model: 'gpt-6-luna', effort: 'medium'})`. The
+Grok and Muse families have per-user agents that setup creates, named for
+the route: a `grok-4.7` or `muse-wonder-1.0` agent, and
+`{model: 'muse-wonder-1.0', effort: 'medium'}` in Workflow, work the same
+way.
 
 Consider setting the Agent tool's `effort` parameter when delegating,
-Claude models included. Without it, the GPT, Grok and open-weights agents
-run at this session's effort level.
+Claude models included. Without it, the GPT, Grok, Muse and open-weights
+agents run at this session's effort level.

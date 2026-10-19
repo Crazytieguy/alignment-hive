@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI) family, OS service, and Claude Code settings wiring.
+description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI) and Muse (Meta) families, OS service, and Claude Code settings wiring.
 ---
 
 # model-router setup
@@ -116,8 +116,9 @@ here works until the binary resolves.
    drops retired GPT rows (GPT-6 Sol, GPT-5.6), keeps every other row, and
    replaces an earlier install's `ANTHROPIC_CUSTOM_MODEL_OPTION` pair. When
    it prints `"applied": false`, its `reason` says what needs the user. Add
-   a row per configured Grok or open-weights route (`routed-models` in
-   `$ROUTER doctor`) by hand, and drop a row when its route goes: rows are
+   a row per configured Grok, Muse or open-weights route (`routed-models`
+   in `$ROUTER doctor`; Muse: per `references/muse.md`, no Full row while
+   `muse-plan` warns) by hand, and drop a row when its route goes: rows are
    never checked against the router, and an unserved one fails on its
    first turn. Two cases keep the single-slot pair instead, in the wired
    file's `env` block (one entry only; the other routes stay off the
@@ -145,9 +146,12 @@ here works until the binary resolves.
    served through an OpenAI-compatible host they have an API key for — if
    yes, read `references/open-weights.md` and follow it; (b) Grok models
    under their own xAI subscription login (no API key) — if yes, read
-   `references/grok.md` and follow it. Agents from an earlier setup named
-   `<routing-id>(<effort>)` (in `~/.claude/agents/` or the project's
-   `.claude/agents/`): offer to replace them following
+   `references/grok.md` and follow it; (c) Muse (Meta) models under their
+   own Muse Code subscription login (no API key) — if yes, read
+   `references/muse.md` and follow it; it opens with Meta's terms, which
+   the user decides on before anything is enabled. Agents from an earlier
+   setup named `<routing-id>(<effort>)` (in `~/.claude/agents/` or the
+   project's `.claude/agents/`): offer to replace them following
    `references/custom-agents.md`.
 
 ## Repair
@@ -158,7 +162,7 @@ service, upstream). Fix only that layer using the matching step above;
 first turn with "There's an issue with the selected model" names a route the
 gateway doesn't serve: compare the rows with doctor's `routed-models`. A
 `fallback-model` failure means a Claude Code `fallbackModel` setting is in
-effect, which silently re-runs a failed GPT/Grok subagent on a Claude model;
+effect, which silently re-runs a failed routed subagent on a Claude model;
 the fix is removing that setting (then restarting Claude Code), and it is
 the user's call.
 

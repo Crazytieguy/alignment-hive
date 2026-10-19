@@ -1,7 +1,7 @@
 # Custom model agents
 
 The plugin ships agents only for the GPT models. Any other routed model
-(open-weights, Grok) gets one user-created agent — ask where to put it:
+(open-weights, Grok, Muse) gets one user-created agent — ask where to put it:
 `~/.claude/agents/` (all projects, usual choice since the router is global)
 or the project's `.claude/agents/`. Effort is chosen per Agent call, so
 offer to replace agents from an earlier setup named `<routing-id>(<effort>)`.
@@ -21,6 +21,13 @@ Complete the task you are given.
   `reasoning_effort` — every Claude Code level is accepted, including ones
   outside a model's documented set — but how much a level actually changes
   the model's behavior varies by host, so don't promise a user that it will.
+- Muse models: Claude Code's effort levels reach Meta unchanged (measured:
+  `low`, `medium`, `high`, `xhigh` and `max` arrive as Meta's
+  `reasoning.effort` 1:1;
+  thinking off arrives as `minimal`, no level as `medium`). Meta documents
+  `minimal` through `max`, with `high` as Muse Code's default and advice to
+  use the lowest level that gives acceptable results; how much each level
+  changes the output is not something this plugin has calibrated.
 - The `model:` value must be a routing ID the router serves (`[[models]]`
   entry or `[[openai-providers.models]]` routing-id); anything else falls
   through to Anthropic and fails with model-not-found.
