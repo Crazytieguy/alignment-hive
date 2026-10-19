@@ -240,6 +240,24 @@ test('outside a git repository a file and a transcript ref render; diff, git and
   }
 });
 
+test('a diff of authored before and after text renders without a repository and covers no repository file', async () => {
+  const f = await createReviewFixture(); fixtures.push(f);
+  const plain = join(f.root, 'plain');
+  await mkdir(plain);
+  await writeTranscript(join(f.root, 'transcripts', `${FIXTURE_SESSION}.jsonl`), FIXTURE_SESSION, [prompt('Reword it'), prompt('Thanks')]);
+  const input = join(f.root, 'debrief.md');
+  const ref = '```ref\ndiff: setup step 3\nbefore: |\n  Run the old command.\nafter: |\n  Run the new command.\nfocus: L1\n```';
+  await writeFile(input, reviewDocument(reviewItem('wording', ref)));
+  const prepared = await prepareReview(input, { cwd: plain, projects: f.projects });
+  expect(prepared.items[0].evidence[0]).toMatchObject({ kind: 'diff', selector: 'text:setup step 3', file: { path: 'setup step 3', status: 'modified', old: 'Run the old command.\n', new: 'Run the new command.\n', focus: [1, 1] } });
+  await writeFile(input, reviewDocument(reviewItem('wording', '```ref\ndiff: setup step 3\nbefore: only one side\n```')));
+  await expect(prepareReview(input, { cwd: plain, projects: f.projects })).rejects.toThrow('Give both before and after, or neither');
+  const repo = await setup(reviewItem('wording', '```ref\ndiff: source.ts\nbefore: a\nafter: b\n```'));
+  await repo.write('source.ts', 'export const value = 2;\n');
+  const rendered = await renderReview(repo.input, { cwd: repo.repo, projects: repo.projects, outDir: join(repo.root, 'out') });
+  expect(rendered.coverage?.files).toBe(0);
+});
+
 test('coverage counts changed lines since base per file a diff ref shows, and warns for the rest', async () => {
   const f = await setup(reviewItem('source', '```ref\ndiff: source.ts\n```'));
   await f.write('source.ts', 'export const value = 2;\nexport const more = 3;\n');

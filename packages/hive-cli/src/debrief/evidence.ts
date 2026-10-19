@@ -130,14 +130,20 @@ export class EvidenceResolver {
     const ref: EvidenceRef = located.ref;
     const common = { caption: ref.caption, line: located.line, bodyLine: located.bodyLine, oldHash: null };
     if ('diff' in ref) {
-      const path = repositoryPath(ref.diff);
-      const { git, baseCommit } = this.repository('diff');
-      const [old, current] = (await Promise.all([git.blob(baseCommit, path), this.headText(path)])).map((text) => text === null ? null : this.clean(text));
+      // Authored text needs no repository; its selector never names a repository file, so it covers none.
+      const authored = ref.before !== undefined;
+      const path = authored ? ref.diff : repositoryPath(ref.diff);
+      const [old, current] = authored
+        ? [this.clean(ref.before!), this.clean(ref.after!)]
+        : await (async () => {
+          const { git, baseCommit } = this.repository('diff');
+          return (await Promise.all([git.blob(baseCommit, path), this.headText(path)])).map((text) => text === null ? null : this.clean(text));
+        })();
       if (old === null && current === null) throw new Error(msg.evidenceMissing(path));
       const focus = focusRanges(ref.focus, current ?? '');
       const oldFocus = focusRanges(ref['old-focus'], old ?? '');
       for (const label of ref.labels) lineRange({ source: `L${label.line}`, start: label.line, end: label.line }, current ?? '');
-      return { ...common, kind: 'diff', selector: path, oldHash: old === null ? null : hashEvidence(old), newHash: current === null ? null : hashEvidence(current), file: { path, status: old === null ? 'added' : current === null ? 'deleted' : 'modified', old: old ?? '', new: current ?? '', focus, oldFocus, labels: ref.labels, title: ref.title } };
+      return { ...common, kind: 'diff', selector: authored ? `text:${path}` : path, oldHash: old === null ? null : hashEvidence(old), newHash: current === null ? null : hashEvidence(current), file: { path, status: old === null ? 'added' : current === null ? 'deleted' : 'modified', old: old ?? '', new: current ?? '', focus, oldFocus, labels: ref.labels, title: ref.title } };
     }
     if ('git' in ref) {
       const { git, baseCommit, headCommit, historical } = this.repository('git');

@@ -67,10 +67,12 @@ function summaryCount(value: { summary?: string | Array<string> }, count: number
   if (typeof value.summary === 'string' && count !== 1) context.addIssue({ code: 'custom', path: ['summary'], message: msg.summaryCount(count) });
 }
 const refSchemas = {
+  /** `before` and `after` show authored text, such as proposed wording, in place of a repository file. */
   diff: z.strictObject({
     diff: oneLine, title: oneLine.optional(), focus: rangesSchema.optional(), 'old-focus': rangesSchema.optional(),
-    labels: z.array(z.strictObject({ line: z.number().int().positive(), where: oneLine })).default([]), ...caption,
-  }),
+    labels: z.array(z.strictObject({ line: z.number().int().positive(), where: oneLine })).default([]),
+    before: z.string().optional(), after: z.string().optional(), ...caption,
+  }).refine((ref) => (ref.before === undefined) === (ref.after === undefined), { message: msg.beforeAndAfter, path: ['after'] }),
   file: z.strictObject({ file: oneLine, at: oneLine.optional(), written: locatorSchema.optional(), range: rangeSchema.optional(), ...caption })
     .refine((ref) => !(ref.at && ref.written), { message: msg.writtenAndAt, path: ['written'] }),
   /** `clip: false` shows long replies and prompts whole; `results: false` hides every entry's tool results. */

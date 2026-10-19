@@ -22,6 +22,7 @@ export const review = {
   invalidEntry: 'Expected a transcript locator <session or subagent id prefix>:<entry>, or capture:<name>',
   summaryCount: (count: number) => count === 1 ? 'Expected summary: one line for the entry' : `Expected summary: a list of ${count} lines, one per locator`,
   writtenAndAt: 'Use written or at, not both',
+  beforeAndAfter: 'Give both before and after, or neither',
   refKind: 'A ref needs exactly one of diff, file, transcript, git, image',
   duplicateSection: (id: string) => `Duplicate or reserved section id: ${id}`,
   unknownSection: (id: string, known: Array<string>) => `Unknown section ${id}; expected one of ${known.join(', ')}`,
