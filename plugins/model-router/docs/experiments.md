@@ -1702,8 +1702,9 @@ Every Grok route failed on the live 0.1.27 router: xAI's
 outdated. Please update to version 1.0.13 or later`. The floor went up
 around 2026-10-01 (upstream #6249); 7.3.16 hard-codes client version
 0.2.120 and the 7.3 line never got the fix. Upstream bumped it to 1.0.44 in
-v8.0.8 and, from v8.0.19, fetches the current Grok CLI version from npm at
-startup and every 3h, falling back to a pinned value (1.0.44 in 8.0.32).
+v8.0.8 and, from v8.0.20, fetches the current Grok CLI version from npm at
+startup and every 3h, keeping the last known version when a fetch fails
+(starting from a pinned 1.0.46 in 8.0.32).
 The pin moves 7.3.16 → 8.0.32; the four archive sha256s were computed
 from downloads and matched the release's `checksums.txt`. Archive names
 and layout (`cli-proxy-api` at the root) are unchanged across the major.
