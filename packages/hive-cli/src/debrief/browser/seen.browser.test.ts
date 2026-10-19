@@ -17,16 +17,16 @@ let harness: BrowserHarness;
 /**
  * A mock of the runtime: `use("db")` and `use("user")` resolve a store kept on `window.__db`, seeded from
  * `window.__seed` when it is first used; `window.__db.fail` queues rejection codes for the next writes;
- * `window.__noDb` makes `use("db")` resolve null.
+ * `window.__noDb` makes `use("db")` resolve null. `window.__db.snapshots` counts the snapshots delivered to the page.
  */
 const MOCK = `(() => {
-  const state = { docs: {}, writes: [], attempts: 0, fail: [], seeded: false };
+  const state = { docs: {}, writes: [], attempts: 0, fail: [], seeded: false, snapshots: 0 };
   window.__db = state;
   const seed = () => { if (!state.seeded) { state.seeded = true; if (window.__seed) state.docs['seen/viewer'] = window.__seed; } };
   const snap = (path) => ({ exists: path in state.docs, data: () => state.docs[path], metadata: { hasPendingWrites: false } });
   const db = { doc: (path) => ({
     set: (data) => { state.attempts++; const code = state.fail.shift(); if (code) return Promise.reject({ code, message: code }); state.writes.push(JSON.parse(JSON.stringify(data))); state.docs[path] = data; return Promise.resolve(); },
-    onSnapshot: (next) => { seed(); setTimeout(() => next(snap(path)), 30); return () => {}; },
+    onSnapshot: (next) => { seed(); setTimeout(() => { next(snap(path)); state.snapshots++; }, 30); return () => {}; },
   }) };
   window.claude = { use: (name) => new Promise((done) => setTimeout(() => done(name === 'db' ? (window.__noDb ? null : db) : name === 'user' ? { id: () => Promise.resolve('viewer') } : null), 10)) };
 })();`;
@@ -41,6 +41,8 @@ async function open(inits: Array<string> = [MOCK]): Promise<OpenPage> {
 async function load(page: Page): Promise<void> {
   await page.goto(`${harness.origin}/page.html?v=${++visit}`);
   await page.waitForFunction(() => document.readyState === 'complete');
+  // The mocked database answers on its own timers, which an idle headless Chromium can fire well past their delay.
+  await page.waitForFunction(() => { const w = window as unknown as { __db?: { snapshots: number }; __noDb?: true }; return !w.__db || w.__noDb || w.__db.snapshots > 0; });
   await page.waitForTimeout(150);
 }
 const db = (page: Page) => page.evaluate(() => (window as unknown as { __db: { docs: Record<string, unknown>; writes: Array<{ items: Record<string, { hash: string | null }>; migrated?: true }>; attempts: number } }).__db);
