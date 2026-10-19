@@ -8,6 +8,7 @@ import { captureReview } from '../debrief/capture';
 import { reviewPreflight } from '../debrief/preflight';
 import { sessionIdSchema } from '../debrief/parse';
 import { renderReview } from '../debrief/render';
+import { readerView } from '../debrief/view';
 
 const helpOptions = {
   help: { type: 'boolean' as const, short: 'h' },
@@ -27,7 +28,7 @@ function roundDir(values: { session?: string; round?: string; data?: string }, u
 }
 
 /**
- * `hive debrief dir|render|capture|preflight`: argument handling for the debrief plugin; the work is
+ * `hive debrief dir|render|view|capture|preflight`: argument handling for the debrief plugin; the work is
  * in ../debrief/. `--session`, `--round` and `--data` name a round directory (see debriefRoundDir).
  */
 export async function reviewCommand(args: Array<string>): Promise<number> {
@@ -72,6 +73,17 @@ export async function reviewCommand(args: Array<string>): Promise<number> {
       for (const warning of result.warnings) console.error(warning);
       if (result.coverage?.changedFiles) console.error(reviewCliMessages.coverage(result.coverage));
       console.log(join(outDir, 'page.html'));
+      return 0;
+    }
+    case 'view': {
+      const { values, positionals } = parseArgs({ args: rest, options: { ...helpOptions, ...roundOptions }, strict: true, allowPositionals: true });
+      if (values.help) {
+        console.log(reviewCliMessages.viewUsage);
+        return 0;
+      }
+      const named = roundDir(values, reviewCliMessages.viewUsage);
+      if (named ? positionals.length > 0 : positionals.length !== 1) throw new Error(reviewCliMessages.viewUsage);
+      console.log(JSON.stringify(await readerView(named ? join(named.dir, 'debrief.md') : resolve(positionals[0]))));
       return 0;
     }
     case 'capture': {

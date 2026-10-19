@@ -49,6 +49,10 @@ export class GitReader {
   async commit(revision: string): Promise<string> {
     return new TextDecoder().decode(await this.run(['rev-parse', '--verify', '--end-of-options', `${revision}^{commit}`])).trim();
   }
+  /** Every file path in a commit's tree. */
+  async files(commit: string): Promise<Array<string>> {
+    return new TextDecoder().decode(await this.run(['ls-tree', '-r', '-z', '--name-only', commit])).split('\0').filter(Boolean);
+  }
   async blob(commit: string, path: string): Promise<string | null> {
     const clean = repositoryPath(path);
     const oid = await this.commit(commit);

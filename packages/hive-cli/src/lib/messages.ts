@@ -151,10 +151,11 @@ export const reviewDiffMessages = {
 export const reviewCliMessages = {
   version: (value: string) => `hive ${value}`,
   mainUsage: 'Usage: hive <session-start|notices|upload|heartbeat|checkout-ping|login|local|consent|debrief>',
-  usage: 'Usage: hive debrief <dir|render|capture|preflight> [--help]',
+  usage: 'Usage: hive debrief <dir|render|view|capture|preflight> [--help]',
   dirUsage: 'Usage: hive debrief dir --session FULL_SESSION_ID --round N [--data DIR]',
   coverage: (c: { lines: number; changedLines: number; files: number; changedFiles: number }) => `debrief: ${c.lines} of ${c.changedLines} changed lines (${c.files} of ${c.changedFiles} files) are in files some item shows`,
   renderUsage: 'Usage: hive debrief render --session FULL_SESSION_ID --round N [--data DIR], or hive debrief render DEBRIEF.md --out DIR [--prev MANIFEST.json]',
+  viewUsage: 'Usage: hive debrief view --session FULL_SESSION_ID --round N [--data DIR], or hive debrief view DEBRIEF.md: the page as its reader meets it, as JSON',
   captureUsage: 'Usage: hive debrief capture --name NAME (--session FULL_SESSION_ID --round N [--data DIR] | --out DIR) -- COMMAND [ARGS...]',
   invalidSession: 'debrief: --session takes the full session id',
   invalidData: 'debrief: --data takes an absolute path, the debrief plugin\'s data directory',

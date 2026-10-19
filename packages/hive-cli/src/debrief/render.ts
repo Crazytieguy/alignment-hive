@@ -25,7 +25,7 @@ import { reviewTimes } from './times';
 import type { ResolvedItem, ReviewHeader } from './evidence';
 import type { MountedDiff, PageState } from './evidence-html';
 import type { ChangedFile, ReviewContext } from './git';
-import type { ParsedReview } from './parse';
+import type { ParsedReview, ReviewItem, ReviewPage } from './parse';
 import type { SecretFound, SecretHits } from './redact';
 import type { ReviewManifest } from './manifest';
 
@@ -34,13 +34,17 @@ export interface PrepareReviewOptions { cwd?: string; projects?: string }
 /** `source` is the debrief file's text; `redactions` counts what redaction took out of the evidence. */
 export interface PreparedReview { parsed: ParsedReview; context: ReviewContext; header: ReviewHeader; items: Array<ResolvedItem>; source?: string; redactions?: SecretHits }
 
-export async function prepareReview(inputPath: string, options: PrepareReviewOptions = {}): Promise<PreparedReview> {
+/** The debrief file parsed, and the repository context its refs read from; no evidence resolved yet. */
+export async function openReview(inputPath: string, options: PrepareReviewOptions = {}): Promise<{ absolute: string; source: string; parsed: ParsedReview; context: ReviewContext }> {
   const absolute = resolve(options.cwd ?? process.cwd(), inputPath);
   const source = await readFile(absolute, 'utf8');
   const parsed = parseReview(source);
-  let context: ReviewContext;
-  try { context = await resolveReviewContext({ ...options, session: parsed.page.session, base: parsed.page.base, head: parsed.page.head }); }
+  try { return { absolute, source, parsed, context: await resolveReviewContext({ ...options, session: parsed.page.session, base: parsed.page.base, head: parsed.page.head }) }; }
   catch (error) { throw reviewError('page', 1, error instanceof Error ? error.message : String(error)); }
+}
+
+export async function prepareReview(inputPath: string, options: PrepareReviewOptions = {}): Promise<PreparedReview> {
+  const { absolute, source, parsed, context } = await openReview(inputPath, options);
   const resolver = new EvidenceResolver(context, dirname(absolute), options.projects);
   const header = await resolver.header(parsed);
   return { parsed, context, header, items: await resolver.items(parsed.items), source, redactions: resolver.redactions };
@@ -103,6 +107,15 @@ function itemHtml(item: ResolvedItem, page: PageState, state: string | undefined
 </details>`;
 }
 
+/** The page's sections in order, the author's then the renderer's, each with its main items and its lower-priority tray in file order; empty ones left out. */
+export function pageSections<T extends ReviewItem>(page: ReviewPage, items: Array<T>): Array<{ id: string; title: string; sub?: string; main: Array<T>; lower: Array<T> }> {
+  const headings: Array<{ id: string; title: string; sub?: string }> = [...page.sections, ...FIXED_SECTIONS.map((id) => ({ id, ...pageMsg.sections[id] }))];
+  return headings.flatMap((heading) => {
+    const members = items.filter((item) => item.metadata.section === heading.id);
+    return members.length ? [{ ...heading, main: members.filter((item) => !item.metadata['lower-priority']), lower: members.filter((item) => item.metadata['lower-priority']) }] : [];
+  });
+}
+
 /** A section's lower-priority items, folded into one tray after its main items: a count, seen dots, and their names. */
 function trayHtml(section: string, items: Array<ResolvedItem>, rendered: Map<ResolvedItem, string>): string {
   const n = items.length;
@@ -153,14 +166,8 @@ export function assembleReview(prepared: PreparedReview, options: AssemblyOption
     contributors.push({ name: item.metadata.id, bytes: Buffer.byteLength(html) + item.evidence.reduce((size, ref) => size + (ref.kind === 'diff' ? Buffer.byteLength(escapeJson(ref.file)) : 0), 0) });
     return [item, html];
   }));
-  const headings: Array<{ id: string; title: string; sub?: string }> = [...prepared.parsed.page.sections, ...FIXED_SECTIONS.map((id) => ({ id, ...pageMsg.sections[id] }))];
-  const sections = headings.flatMap(({ id, title, sub }) => {
-    const members = prepared.items.filter((item) => item.metadata.section === id);
-    if (!members.length) return [];
-    const lower = members.filter((item) => item.metadata['lower-priority']);
-    const main = members.filter((item) => !item.metadata['lower-priority']).map((item) => rendered.get(item)).join('\n');
-    return [`<section class="sec" id="sec-${id}" data-sec="${escapeHtml(title)}"><h2 class="sec-title">${escapeHtml(title)}${sub ? `<span class="sec-sub">${escapeHtml(sub)}</span>` : ''}</h2>${main}${lower.length ? trayHtml(id, lower, rendered) : ''}</section>`];
-  }).join('\n');
+  const sections = pageSections(prepared.parsed.page, prepared.items).map(({ id, title, sub, main, lower }) =>
+    `<section class="sec" id="sec-${id}" data-sec="${escapeHtml(title)}"><h2 class="sec-title">${escapeHtml(title)}${sub ? `<span class="sec-sub">${escapeHtml(sub)}</span>` : ''}</h2>${main.map((item) => rendered.get(item)).join('\n')}${lower.length ? trayHtml(id, lower, rendered) : ''}</section>`).join('\n');
   const themes = (['auto', 'light', 'dark'] as const).map((theme) => `<button type="button" data-theme-pick="${theme}" aria-pressed="${theme === 'auto'}">${pageMsg.themes[theme]}</button>`).join('');
   const rail = `<aside class="rail">
 <details class="rail-fold" id="rail-fold" open><summary>${pageMsg.contents}</summary><nav id="nav" aria-label="${pageMsg.contents}"></nav>

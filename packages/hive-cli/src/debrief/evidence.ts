@@ -116,6 +116,11 @@ export class EvidenceResolver {
     const context = this.context;
     return context.historical ? context.git.blob(context.headCommit, path) : context.fs.text(path);
   }
+  /** A repository file at base and at head. */
+  private diffSides(path: string): Promise<Array<string | null>> {
+    const { git, baseCommit } = this.repository('diff');
+    return Promise.all([git.blob(baseCommit, path), this.headText(path)]);
+  }
   /** The context, for evidence only a repository can supply. */
   private repository(what: string) {
     const context = this.context;
@@ -133,12 +138,7 @@ export class EvidenceResolver {
       // Authored text needs no repository; its selector never names a repository file, so it covers none.
       const authored = ref.before !== undefined;
       const path = authored ? ref.diff : repositoryPath(ref.diff);
-      const [old, current] = authored
-        ? [this.clean(ref.before!), this.clean(ref.after!)]
-        : await (async () => {
-          const { git, baseCommit } = this.repository('diff');
-          return (await Promise.all([git.blob(baseCommit, path), this.headText(path)])).map((text) => text === null ? null : this.clean(text));
-        })();
+      const [old, current] = (authored ? [ref.before!, ref.after!] : await this.diffSides(path)).map((text) => text === null ? null : this.clean(text));
       if (old === null && current === null) throw new Error(msg.evidenceMissing(path));
       const focus = focusRanges(ref.focus, current ?? '');
       const oldFocus = focusRanges(ref['old-focus'], old ?? '');
