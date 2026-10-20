@@ -30,7 +30,7 @@
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/seed-worktree-target.sh\"",
-            "timeout": 120
+            "timeout": 300
           }
         ]
       }

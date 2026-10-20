@@ -6,7 +6,7 @@
     },
     "remote-kernels": {
       "command": "bash",
-      "args": ["-c", "cargo run --manifest-path crates/remote-kernels/Cargo.toml -- --project-dir . 2>remote-kernels.log"]
+      "args": ["-c", "bash .claude/scripts/seed-worktree-target.sh .; cargo run --manifest-path crates/remote-kernels/Cargo.toml -- --project-dir . 2>remote-kernels.log"]
     }
   }
 }
