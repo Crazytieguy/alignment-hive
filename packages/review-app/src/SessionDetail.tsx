@@ -67,7 +67,7 @@ function RequestRecords({ records, kb }: { records: Array<Record<string, unknown
       </summary>
       <p className="mt-2 text-xs text-muted-foreground">
         What Claude Code sent with each API request: the system prompt, tool definitions, instruction and memory
-        files, injected context, request parameters and the safety classifier's context.
+        files, injected context and request parameters.
       </p>
       <div className="mt-2 space-y-1">
         {records.map((r, i) => (

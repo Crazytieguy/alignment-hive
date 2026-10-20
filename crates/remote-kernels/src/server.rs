@@ -376,7 +376,7 @@ impl RemoteKernelsServer {
     /// Returned offer ids can be supplied
     /// in preference order to `start` through `vast_offers`; availability can change
     /// before rental, and the configured rental price and VM constraints still apply.
-    #[tool(name = "search_vast_offers")]
+    #[tool(name = "search_vast_offers", annotations(read_only_hint = true))]
     pub async fn search_vast_offers(
         &self,
         params: Parameters<crate::runtime::vast::OfferQueryOverrides>,

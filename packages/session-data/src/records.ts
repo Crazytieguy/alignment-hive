@@ -50,9 +50,8 @@ const REQUEST_TYPE = 'api-request';
 
 /**
  * A request record: `api-request`, `api-request-blob` or `api-request-shape`. Since 2.1.300 Claude
- * Code records every API request's system prompt, tools, parameters (the safety classifier's context
- * among them) and message hashes, so a request can be replayed: often most of a file's bytes, none
- * of them read by readTranscript. Uploads keep them whole; the lean read drops them unparsed.
+ * Code records every API request's system prompt, tools, parameters and message hashes, so a
+ * request can be replayed: often most of a file's bytes, none of them read by readTranscript. Uploads keep them whole; the lean read drops them unparsed.
  */
 export const isRequestType = (type: string): boolean => type.startsWith(REQUEST_TYPE);
 

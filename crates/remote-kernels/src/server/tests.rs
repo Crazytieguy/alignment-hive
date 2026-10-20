@@ -24,6 +24,19 @@ fn test_instance(machine_id: &str) -> InstanceState {
     )
 }
 
+/// Claude Code runs read-only MCP tools concurrently, so only a tool with no side effects may
+/// claim it. `status` reconciles with the provider, and `wait`/`get_output` consume output.
+#[test]
+fn only_search_vast_offers_is_read_only() {
+    let read_only: Vec<_> = RemoteKernelsServer::tool_router()
+        .list_all()
+        .into_iter()
+        .filter(|t| t.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(true))
+        .map(|t| t.name)
+        .collect();
+    assert_eq!(read_only, ["search_vast_offers"]);
+}
+
 #[test]
 fn vast_offers_validation() {
     // Absent: always fine.

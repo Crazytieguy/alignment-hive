@@ -72,8 +72,8 @@ function stripBinary(value: unknown): unknown {
 
 /**
  * What an upload keeps of a record (before secret sanitizing), or undefined for a record that
- * stays local. Request records (see isRequestType) go whole, for research that replays a request or
- * studies the safety classifier's context; they take no entry number and count as no line. Any
+ * stays local. Request records (see isRequestType) go whole, for research that replays a request;
+ * they take no entry number and count as no line. Any
  * other record with a uuid keeps only its place in the parent chain (type, uuid, parentUuid), so an
  * uploaded copy finds the same rewinds.
  */

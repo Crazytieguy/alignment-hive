@@ -86,15 +86,13 @@ here works until the binary resolves.
    ```json
    "ANTHROPIC_BASE_URL": "<base_url from doctor --json>",
    "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1",
-   "ENABLE_TOOL_SEARCH": "true",
    "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"
    ```
    `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude sessions on
    Claude Code's first-party behaviour (refusal fallback, WebSearch modes,
    API betas), which it otherwise withholds behind a custom base URL.
-   Tool search disables itself behind a gateway unless
-   `ENABLE_TOOL_SEARCH` is set. `CLAUDE_CODE_GATEWAY_HINT_HEADERS` lets the
-   router recognize compaction requests.
+   `CLAUDE_CODE_GATEWAY_HINT_HEADERS` lets the router recognize compaction
+   requests.
    Then size the routes: `$ROUTER settings windows --apply --project-dir
    <project>`. It sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (every route's
    context window) to 1000000 and gives each route a `modelSettings`
