@@ -1,6 +1,6 @@
 {
   "name": "remote-kernels",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Cloud GPU instances with Jupyter kernels for AI/ML workloads",
   "types": "./types/index.d.ts"
 }
