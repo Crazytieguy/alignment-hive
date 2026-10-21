@@ -62,8 +62,29 @@ export function repeatsSession(agentId: string): boolean {
   return REPEATING_AGENT_PREFIXES.some((p) => agentId.startsWith(p));
 }
 
-/** User entries the human did not type that still show: messages from other agents and sessions. */
-const VISIBLE_META_ORIGINS: ReadonlyArray<string> = ['peer', 'coordinator'];
+/** User entries the human did not type that still show: messages from other agents and sessions, and recall. */
+const VISIBLE_META_ORIGINS: ReadonlyArray<string> = ['peer', 'coordinator', 'recall'];
+
+/** How the hive plugin's automatic recall opens the report it hands to the main agent (plugins/hive/hooks/recall-text.ts). */
+const RECALL_PREFIX = '[hive recall] ';
+
+/** A report of a past-session search handed to the main agent: origin `recall`, whatever sent it. */
+export function isRecallText(text: string): boolean {
+  return text.trimStart().startsWith(RECALL_PREFIX);
+}
+
+/**
+ * Entries that hold past-session retrieval: reports handed in as user entries (origin `recall`: automatic recall's,
+ * and a background `hive:retrieval` agent's hand-back), and calls that started a `hive:retrieval` agent, whose
+ * result or agent transcript holds the report.
+ */
+export function isRecall(e: Entry): boolean {
+  if (e.kind === 'user') return e.origin === 'recall';
+  return e.kind === 'tool' && isRetrievalCall(e);
+}
+
+/** A call that started the hive:retrieval agent. */
+export const isRetrievalCall = (e: ToolEntry): boolean => e.input.subagent_type === 'hive:retrieval';
 
 /**
  * The origin of a user message Claude Code did not tag with one: another agent's message, or an
@@ -158,18 +179,18 @@ const READS: ReadonlyArray<string> = ['read', 'comments'];
 /**
  * The outline: the human's messages (user entries without `origin`, interrupts included), tool
  * calls whose result holds their words (AskUserQuestion answers, artifact comments read),
- * compactions, tool calls that started or messaged agents, and fork and continuation links. In an
+ * compactions, tool calls that started or messaged agents, recall, and fork and continuation links. In an
  * agent's transcript, its session's later messages to it (origin `coordinator`) count as the human's.
  * `startsAgents`: the caller linked the tool entry to agent transcripts.
  */
 export function inOutline(e: Entry, startsAgents: boolean, agentTranscript = false): boolean {
   switch (e.kind) {
     case 'user':
-      return e.origin === undefined || (agentTranscript && e.origin === 'coordinator');
+      return e.origin === undefined || isRecall(e) || (agentTranscript && e.origin === 'coordinator');
     case 'system':
       return e.subtype === 'compact_boundary';
     case 'tool':
-      return startsAgents || carriesHumanWords(e);
+      return startsAgents || carriesHumanWords(e) || isRecall(e);
     case 'fork-context-ref':
     case 'continued-in':
       return true;

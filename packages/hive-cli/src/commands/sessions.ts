@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import { isHumanMessage, leanRecord, readRecords, readTranscript } from '@alignment-hive/session-data';
-import { cutoffTime, recordsAsOf } from '../lib/as-of';
+import { isHumanMessage } from '@alignment-hive/session-data';
+import { cutoffTime, transcriptAsOf } from '../lib/as-of';
 import { preferred, printer, sessionFiles } from '../lib/locators';
 import { clipToFirstLine, localTime } from '../lib/local-rows';
 import { localErrors, localNotes } from '../lib/messages';
@@ -26,7 +26,7 @@ type Facts = SessionFacts & { asOf?: Transcript };
 function factsAsOf(f: SessionFacts): Facts {
   const cutoff = cutoffTime();
   if (cutoff === undefined || (f.end !== undefined && f.end < cutoff)) return f;
-  const asOf = readTranscript(recordsAsOf(readRecords(readFileSync(f.ref.path), leanRecord).records));
+  const asOf = transcriptAsOf(readFileSync(f.ref.path)).transcript;
   const end = asOf.entries.findLast((e) => e.time !== undefined)?.time;
   return { ...f, end: end ? Date.parse(end) : undefined, branch: asOf.branch, asOf };
 }

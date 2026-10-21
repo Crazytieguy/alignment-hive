@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { NOISE, hiddenBy, inOutline, isEmptySession, isHumanMessage } from './noise';
+import { NOISE, hiddenBy, inOutline, isEmptySession, isHumanMessage, isRecall } from './noise';
 import { parseTranscript } from './transcript';
 import type { Entry } from './transcript';
 
@@ -118,6 +118,32 @@ describe('selection', () => {
     expect(inOutline(call('Bash'), false)).toBe(false);
     expect(inOutline({ ...base, kind: 'assistant', text: 'x' }, false)).toBe(false);
     expect(inOutline({ ...base, kind: 'continued-in', target: 'x' }, false)).toBe(true);
+  });
+
+  test('recall: reports handed in, whatever sent them, and calls that retrieved', () => {
+    const report = '[hive recall] Entries from past sessions picked automatically.\n\n> [user] tabs (a1b2c3d4:1, 2026-09-01)';
+    const context = (content: Array<string>) => ({ type: 'attachment', uuid: 'c', attachment: { type: 'hook_additional_context', content } });
+    const [appended, submitted, typed, withPrompt] = parseTranscript(
+      [
+        { type: 'user', uuid: 'r1', message: { content: [{ type: 'text', text: report }] } },
+        { type: 'user', uuid: 'r2', origin: { kind: 'plugin' }, message: { content: report } },
+        { type: 'user', uuid: 'r3', origin: { kind: 'human' }, message: { content: 'what did hive recall find?' } },
+        // Context a hook added to a prompt takes an entry number only when it is recall's report.
+        context(['another hook said this']),
+        context(['another hook said this', report]),
+      ]
+        .map((r) => JSON.stringify(r))
+        .join('\n'),
+    ).entries;
+    expect([appended, submitted, typed, withPrompt].map((e) => e.kind === 'user' && e.origin)).toEqual(['recall', 'recall', undefined, 'recall']);
+    expect([withPrompt.n, withPrompt.kind === 'user' && withPrompt.text]).toEqual([4, report]);
+    expect([isRecall(appended), hiddenBy(appended), isHumanMessage(appended), inOutline(appended, false)]).toEqual([true, undefined, false, true]);
+    expect(hiddenBy(U(report, { isMeta: true, origin: 'recall' }))).toBeUndefined();
+    const call = (tool: string, input: Record<string, unknown> = {}): Entry => ({ ...base, kind: 'tool', tool, id: 't', input });
+    expect(isRecall(call('Agent', { subagent_type: 'hive:retrieval' }))).toBe(true);
+    expect(isRecall(call('Agent', { subagent_type: 'Explore' }))).toBe(false);
+    expect(inOutline(call('Agent', { subagent_type: 'hive:retrieval' }), false)).toBe(true);
+    expect(isRecall(typed)).toBe(false);
   });
 
   test('isEmptySession', () => {

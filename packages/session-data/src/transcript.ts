@@ -4,7 +4,7 @@
  * schema validation, noise rules or later records, so appending never renumbers and an uploaded
  * copy numbers like the local file. Branch states come only from positively established rewinds.
  */
-import { hiddenBy, isCommandMarkup, untaggedOrigin } from './noise';
+import { hiddenBy, isCommandMarkup, isRecallText, isRetrievalCall, untaggedOrigin } from './noise';
 import { leanRecord, readRecords } from './records';
 import type { RawRecord } from './records';
 
@@ -29,7 +29,7 @@ export interface EntryBase {
 export type UserEntry = EntryBase & {
   kind: 'user';
   text: string;
-  /** Who sent it when the human did not type it: Claude Code's origin.kind, e.g. peer, coordinator. */
+  /** Who sent it when the human did not type it: Claude Code's origin.kind, e.g. peer, coordinator; or recall. */
   origin?: string;
   isMeta?: true;
   isCompactSummary?: true;
@@ -103,13 +103,20 @@ export function isQueuedCommand(r: RawRecord): boolean {
   return r.type === 'attachment' && obj(r.data.attachment)?.type === 'queued_command';
 }
 
+/** Automatic recall's report, which Claude Code stores as context a hook added to the prompt. */
+function recallContext(r: RawRecord): string | undefined {
+  const a = obj(r.data.attachment);
+  if (r.type !== 'attachment' || a?.type !== 'hook_additional_context' || !Array.isArray(a.content)) return undefined;
+  return a.content.find((c): c is string => typeof c === 'string' && isRecallText(c));
+}
+
 /** How many entry numbers a record takes. */
-function numbersFor(r: RawRecord): number {
+export function numbersFor(r: RawRecord): number {
   switch (r.type) {
     case 'user':
       return isNumberedUserRecord(r.data) ? 1 : 0;
     case 'attachment':
-      return isQueuedCommand(r) ? 1 : 0;
+      return isQueuedCommand(r) || recallContext(r) !== undefined ? 1 : 0;
     case 'assistant':
       return contentBlocks(r.data).length;
     case 'system':
@@ -157,6 +164,7 @@ function slashCommand(text: string): { command: string; text: string } | undefin
 
 /** Origin of a user entry the human did not type; undefined for the human's own messages. */
 function originOf(kind: string | undefined, text: string, fallback?: string): string | undefined {
+  if (isRecallText(text)) return 'recall';
   if (kind) return kind === 'human' ? undefined : kind;
   return fallback ?? untaggedOrigin(text);
 }
@@ -232,14 +240,14 @@ export function readTranscript(records: Array<RawRecord>): Transcript {
     };
 
     if (r.type === 'user' || r.type === 'attachment') {
-      const queued = r.type === 'attachment';
+      const isAttachment = r.type === 'attachment';
       const a = obj(d.attachment) ?? {};
-      let text = blocksText(queued ? blocksOf(a.prompt) : contentBlocks(d));
+      let text = isAttachment ? (recallContext(r) ?? blocksText(blocksOf(a.prompt))) : blocksText(contentBlocks(d));
       const cmd = slashCommand(text);
       if (cmd) text = cmd.text;
       const e: UserEntry = { ...base(), kind: 'user', text };
-      const taskMode = queued && a.commandMode === 'task-notification' ? 'task-notification' : undefined;
-      const origin = originOf(str(obj(queued ? a.origin : d.origin)?.kind), text, taskMode);
+      const taskMode = isAttachment && a.commandMode === 'task-notification' ? 'task-notification' : undefined;
+      const origin = originOf(str(obj(isAttachment ? a.origin : d.origin)?.kind), text, taskMode);
       if (origin) e.origin = origin;
       if (d.isMeta === true || a.isMeta === true) e.isMeta = true;
       if (d.isCompactSummary === true) {
@@ -247,7 +255,7 @@ export function readTranscript(records: Array<RawRecord>): Transcript {
         summaryPrompt = str(d.promptId);
       } else if (cmd?.command === 'compact' && summaryPrompt !== undefined && str(d.promptId) === summaryPrompt)
         e.compactReplay = true;
-      if (queued && !e.time && str(a.timestamp)) e.time = a.timestamp as string;
+      if (isAttachment && !e.time && str(a.timestamp)) e.time = a.timestamp as string;
       if (cmd) e.command = cmd.command;
       entries.push(e);
     } else if (r.type === 'assistant') {
@@ -302,6 +310,13 @@ export function readTranscript(records: Array<RawRecord>): Transcript {
       // A transition continues from the last entry of the record it resumes.
       if (from !== undefined) e.resumes = firstN.get(from)! + numbersFor(records[from]) - 1;
     }
+  }
+
+  // A background hive:retrieval agent hands its report back as a message from it: recall too.
+  const retrievers = new Set(entries.flatMap((e) => (e.kind === 'tool' && isRetrievalCall(e) && e.agentId ? [e.agentId] : [])));
+  for (const e of entries) {
+    const from = e.kind === 'user' && e.origin === 'peer' ? /<agent-message from="([^"]+)"/.exec(e.text)?.[1] : undefined;
+    if (from && retrievers.has(from)) (e as UserEntry).origin = 'recall';
   }
 
   const t: Transcript = { entries };

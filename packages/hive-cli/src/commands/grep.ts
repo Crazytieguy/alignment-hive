@@ -1,11 +1,11 @@
 import { statSync } from 'node:fs';
 import { hiddenBy, repeatsSession } from '@alignment-hive/session-data';
-import { agentsOf, parseLocator, printer, resolveTranscript, sessionAgents } from '../lib/locators';
+import { agentsOf, printer, resolveTranscript, sessionAgents } from '../lib/locators';
 import { clipAround, clipFirstLine, entryRow, mapStrings } from '../lib/local-rows';
 import { escapeRegExp, mandatoryLiterals, mayMatch } from '../lib/grep-prefilter';
 import { loadTranscript, reusedBytes, selectRange } from '../lib/local-transcript';
 import { localErrors, localNotes } from '../lib/messages';
-import { LocalError, emit, inWindow, note, numberFlag, scopeOf, spanInWindow, timeWindow, warn } from './local';
+import { LocalError, emit, inWindow, note, numberFlag, scopeOf, sessionLocator, spanInWindow, timeWindow, warn } from './local';
 import { sessionsByActivity, sessionsIn } from './sessions';
 import type { Entry } from '@alignment-hive/session-data';
 import type { Range, TranscriptRef } from '../lib/locators';
@@ -129,7 +129,7 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
       return [];
     };
     for (const text of sessionArgs) {
-      const locator = parseLocator(text);
+      const locator = sessionLocator(text);
       const ref = await resolveTranscript(locator, env.root);
       const agents = await sessionAgents(env.root, ref.session);
       const nested = ref.agentId || !withAgents ? [] : agents.flatMap((a) => target(a));

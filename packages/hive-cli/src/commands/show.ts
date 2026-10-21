@@ -1,9 +1,9 @@
-import { hiddenBy, inOutline } from '@alignment-hive/session-data';
-import { parseLocator, printer, resolveTranscript, sameAgentFiles, sessionAgents } from '../lib/locators';
+import { hiddenBy, inOutline, isRecall } from '@alignment-hive/session-data';
+import { printer, resolveTranscript, sameAgentFiles, sessionAgents } from '../lib/locators';
 import { boundItems, clipEach, clipToFirstLine, entryRow, hiddenCounts } from '../lib/local-rows';
 import { entryCount, loadTranscript, readBytes, selectRange } from '../lib/local-transcript';
 import { localErrors, localNotes } from '../lib/messages';
-import { LocalError, emit, note, numberFlag, sessionArguments } from './local';
+import { LocalError, emit, note, numberFlag, sessionArguments, sessionLocator } from './local';
 import type { Entry } from '@alignment-hive/session-data';
 import type { Locator, TranscriptRef } from '../lib/locators';
 import type { LoadedTranscript } from '../lib/local-transcript';
@@ -27,19 +27,19 @@ interface Loaded {
 /**
  * show SESSION [RANGE...]: entries, each field clipped; no RANGE = the whole session. Several
  * ranges, and SESSION:N of other transcripts, print in the order given; an entry prints once.
- * outline SESSION: the same, restricted to the outline and clipped to first lines.
+ * outline SESSION...: the same, restricted to the outline (with --replies, the assistant's replies too) and clipped
+ * to first lines.
  * Hidden entries are counted on stderr per transcript, or printed with --all-entries.
  */
 async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'): Promise<number> {
-  if (verb === 'outline') {
-    if (!args.positional.length) throw new LocalError(localErrors.needsSession(verb), true);
-    if (args.positional.length > 1 || parseLocator(args.positional[0]).range)
-      throw new LocalError(localErrors.outlineTakesOne(args.positional.join(' ')), true);
-  }
-  const locators = sessionArguments(args, verb);
+  if (!args.positional.length) throw new LocalError(localErrors.needsSession(verb), true);
+  const locators = verb === 'outline' ? args.positional.map(sessionLocator) : sessionArguments(args, verb);
+  if (verb === 'outline' && locators.some((l) => l.range))
+    throw new LocalError(localErrors.outlineTakesNoRange(args.positional.join(' ')), true);
   const n = numberFlag(args, '--clip', verb === 'show' ? 1000 : 150);
   const clip = verb === 'show' ? clipEach(n) : clipToFirstLine(n);
   const all = args.flags.get('--all-entries') === true;
+  const replies = args.flags.get('--replies') === true;
   const print = await printer(env.root);
   const transcripts = new Map<string, Loaded>();
   const load = async (locator: Locator) => {
@@ -63,7 +63,12 @@ async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'):
     const agentTranscript = t.ref.agentId !== undefined;
     for (const e of entries) {
       if (t.printed.has(e.n)) continue;
-      if (verb === 'outline' && !inOutline(e, t.loaded.ctx.agents.has(e.n), agentTranscript)) continue;
+      if (
+        verb === 'outline' &&
+        !inOutline(e, t.loaded.ctx.agents.has(e.n), agentTranscript) &&
+        !(replies && e.kind === 'assistant')
+      )
+        continue;
       t.printed.add(e.n);
       const rule = hiddenBy(e);
       if (rule && !all) {
@@ -75,7 +80,8 @@ async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'):
         if (n > 0) row.input = boundItems(row.input, INPUT_CLIPS * n);
         if (verb === 'outline' && Array.isArray(row.agents) && row.agents.length > OUTLINE_AGENTS)
           row.agents = [...row.agents.slice(0, OUTLINE_AGENTS), `[+${row.agents.length - OUTLINE_AGENTS} items]`];
-        if (verb === 'outline' && STARTS_AGENTS.includes(e.tool)) delete row.result;
+        // A retrieval agent's result is its report when it ran in the foreground.
+        if (verb === 'outline' && STARTS_AGENTS.includes(e.tool) && !isRecall(e)) delete row.result;
       }
       emit(row);
     }

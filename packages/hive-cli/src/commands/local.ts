@@ -87,7 +87,7 @@ export const warn = (text: string): void => stderrRow({ warning: text });
 const SCOPE = ['--project', '--since', '--until', '--clip'];
 const SPECS: Record<string, FlagSpec> = {
   sessions: { bool: ['--all-projects'], value: ['-n', ...SCOPE] },
-  outline: { bool: ['--all-entries'], value: ['--clip'] },
+  outline: { bool: ['--all-entries', '--replies'], value: ['--clip'] },
   show: { bool: ['--all-entries'], value: ['--clip'] },
   grep: {
     bool: ['-i', '-F', '-E', '-c', '-l', '--agents', '--all-entries', '--all-projects'],
@@ -166,6 +166,18 @@ export async function scopeOf(env: LocalEnv, args: Args): Promise<Scope> {
 }
 
 /**
+ * A SESSION argument as a locator. `current` stands for the session the command runs in, which Claude
+ * Code names in CLAUDE_CODE_SESSION_ID (a subagent's Bash sees its session's), with any `/agent-` or `:RANGE`.
+ */
+export function sessionLocator(text: string): Locator {
+  const m = /^current(?=$|[/:])/.exec(text);
+  if (!m) return parseLocator(text);
+  const id = process.env.CLAUDE_CODE_SESSION_ID;
+  if (!id) throw new LocalError(localErrors.noCurrentSession);
+  return parseLocator(id + text.slice(m[0].length));
+}
+
+/**
  * show's arguments, in the order given: SESSION[:RANGE] first, then SESSION:RANGE of any transcript
  * or bare RANGEs of the transcript named last. A SESSION without a range stands for the whole
  * transcript only when no bare RANGE follows.
@@ -173,12 +185,12 @@ export async function scopeOf(env: LocalEnv, args: Args): Promise<Scope> {
 export function sessionArguments(args: Args, verb: string): Array<Locator> {
   if (!args.positional.length) throw new LocalError(localErrors.needsSession(verb), true);
   const [first, ...rest] = args.positional;
-  const head = parseLocator(first);
+  const head = sessionLocator(first);
   const locators = [head];
   let named = head;
   for (const text of rest) {
     if (text.includes(':')) {
-      named = parseLocator(text);
+      named = sessionLocator(text);
       locators.push(named);
       continue;
     }

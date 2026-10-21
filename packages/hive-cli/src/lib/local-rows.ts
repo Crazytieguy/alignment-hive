@@ -2,6 +2,7 @@
 // fields short. Clipping cuts at exact code points, marked in the text as [+N chars] on the side that
 // was cut.
 
+import { isRecall } from '@alignment-hive/session-data';
 import { localNotes } from './messages';
 import type { Entry } from '@alignment-hive/session-data';
 
@@ -158,6 +159,7 @@ export function entryRow(e: Entry, ctx: RowContext, clip: Clip, hidden?: string)
       row.type = e.type;
       break;
   }
+  if (isRecall(e)) row.recall = true;
   if (e.branch === 'abandoned') row.rewound = true;
   if (hidden) row.hidden = hidden;
   return row;

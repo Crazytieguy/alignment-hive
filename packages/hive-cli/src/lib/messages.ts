@@ -257,7 +257,7 @@ export const locatorErrors = {
 
 /** The usage lines of `hive local`: the top of its help page, and what a malformed call prints. */
 export const localUsage = `  hive local sessions                   sessions, latest activity first (20; -n N for more)
-  hive local outline SESSION            the human's messages and answers, compactions, and calls that started or messaged agents
+  hive local outline SESSION...         the human's messages and answers, compactions, recall, and calls that started or messaged agents
   hive local show SESSION [RANGE...]    entries, each field clipped to 1000 chars; no RANGE = the whole session
   hive local grep PATTERN [SESSION...]  entries whose text, tool input or result matches a JavaScript regex`;
 
@@ -275,8 +275,9 @@ Output: JSON Lines on stdout, one entry per line. Keys that don't apply are left
            (a4eff20e/agent-a6ee7bb6:21), or SESSION/wf_RUN/agent-ID when a Workflow run's agent shares its id
            with another transcript. N counts every entry of that transcript, hidden or not, and never changes.
   time     local time on this machine, to the second, with its offset from UTC
-  origin   on a user entry the human did not type: peer or coordinator (another agent or session); with
+  origin   on a user entry the human did not type: peer or coordinator (another agent or session), recall; with
            --all-entries, also task-notification
+  recall   true on a report from past sessions (origin recall) and on calls that started a hive:retrieval agent
   error    true when the tool call failed or was denied
   agents   locs of the agent transcripts a tool call started or messaged; outline prints the first 5 and
            [+N items] for the rest, show prints them all
@@ -298,12 +299,14 @@ Output: JSON Lines on stdout, one entry per line. Keys that don't apply are left
 
 RANGE: N, N-M or N- (to the end); give several to print several. SESSION:N also works as one argument, and can be
   repeated; a bare RANGE is of the transcript named last.
+SESSION current: the session this runs in; in a subagent, the session that started it.
 Hidden unless --all-entries: empty thinking, routine system entries (timings, hook summaries, API retries,
   local command output, status notes), Claude Code's meta messages (skill text, hook feedback), task
   notifications, user entries that are only system reminders, slash commands with no arguments or that change
   settings (/model, /effort), slash command output, ! shell markup, the summary (and the /compact it replays)
   written after a compaction, and subagent records that older Claude Code versions wrote inline. Nothing else
   is hidden: tool calls and assistant replies always print. stderr says how many were hidden.
+outline: --replies adds the assistant's replies; several SESSIONs print one after another.
 Clipping: sessions and outline show first lines; show clips each field to 1000 chars; grep shows 200 chars
   around the match and the first line of other fields. Cuts are marked [+N chars]. A tool input in show or
   outline keeps its leading items up to about 3 times the clip; [+N items] counts the rest. --clip N sets
@@ -337,8 +340,9 @@ export const localErrors = {
     `no Claude Code transcripts for project ${path}${current ? ' (the current project)' : ''}; use --project DIR or --all-projects`,
   sessionsTakesNoSession: (arg: string): string => `sessions takes no SESSION ("${arg}"); use outline or show`,
   needsSession: (verb: string): string => `${verb} needs a SESSION`,
-  outlineTakesOne: (given: string): string =>
-    `outline takes one SESSION and no range ("${given}"); show SESSION RANGE prints entries`,
+  noCurrentSession: 'current names the session this runs in, from CLAUDE_CODE_SESSION_ID, which is not set here',
+  outlineTakesNoRange: (given: string): string =>
+    `outline takes SESSIONs and no range ("${given}"); show SESSION RANGE prints entries`,
   rangeAfterSession: (message: string): string =>
     `${message} (after SESSION, show takes ranges of the transcript named last, or SESSION:N of any transcript)`,
   needsPattern: 'grep needs a PATTERN',

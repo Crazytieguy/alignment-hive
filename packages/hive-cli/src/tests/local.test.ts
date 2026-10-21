@@ -3,11 +3,13 @@ import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { readRecords } from '@alignment-hive/session-data';
 import { local, localCore, localEnv, parseArgs } from '../commands/local';
 import { toClaudeProjectDirName } from '../lib/config';
 import { clipAround, clipFirstLine, clipStart, localTime } from '../lib/local-rows';
 import { localHelp, localUsage } from '../lib/messages';
 import { stdout } from '../lib/stdout';
+import { recordsAsOf } from '../lib/as-of';
 import type { LocalEnv } from '../commands/local';
 
 const A = 'aa000001-0000-4000-8000-000000000001'; // newest session: noise, tools, an agent
@@ -226,16 +228,8 @@ describe('help and errors', () => {
       [['show', `${A.slice(0, 8)}:99`], `entry 99 is out of range: ${A.slice(0, 8)} has entries 1-12`],
       [['show', 'ffffffff'], 'no session or agent matches "ffffffff"'],
       [
-        ['outline', A, '3'],
-        `outline takes one SESSION and no range ("${A} 3"); show SESSION RANGE prints entries`,
-      ],
-      [
-        ['outline', `${A.slice(0, 8)}:4`],
-        `outline takes one SESSION and no range ("${A.slice(0, 8)}:4"); show SESSION RANGE prints entries`,
-      ],
-      [
-        ['outline', A.slice(0, 8), B.slice(0, 8)],
-        `outline takes one SESSION and no range ("${A.slice(0, 8)} ${B.slice(0, 8)}"); show SESSION RANGE prints entries`,
+        ['outline', A.slice(0, 8), `${B.slice(0, 8)}:4`],
+        `outline takes SESSIONs and no range ("${A.slice(0, 8)} ${B.slice(0, 8)}:4"); show SESSION RANGE prints entries`,
       ],
       [['grep', '-c', '-l', 'x'], '-c and -l cannot be used together'],
       [['sessions', '--project', '/dev/null'], '--project /dev/null is not a directory'],
@@ -847,6 +841,85 @@ describe('found by trying every feature', () => {
   });
 });
 
+describe('recall', () => {
+  test('outline lists reports handed in and calls that retrieved; rows carry recall', async () => {
+    const S = 'ac000009-0000-4000-8000-000000000009';
+    const report =
+      '[hive recall] Entries from past sessions picked automatically.\n\n> [user] tabs (a1b2c3d4:1, 2026-09-01)';
+    const call = (id: string, name: string, input: object, result: string) => [
+      rec('assistant', [{ type: 'tool_use', id, name, input }]),
+      rec('user', [{ type: 'tool_result', tool_use_id: id, content: result }]),
+    ];
+    await write(
+      join(project(), `${S}.jsonl`),
+      J(
+        chain([
+          rec('user', 'Format the file.', { origin: { kind: 'human' } }),
+          rec('user', [{ type: 'text', text: report }]),
+          // Automatic recall's report, as context a hook added to the prompt.
+          rec('attachment', undefined, { attachment: { type: 'hook_additional_context', content: [report] } }),
+          ...call('a', 'Agent', { subagent_type: 'hive:retrieval', prompt: 'indentation history' }, '## Findings\n> [user] spaces'),
+          ...call('b', 'Bash', { command: 'ls' }, 'x'),
+          rec('assistant', [{ type: 'tool_use', id: 'g', name: 'Agent', input: { subagent_type: 'hive:retrieval', run_in_background: true } }]),
+          rec('user', [{ type: 'tool_result', tool_use_id: 'g', content: 'Async agent launched' }], {
+            toolUseResult: { agentId: 'f00d', status: 'async_launched' },
+          }),
+          rec('assistant', [{ type: 'text', text: 'Searching meanwhile.' }]),
+          rec('user', 'Another Claude session sent a message:\n<agent-message from="f00d">## Findings\n> [user] tabs</agent-message>', {
+            isMeta: true,
+            origin: { kind: 'peer' },
+          }),
+          rec('user', 'Another Claude session sent a message:\n<agent-message from="beef">hi</agent-message>', {
+            isMeta: true,
+            origin: { kind: 'peer' },
+          }),
+        ]),
+      ),
+    );
+    const s = S.slice(0, 8);
+    await hl('outline', s);
+    // A foreground retrieval agent's result is its report; a background one's report is its hand-back message.
+    expect(rows().map((x) => [x.loc, x.origin, x.tool, x.recall, x.result])).toEqual([
+      [`${s}:1`, undefined, undefined, undefined, undefined],
+      [`${s}:2`, 'recall', undefined, true, undefined],
+      [`${s}:3`, 'recall', undefined, true, undefined],
+      [`${s}:4`, undefined, 'Agent', true, '## Findings [+16 chars]'],
+      [`${s}:6`, undefined, 'Agent', true, 'Async agent launched'],
+      [`${s}:8`, 'recall', undefined, true, undefined],
+    ]);
+    // --replies adds the assistant's replies; several sessions print in turn.
+    out.length = 0;
+    await hl('outline', s, A.slice(0, 8), '--replies', '--clip', '0');
+    expect(rows().filter((x) => x.kind === 'assistant').map((x) => x.text)).toEqual([
+      'Searching meanwhile.',
+      'Running the tests.',
+      'The needle is in "quotes".',
+    ]);
+    out.length = 0;
+    await hl('sessions', '-n', '100');
+    expect(rows().find((x) => x.loc === s)).toMatchObject({ first: 'Format the file.' });
+    // `current`: the session this runs in, from Claude Code's environment.
+    const was = process.env.CLAUDE_CODE_SESSION_ID;
+    try {
+      process.env.CLAUDE_CODE_SESSION_ID = S;
+      out.length = 0;
+      await hl('outline', 'current');
+      expect(rows().filter((x) => x.recall).map((x) => x.loc)).toEqual([`${s}:2`, `${s}:3`, `${s}:4`, `${s}:6`, `${s}:8`]);
+      out.length = 0;
+      await hl('show', 'current:2');
+      expect(rows().map((x) => x.loc)).toEqual([`${s}:2`]);
+      delete process.env.CLAUDE_CODE_SESSION_ID;
+      err.length = 0;
+      expect(await hl('outline', 'current')).toBe(2);
+      expect(err.join('\n')).toContain('CLAUDE_CODE_SESSION_ID');
+    } finally {
+      if (was === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+      else process.env.CLAUDE_CODE_SESSION_ID = was;
+    }
+    await rm(join(project(), `${S}.jsonl`));
+  });
+});
+
 describe('grep reads \\| as alternation', () => {
   test('a\\|b finds either, with a note; [|] and \\\\| keep their meaning', async () => {
     expect(await hl('grep', '-F', '|')).toBe(1);
@@ -891,6 +964,23 @@ describe('HIVE_LOCAL_CUTOFF', () => {
         first: 'Why does "the build" fail?',
       });
     });
+  });
+
+  test('a later bookkeeping record at the top of the file neither hides the session nor shifts its numbers', async () => {
+    const records = readRecords(
+      J([
+        { type: 'queue-operation', operation: 'enqueue', timestamp: T(30), content: 'written last, stored first' },
+        { type: 'user', uuid: 'u1', timestamp: T(1), message: { content: 'first' } },
+        { type: 'assistant', uuid: 'a1', timestamp: T(2), message: { content: [{ type: 'text', text: 'reply' }] } },
+        { type: 'user', uuid: 'u2', timestamp: T(5), message: { content: 'after the cutoff' } },
+      ]),
+    ).records;
+    let kept: Array<string> = [];
+    await at(T(3), () => {
+      kept = recordsAsOf(records).map((r) => r.type);
+      return Promise.resolve();
+    });
+    expect(kept).toEqual(['user', 'assistant']);
   });
 
   test('a value that is not a time is an error', async () => {
