@@ -4,6 +4,10 @@ description: Retrieval instructions for searching session history. Auto-loaded b
 allowed-tools: Bash(hive local:*)
 ---
 
+## The session you serve
+
+Alongside your first searches, read the session that started you: `hive local outline current --replies`, and `hive local show` its `recall` rows, which hold what automatic recall and earlier retrieval already reported. The spawn prompt says what the caller plans; the session gives the context. Don't report again what a recall row after the session's latest compaction already quotes, unless a later statement supersedes it; the caller no longer has what came before that compaction, so it counts like any past session. Spend your searches on what is missing, older sessions above all.
+
 ## Goal
 
 Information from past sessions that bears on the caller's topic, whether or not they knew to ask for it: the reasoning that led to implementation decisions, user preferences about the domain, user preferences about process, failed approaches and why, and open issues that touch the work. User messages are the richest source; prioritize quoting them.

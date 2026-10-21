@@ -4,8 +4,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
+import { cli, hive } from './cli'
 import { noticeRows } from './notice-band'
 import type { Notice, NoticeAction } from './notice-band'
+import { submitWithRecall } from './recall'
 import type { HiveBusy, HiveNotices } from '../types'
 
 // `when`: which phase of the session shows the row (packages/hive-cli/src/commands/notices.ts).
@@ -26,22 +28,11 @@ const isReviewing = atom({ plugin: 'hive', key: 'isReviewing' } as const, false)
 // older than this (the pending count and its countdown drift slowly).
 const REFRESH_MS = 15 * 60 * 1000
 
-// The directory the session started in, which hive.sh reads for the dev binary.
-let projectDir = ''
 let running: Promise<void> | null = null
 // A refresh asked for while one runs: the running one goes again, so its awaiters see fresh rows.
 let isRefreshDue = false
 // The session a stored reply already asked for: the reply hook asks once per session.
 let askedOnReply = ''
-
-/** Runs the CLI this plugin pins (scripts/hive.sh) in the session's working directory. */
-async function hive($: EngineInterface, args: string[]) {
-  return $.process.run(['bash', `${$.plugin.root}/scripts/hive.sh`, ...args], {
-    // NO_COLOR: the CLI's words reach a toast, not a terminal.
-    env: { CLAUDE_PLUGIN_ROOT: $.plugin.root, CLAUDE_PROJECT_DIR: projectDir, NO_COLOR: '1' },
-    timeoutMs: 60_000,
-  })
-}
 
 /** Fetches this session's rows once; drops the answer if the session changed (a /clear) meanwhile. */
 async function fetchNotices($: EngineInterface): Promise<void> {
@@ -135,10 +126,10 @@ function quoted(text: string): string {
   return `'${text.replaceAll("'", `'\\''`)}'`
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    projectDir = e.cwd
+    cli.projectDir = e.cwd
     inBackground(refresh($))
     return started
   })
@@ -146,7 +137,7 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     const [sessionId, prompted] = await Promise.all([$.session.id(), read($, promptedSession)])
     if (prompted !== sessionId) await update($, promptedSession, () => sessionId)
-    return next(e)
+    return options.recall === true ? submitWithRecall($, e, next, String(options.recallModel ?? 'auto')) : next(e)
   })
 
   // The CLI discovers a session once it holds an assistant reply: the first reply row stored in
@@ -224,7 +215,7 @@ export const register: Register = on => {
         const started = await $.tool
           .call({
             tool: 'Bash',
-            command: `CLAUDE_PLUGIN_ROOT=${quoted(root)} CLAUDE_PROJECT_DIR=${quoted(projectDir)} bash ${quoted(`${root}/scripts/hive.sh`)} upload review`,
+            command: `CLAUDE_PLUGIN_ROOT=${quoted(root)} CLAUDE_PROJECT_DIR=${quoted(cli.projectDir)} bash ${quoted(`${root}/scripts/hive.sh`)} upload review`,
             description: 'Open the hive session review page',
             run_in_background: true,
           })

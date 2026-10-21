@@ -2,5 +2,20 @@
   "name": "hive",
   "version": "0.6.10",
   "description": "Tooling recommendations and session sharing for alignment researchers",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "recall": {
+      "type": "boolean",
+      "title": "Automatic recall (beta)",
+      "description": "Runs an automatic memory recall step before sending each of your prompts, finding relevant context from this project's past sessions",
+      "default": false
+    },
+    "recallModel": {
+      "type": "string",
+      "title": "Automatic recall model",
+      "description": "auto: GPT-6.1 Sol when model-router provides it, else Sonnet (finds less, and adds about 5% to your Claude usage)",
+      "options": ["auto", "sonnet", "gpt-6.1-sol"],
+      "default": "auto"
+    }
+  }
 }

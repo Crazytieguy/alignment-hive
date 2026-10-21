@@ -130,6 +130,18 @@ A marketplace declared in `~/.claude/settings.local.json` (an older version of t
 
 Read the `alignment-hive` entry in `~/.claude/plugins/known_marketplaces.json`. If `autoUpdate` is not `true`, mention once that the install script (`curl -fsSL https://alignment-hive.com/install.sh | bash`) is supposed to set this and recommend re-running it. Do not auto-fix.
 
+### Automatic recall (beta)
+
+Skip if `pluginConfigs` in `~/.claude/settings.json` already has the hive plugin's options with `recall` set, either way (its key is the hive plugin's id as `enabledPlugins` lists it, normally `hive@alignment-hive`). Otherwise ask once, **Yes** / **No** / **Tell me more**:
+
+> **Automatic recall** (beta): runs an automatic memory recall step before sending each of your prompts, finding relevant context from this project's past sessions, so you repeat yourself less. Each prompt waits up to 30 seconds.
+
+If model-router is not installed, add: without it, recall runs on Sonnet, which finds less than GPT-6.1 Sol and adds about 5% to your Claude usage; with model-router (recommended above), it runs on Sol and uses none.
+
+On **Tell me more**, present the Automatic recall paragraph of the hive README (fetched as under "Installing and Tell me more"), then ask again with **Yes** / **No**.
+
+On Yes, set `pluginConfigs.<hive plugin id>.options.recall` to `true` in `~/.claude/settings.json` (user settings: plugin options are not read from project settings), keeping any other options there; it applies from the next session. On No, record it in the rejected file.
+
 ### Transcript Retention
 
 Claude Code deletes local session transcripts after `cleanupPeriodDays` (default 30). Session retrieval searches these transcripts, so the default silently caps how far back it can reach.

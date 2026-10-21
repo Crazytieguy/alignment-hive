@@ -10,4 +10,6 @@ Core plugin for alignment-hive. Installed automatically by the [install script](
 
 **Session retrieval** — Search past Claude Code sessions from your local machine. An agent automatically searches session history when past context might be relevant, or you can search manually. A PostToolUse hook on EnterWorktree/ExitWorktree registers the session's new transcript dir, so moved sessions stay searchable.
 
+**Automatic recall (beta, opt-in)** — Runs an automatic memory recall step before sending each of your prompts, finding relevant context from this project's past sessions: your instructions and preferences, earlier decisions and their reasons, approaches that failed. Each prompt waits up to 30 seconds while one model call reads the project's recent messages and Claude's replies; Claude gets the entries that bear on the prompt, and can still spawn the retrieval agent for older history. With model-router it runs on GPT-6.1 Sol and uses none of your Claude usage. Without it, it runs on Sonnet, which finds less and adds about 5% to your Claude usage. `/hive:align` offers it; `/config` turns it on or off (`recall`) and picks the model (`recallModel`).
+
 **CLI auto-updates** — Keeps the `hive` CLI binary up to date automatically at session start.
