@@ -718,6 +718,7 @@ async fn status_lists_mixed_durable_records_with_annotations() {
         gpu_name: Some("Test GPU".to_string()),
         cost_per_hr: 1.25,
         proxy_port_mapped: false,
+        remote_dirs: None,
         kernels: Vec::new(),
     };
     state

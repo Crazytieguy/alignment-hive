@@ -92,19 +92,25 @@ impl JupyterClient {
         Ok(response.json().await?)
     }
 
-    /// Create a new Python kernel, returns its ID.
+    /// Create a new Python kernel, returns its ID. `path` is the Jupyter API
+    /// path (relative to the server's root dir) the kernel starts in, also
+    /// across restarts; `None` starts it in the server's own default.
     ///
     /// Retries on 404 errors — the Jupyter kernel manager may not be fully
     /// initialized immediately after the server starts responding.
-    pub async fn create_kernel(&self) -> anyhow::Result<KernelInfo> {
+    pub async fn create_kernel(&self, path: Option<&str>) -> anyhow::Result<KernelInfo> {
         let url = format!("{}/api/kernels", self.base_url);
+        let mut body = serde_json::json!({"name": "python3"});
+        if let Some(path) = path {
+            body["path"] = serde_json::Value::from(path);
+        }
 
         for attempt in 1..=5 {
             let resp = self
                 .client
                 .post(&url)
                 .header("Authorization", format!("token {}", self.token))
-                .json(&serde_json::json!({"name": "python3"}))
+                .json(&body)
                 .send()
                 .await?;
 
@@ -127,6 +133,35 @@ impl JupyterClient {
         }
 
         unreachable!()
+    }
+
+    /// Create the directory at Jupyter API path `path` and its parents, as
+    /// `mkdir -p` would. A kernel created at a missing path silently starts
+    /// in the nearest existing parent instead.
+    pub async fn ensure_directory(&self, path: &str) -> anyhow::Result<()> {
+        let mut prefix = String::new();
+        for part in path.split('/').filter(|part| !part.is_empty()) {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            let url = format!("{}/api/contents/{prefix}", self.base_url);
+            // PUT of a directory model creates it, and leaves an existing
+            // one as it is.
+            let resp = self
+                .client
+                .put(&url)
+                .header("Authorization", format!("token {}", self.token))
+                .json(&serde_json::json!({"type": "directory"}))
+                .send()
+                .await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Failed to create directory {prefix:?} ({status}): {body}");
+            }
+        }
+        Ok(())
     }
 
     /// Delete (shut down) a kernel.

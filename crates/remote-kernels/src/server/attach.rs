@@ -240,6 +240,7 @@ impl RemoteKernelsServer {
                 record.proxy_port_mapped,
             );
             instance.kernels.clone_from(&record.kernels);
+            instance.remote_dirs.clone_from(&record.remote_dirs);
             // A fenced husk may be replaced so attach can try to reacquire,
             // but it stays fenced until acquire proves ownership of the new
             // generation. A failed attach therefore cannot reopen a

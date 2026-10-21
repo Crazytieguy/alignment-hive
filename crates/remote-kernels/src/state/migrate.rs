@@ -337,6 +337,8 @@ pub(super) fn migrate_legacy_state(project_dir: &Path) {
         cost_per_hr: 0.0,
         // Every pre-tunnel RunPod pod was created with the public mapping.
         proxy_port_mapped: true,
+        // Legacy pods keep the directory layout they were created with.
+        remote_dirs: None,
         kernels: Vec::new(),
     };
 

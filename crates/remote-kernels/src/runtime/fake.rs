@@ -24,7 +24,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
-    ProvisionRequest, Runtime, StopSupport, WatchdogPolicy,
+    ProvisionRequest, RemoteDirs, Runtime, StopSupport, WatchdogPolicy,
 };
 
 struct FakeInstance {
@@ -216,6 +216,11 @@ impl Runtime for FakeRuntime {
 
     fn capabilities(&self) -> Capabilities {
         capabilities(self.cost_per_hr > 0.0)
+    }
+
+    /// Derived from config on every connect; nothing to record.
+    fn remote_dirs(&self, _machine_id: &str, _image: Option<&str>) -> Option<RemoteDirs> {
+        None
     }
 
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
@@ -450,6 +455,19 @@ impl Connection for FakeConnection {
 
     fn workdir(&self) -> &str {
         &self.workdir_string
+    }
+
+    fn state_dir(&self) -> String {
+        crate::machine_scripts::state_dir(self.workdir())
+    }
+
+    /// This runtime launches Jupyter itself with its root at the workdir.
+    fn kernel_path(&self) -> Option<&str> {
+        None
+    }
+
+    fn stage_dir(&self) -> Option<&str> {
+        None
     }
 
     fn recorder_ws_url(&self) -> String {

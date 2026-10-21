@@ -2043,6 +2043,7 @@ async fn settling_the_same_marker_twice_records_the_machine_once() {
     // stamp is cleared so the probe is not throttled.
     let leftover = remote_kernels::state::UnconfirmedRecord {
         last_checked_epoch: 0,
+        remote_dirs: None,
         ..marker
     };
     remote_kernels::state::save_unconfirmed_record(dir.path(), &machine_id, &leftover).unwrap();

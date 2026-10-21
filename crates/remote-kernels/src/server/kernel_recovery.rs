@@ -61,7 +61,7 @@ impl RemoteKernelsServer {
                     .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character)),
             "unsafe kernel id"
         );
-        let state_dir = crate::machine_scripts::state_dir(connection.workdir());
+        let state_dir = connection.state_dir();
         let bin_dir = format!("{state_dir}/bin");
         let output_dir = format!("{state_dir}/kernel-output");
         let script_path = format!("{bin_dir}/rk-output-recorder.py");
@@ -85,10 +85,7 @@ impl RemoteKernelsServer {
         connection: &AnyConnection,
         kernel_id: &str,
     ) -> anyhow::Result<RecorderTail> {
-        let path = format!(
-            "{}/kernel-output/{kernel_id}.jsonl",
-            crate::machine_scripts::state_dir(connection.workdir())
-        );
+        let path = format!("{}/kernel-output/{kernel_id}.jsonl", connection.state_dir());
         let predecessor = format!("{path}.1");
         let command = format!(
             "if [ ! -f {path} ] && [ ! -f {predecessor} ]; then exit 1; fi; {{ [ ! -f {predecessor} ] || cat -- {predecessor}; [ ! -f {path} ] || cat -- {path}; }} | tail -c {RECORDER_TAIL_BYTES}",

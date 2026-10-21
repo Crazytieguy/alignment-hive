@@ -799,3 +799,267 @@ print(r.stderr[-1500:])
         Err(e) => panic!("could not confirm pod deletion: {e}"),
     }
 }
+
+/// A server in a project dir of its own: one Claude session.
+fn session(config: &str) -> (tempfile::TempDir, RemoteKernelsServer) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("remote-kernels.toml"), config).unwrap();
+    let config = Config::load(dir.path()).unwrap();
+    let server = RemoteKernelsServer::new(config, AppState::new(dir.path().to_path_buf()), None);
+    (dir, server)
+}
+
+/// Start a machine, point `guard` at it, and return its machine id.
+async fn start_guarded(
+    server: &RemoteKernelsServer,
+    dir: &std::path::Path,
+    guard: &mut TerminateGuard,
+) -> String {
+    let result = start_machine(server).await;
+    let text = text_of(&result);
+    assert!(!is_error(&result), "start failed: {text}");
+    assert!(text.contains("RUNNING"), "{text}");
+    let machine_id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("- ID: "))
+        .expect("machine id")
+        .to_string();
+    guard.pod_id =
+        remote_kernels::state::load_instance_record(dir, &machine_id).map(|r| r.external_id);
+    guard.done = false;
+    machine_id
+}
+
+async fn run(server: &RemoteKernelsServer, kernel_id: &str, code: &str) -> String {
+    let result = server
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel_id.to_string(),
+            code: code.to_string(),
+            timeout: Some(120),
+            background: None,
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    let out = text_of(&result);
+    assert!(!is_error(&result), "{out}");
+    out
+}
+
+async fn assert_supervised(server: &RemoteKernelsServer) {
+    let result = server
+        .status(Parameters(remote_kernels::server::StatusParams {
+            instance: None,
+        }))
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!text.contains("fenced"), "{text}");
+    eprintln!("status: {text}");
+}
+
+async fn terminate_guarded(server: &RemoteKernelsServer, guard: &mut TerminateGuard) {
+    let result = server
+        .terminate(Parameters(remote_kernels::server::TerminateParams {
+            instance: None,
+            skip_pre_terminate_command: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+    guard.done = true;
+}
+
+/// Two sessions, one network volume (the reported layout and the legacy
+/// one side by side): every pod on the volume keeps its own lifecycle state
+/// there, so a pod never fences itself on another pod's lease — neither
+/// beside a running pod nor after one was terminated — and a running pod is
+/// never fenced by a newcomer. With `workdir` off the mount, sync lands on
+/// the pod's own disk, kernels start there, and the volume's other files
+/// survive a sync.
+///
+/// Network volumes are SECURE-only and live in one datacenter: create one
+/// (10 GB is plenty) and pass it in. The test never deletes it.
+///
+/// ```sh
+/// REMOTE_KERNELS_E2E_NETWORK_VOLUME=<id> REMOTE_KERNELS_E2E_DATA_CENTER=<dc> \
+///   cargo test --test runpod_e2e shared_network_volume -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "spends real money on RunPod; requires RUNPOD_API_KEY and a network volume"]
+async fn runpod_shared_network_volume() {
+    load_key();
+    remote_kernels::init_tls();
+    let volume = std::env::var("REMOTE_KERNELS_E2E_NETWORK_VOLUME")
+        .expect("REMOTE_KERNELS_E2E_NETWORK_VOLUME: a network volume id");
+    let data_center = std::env::var("REMOTE_KERNELS_E2E_DATA_CENTER")
+        .expect("REMOTE_KERNELS_E2E_DATA_CENTER: the volume's datacenter");
+    let config_with = |name: &str, layout: &str| {
+        format!(
+            r#"
+name = "{name}"
+gpu-type-ids = [
+    "NVIDIA GeForce RTX 4090",
+    "NVIDIA RTX A5000",
+    "NVIDIA GeForce RTX 3090",
+    "NVIDIA RTX A4000",
+    "NVIDIA RTX A4500",
+    "NVIDIA RTX 4000 Ada Generation",
+    "NVIDIA L4",
+    "NVIDIA A40",
+]
+
+[runpod]
+cloud-type = "SECURE"
+container-disk-gb = 20
+network-volume-id = "{volume}"
+data-center-ids = ["{data_center}"]
+{layout}
+"#
+        )
+    };
+
+    // Session A: the reported layout, volume for data and the project on
+    // the pod's own disk — in a workdir the image doesn't create.
+    let (dir_a, server_a) = session(&config_with(
+        "rk-volume-a",
+        "volume-mount-path = \"/persist\"\nworkdir = \"/root/work\"",
+    ));
+    let mut guard_a = TerminateGuard {
+        server: server_a.clone(),
+        pod_id: None,
+        done: true,
+    };
+    let machine_a = start_guarded(&server_a, dir_a.path(), &mut guard_a).await;
+    let kernel_a = create_kernel_retry(&server_a, "a").await;
+    let out = run(
+        &server_a,
+        &kernel_a,
+        &format!(
+            "import os\nprint('cwd', os.getcwd())\n\
+             os.makedirs('/persist/cache', exist_ok=True)\n\
+             open('/persist/cache/model.bin', 'w').write('weights')\n\
+             print('state', os.path.isdir('/persist/.remote-kernels/machines/{machine_a}'))"
+        ),
+    )
+    .await;
+    assert!(out.contains("cwd /root/work"), "{out}");
+    assert!(out.contains("state True"), "{out}");
+    std::fs::write(dir_a.path().join("data.txt"), "hello volume").unwrap();
+    let result = server_a
+        .sync(Parameters(remote_kernels::server::SyncParams {
+            include: None,
+            instance: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "sync failed: {}", text_of(&result));
+    let out = run(
+        &server_a,
+        &kernel_a,
+        "import os\nprint(open('data.txt').read())\n\
+         print('cache', open('/persist/cache/model.bin').read())\n\
+         print('mount', os.stat('/root/work').st_dev == os.stat('/persist').st_dev)",
+    )
+    .await;
+    assert!(out.contains("hello volume"), "{out}");
+    assert!(out.contains("cache weights"), "{out}");
+    assert!(out.contains("mount False"), "{out}");
+
+    // A queued download the workdir loses to a stop is collected from the
+    // plan's stage dir, which the machine's stage.sh copied it to. A busy
+    // cell holds the plan's drain back while it runs stage.sh the way the
+    // watchdog would, then deletes the workdir copy as a stop would.
+    let machine_dir = format!("/persist/.remote-kernels/machines/{machine_a}");
+    let stager = format!(
+        "import os, subprocess, time\n\
+         os.makedirs('results', exist_ok=True)\n\
+         open('results/out.txt', 'w').write('staged result')\n\
+         for _ in range(120):\n    \
+             if os.path.exists('{machine_dir}/stage.sh'): break\n    \
+             time.sleep(1)\n\
+         subprocess.run(['bash', '{machine_dir}/stage.sh'], check=True)\n\
+         os.remove('results/out.txt')"
+    );
+    let result = server_a
+        .execute(Parameters(remote_kernels::server::ExecuteParams {
+            kernel_id: kernel_a.clone(),
+            code: stager,
+            timeout: None,
+            background: Some(true),
+            queue: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+    let result = server_a
+        .finish(Parameters(remote_kernels::server::FinishParams {
+            instance: None,
+            download: Some(vec!["results/out.txt".to_string()]),
+            then: "keep".to_string(),
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "finish failed: {}", text_of(&result));
+    let local = dir_a.path().join("results/out.txt");
+    for _ in 0..60 {
+        if local.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), "staged result");
+    // Collected: the plan's staged copies are gone, and nothing else was
+    // staged.
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    let out = run(
+        &server_a,
+        &kernel_a,
+        &format!(
+            "import os\nd = '{machine_dir}/staged'\n\
+             print('staged left', os.listdir(d) if os.path.isdir(d) else [])"
+        ),
+    )
+    .await;
+    assert!(out.contains("staged left []"), "{out}");
+
+    // Session B, beside A: the legacy default (the volume is the workdir).
+    let (dir_b, server_b) = session(&config_with("rk-volume-b", ""));
+    let mut guard_b = TerminateGuard {
+        server: server_b.clone(),
+        pod_id: None,
+        done: true,
+    };
+    start_guarded(&server_b, dir_b.path(), &mut guard_b).await;
+    let kernel_b = create_kernel_retry(&server_b, "b").await;
+    let out = run(
+        &server_b,
+        &kernel_b,
+        "import os\nprint('cwd', os.getcwd())\nprint(open('/workspace/cache/model.bin').read())",
+    )
+    .await;
+    assert!(out.contains("cwd /workspace"), "{out}");
+    assert!(out.contains("weights"), "{out}");
+    assert_supervised(&server_b).await;
+    // A's lease refreshes every minute: past one refresh, A must still own
+    // its machine.
+    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+    assert_supervised(&server_a).await;
+    run(&server_a, &kernel_a, "print('a alive')").await;
+
+    // The reported failure: a fresh pod after one was terminated.
+    terminate_guarded(&server_a, &mut guard_a).await;
+    start_guarded(&server_a, dir_a.path(), &mut guard_a).await;
+    let kernel_c = create_kernel_retry(&server_a, "c").await;
+    let out = run(
+        &server_a,
+        &kernel_c,
+        "print(open('/persist/cache/model.bin').read())",
+    )
+    .await;
+    assert!(out.contains("weights"), "{out}");
+    assert_supervised(&server_a).await;
+
+    terminate_guarded(&server_a, &mut guard_a).await;
+    terminate_guarded(&server_b, &mut guard_b).await;
+}

@@ -129,6 +129,7 @@ fn unconfirmed_instance_record(
         gpu_name: Some(handle.gpu_name.clone()),
         cost_per_hr: handle.cost_per_hr.unwrap_or(0.0),
         proxy_port_mapped: handle.proxy_port_mapped,
+        remote_dirs: marker.remote_dirs.clone(),
         kernels: Vec::new(),
     }
 }

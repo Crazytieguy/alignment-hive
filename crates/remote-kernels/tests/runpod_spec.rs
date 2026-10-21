@@ -153,6 +153,7 @@ fn provision_request() -> ProvisionRequest {
         ssh_public_key: "ssh-ed25519 AAAA test".to_string(),
         jupyter_token: "tok".to_string(),
         cleanup: remote_kernels::config::Cleanup::Terminate,
+        remote_dirs: None,
     }
 }
 

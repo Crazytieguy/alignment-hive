@@ -244,11 +244,27 @@ impl RemoteKernelsServer {
                 );
             };
             let destination = crate::sync::resolve_project_destination(&project_dir, &path)?;
-            conn.download(&path, &destination)
-                .await
-                .map_err(|error| {
-                    format!("downloading {path:?} failed ({error:#}); the plan stays queued — retry with attach() or finish()")
-                })?;
+            let mut downloaded = conn.download(&path, &destination).await;
+            // A machine that stopped itself with this plan queued copied the
+            // file to the plan's stage dir first: its workdir did not survive.
+            if downloaded.is_err()
+                && !intent.uuid.is_empty()
+                && let Some(stage_dir) = conn.stage_dir()
+                && let Ok(message) = conn
+                    .download(
+                        &format!(
+                            "{}/{path}",
+                            crate::machine_scripts::plan_stage_dir(stage_dir, &intent.uuid)
+                        ),
+                        &destination,
+                    )
+                    .await
+            {
+                downloaded = Ok(message);
+            }
+            downloaded.map_err(|error| {
+                format!("downloading {path:?} failed ({error:#}); the plan stays queued — retry with attach() or finish()")
+            })?;
             remaining.remove(0);
             let state = self.state.lock().await;
             let mut lifecycle = crate::state::load_lifecycle_record(&project_dir, machine_id);
@@ -277,7 +293,8 @@ impl RemoteKernelsServer {
             .get(machine_id)
             .map(|inst| inst.external_id.clone());
         if let Some(external_id) = external_id {
-            self.clear_finish_marker(machine_id, &external_id).await;
+            self.clear_finish_marker(machine_id, &external_id, &intent.uuid)
+                .await;
         }
 
         let outcome = match intent.then {
@@ -371,16 +388,23 @@ impl RemoteKernelsServer {
         // and the marker cannot bite regardless: only a watchdog consumes it,
         // and no attach installs one before reconciling the marker first (see
         // `heartbeat::reconcile_finish_marker`).
-        self.clear_intent_on_machine(machine_id, &target.external_id)
+        self.clear_intent_on_machine(machine_id, &target.external_id, None)
             .await;
     }
 
-    /// Remove the machine-side finish marker, only with proven lease
-    /// authority: the marker steers whichever watchdog runs on the machine,
-    /// so a session that lost control must never erase the successor's plan.
-    pub(super) async fn clear_finish_marker(&self, machine_id: &str, external_id: &str) {
+    /// Remove the machine-side finish marker of `plan`, whose downloads are
+    /// collected, only with proven lease authority: the marker steers
+    /// whichever watchdog runs on the machine, so a session that lost
+    /// control must never erase the successor's plan.
+    pub(super) async fn clear_finish_marker(
+        &self,
+        machine_id: &str,
+        external_id: &str,
+        plan: &str,
+    ) {
         if let Some(_mutation_guard) = self.finish_plan_guard(machine_id, external_id).await {
-            self.clear_intent_on_machine(machine_id, external_id).await;
+            self.clear_intent_on_machine(machine_id, external_id, Some(plan))
+                .await;
         }
     }
 
@@ -405,7 +429,13 @@ impl RemoteKernelsServer {
     }
 
     /// The marker clear itself; callers hold [`Self::finish_plan_guard`].
-    async fn clear_intent_on_machine(&self, machine_id: &str, external_id: &str) {
+    /// `collected`: see [`crate::machine_scripts::clear_intent`].
+    async fn clear_intent_on_machine(
+        &self,
+        machine_id: &str,
+        external_id: &str,
+        collected: Option<&str>,
+    ) {
         let conn = self
             .state
             .lock()
@@ -415,7 +445,7 @@ impl RemoteKernelsServer {
             .filter(|inst| inst.external_id == external_id)
             .and_then(|inst| inst.connection.clone());
         if let Some(conn) = conn
-            && let Err(error) = crate::machine_scripts::clear_intent(&*conn).await
+            && let Err(error) = crate::machine_scripts::clear_intent(&*conn, collected).await
         {
             tracing::warn!(
                 target: super::LOG_TARGET,

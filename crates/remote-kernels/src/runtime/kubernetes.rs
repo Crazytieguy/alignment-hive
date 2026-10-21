@@ -32,7 +32,7 @@ use crate::config::KubernetesConfig;
 
 use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
-    ProvisionRequest, Runtime, StopSupport, WatchdogPolicy,
+    ProvisionRequest, RemoteDirs, Runtime, StopSupport, WatchdogPolicy,
 };
 
 pub struct KubernetesRuntime {
@@ -282,6 +282,11 @@ impl Runtime for KubernetesRuntime {
 
     fn capabilities(&self) -> Capabilities {
         capabilities()
+    }
+
+    /// Derived from config on every connect; nothing to record.
+    fn remote_dirs(&self, _machine_id: &str, _image: Option<&str>) -> Option<RemoteDirs> {
+        None
     }
 
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
@@ -622,6 +627,19 @@ impl Connection for K8sConnection {
         &self.workdir
     }
 
+    fn state_dir(&self) -> String {
+        crate::machine_scripts::state_dir(self.workdir())
+    }
+
+    /// This runtime launches Jupyter itself with its root at the workdir.
+    fn kernel_path(&self) -> Option<&str> {
+        None
+    }
+
+    fn stage_dir(&self) -> Option<&str> {
+        None
+    }
+
     fn supports_watchdog(&self) -> bool {
         false
     }
@@ -918,6 +936,7 @@ spec:
             ssh_public_key: String::new(),
             jupyter_token: "tok123".to_string(),
             cleanup: crate::config::Cleanup::Terminate,
+            remote_dirs: None,
         };
 
         // The default config (max-lifetime-secs = 0) must NOT inject a
@@ -1018,6 +1037,7 @@ spec:
             vast_offers: None,
             priority: None,
             cleanup: crate::config::Cleanup::Terminate,
+            remote_dirs: None,
             env: std::collections::HashMap::new(),
             ssh_public_key: String::new(),
             jupyter_token: "tok".to_string(),
@@ -1112,6 +1132,7 @@ spec:
             ssh_public_key: String::new(),
             jupyter_token: "t".to_string(),
             cleanup: crate::config::Cleanup::Terminate,
+            remote_dirs: None,
         };
         let pod = rt.build_pod(&req).unwrap();
         assert_eq!(pod.spec.unwrap().active_deadline_seconds, Some(100));

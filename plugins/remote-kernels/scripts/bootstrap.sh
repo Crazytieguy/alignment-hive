@@ -56,6 +56,15 @@ if [ "${1:-}" = "platform-check" ]; then
   exit 0
 fi
 
+# `if-installed <args>`: run the binary only when it is already in place,
+# else exit 3 without installing — for session-start checks, which must
+# never wait on a download.
+IF_INSTALLED=
+if [ "${1:-}" = "if-installed" ]; then
+  IF_INSTALLED=1
+  shift
+fi
+
 # Dev mode: use locally-built binary if REMOTE_KERNELS_DEV is set
 if [ -n "${REMOTE_KERNELS_DEV:-}" ] && [ -x "$REMOTE_KERNELS_DEV" ]; then
   exec "$REMOTE_KERNELS_DEV" "$@"
@@ -69,6 +78,10 @@ BINARY="$CACHE_DIR/remote-kernels"
 # file that `-x` accepts forever, with no way back short of deleting the cache
 # by hand. Caches from those versions have no stamp and are reinstalled once.
 STAMP="$CACHE_DIR/.installed"
+
+if [ -n "$IF_INSTALLED" ] && { [ ! -x "$BINARY" ] || [ ! -f "$STAMP" ]; }; then
+  exit 3
+fi
 
 # Populate the cache if it is empty: from the bundled archive when the plugin
 # ships one, otherwise from GitHub releases.

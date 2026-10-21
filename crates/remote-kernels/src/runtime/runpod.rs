@@ -49,7 +49,7 @@ use crate::runpod::types::{
 
 use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
-    ProvisionRequest, Runtime, StopSupport, WatchdogPolicy,
+    ProvisionRequest, RemoteDirs, Runtime, StopSupport, WatchdogPolicy,
 };
 
 /// The Jupyter access path chosen for one `open()` — see
@@ -156,10 +156,14 @@ impl RunPodRuntime {
         // server never reaches cleans itself up (see module docs). A wrong
         // image-start-cmd stays money-bounded: the pod never brings up
         // SSH/Jupyter, so the provision timeout terminates it.
-        // volume-mount-path is embedded in the guard script and the
-        // heartbeat's marker command (single-quote-wrapped contexts).
+        // volume-mount-path is embedded in the guard script (through the
+        // state dir) and in the single-quoted commands run over SSH.
         crate::ssh_exec::validate_shell_safe("volume-mount-path", &self.runpod.volume_mount_path)?;
-        let (guard_argv, note) = self.guard_wrapper(&image, req.cleanup);
+        let dirs = req
+            .remote_dirs
+            .clone()
+            .unwrap_or_else(|| self.dirs_for(&req.machine_id, &image));
+        let (guard_argv, note) = self.guard_wrapper(&image, req.cleanup, &dirs.state_dir);
         let args = guard_argv.as_deref().map(args_from_argv);
 
         // v2 allows at most one mount kind, and a network volume is the one
@@ -471,6 +475,62 @@ impl RunPodRuntime {
         a.strip_prefix("docker.io/").unwrap_or(a) == b.strip_prefix("docker.io/").unwrap_or(b)
     }
 
+    /// Where a pod created now with `image` keeps things (see
+    /// [`RemoteDirs`]):
+    /// - workdir: `[runpod] workdir`, else the volume mount path.
+    /// - state dir: on the volume when there is one, so it survives the
+    ///   pod's own stop (container disk does not); without a volume it can
+    ///   only follow the workdir. A network volume can be mounted by several
+    ///   pods at once, so there each machine gets its own state dir: one
+    ///   pod's lease and markers must never fence or steer another.
+    /// - kernel path: the workdir, relative to the Jupyter root `/` of the
+    ///   built-in image's own server; other images keep their server's
+    ///   default, since their root is not known.
+    /// - stage dir: beside the state dir, when the workdir is off the volume
+    ///   (stop wipes it) but a volume exists to hold queued downloads.
+    fn dirs_for(&self, machine_id: &str, image: &str) -> RemoteDirs {
+        let runpod = &self.runpod;
+        let workdir = runpod.workdir.as_ref().map_or_else(
+            || runpod.volume_mount_path.clone(),
+            // An invalid value never reaches a create: the body's validation
+            // rejects it first.
+            |workdir| {
+                normalized_workdir(workdir, &self.config_path).unwrap_or_else(|_| workdir.clone())
+            },
+        );
+        let has_volume = runpod.has_volume();
+        let state_root = if has_volume {
+            &runpod.volume_mount_path
+        } else {
+            &workdir
+        };
+        let mut state_dir = crate::machine_scripts::state_dir(state_root);
+        if runpod.network_volume_id.is_some() {
+            write!(state_dir, "/machines/{machine_id}").expect("writing to a String");
+        }
+        let kernel_path = Self::image_eq(image, crate::config::DEFAULT_RUNPOD_IMAGE)
+            .then(|| workdir.trim_start_matches('/').to_string());
+        let workdir_wiped_on_stop = !path_within(&workdir, &runpod.volume_mount_path);
+        RemoteDirs {
+            stage_dir: (has_volume && workdir_wiped_on_stop).then(|| format!("{state_dir}/staged")),
+            workdir,
+            state_dir,
+            kernel_path,
+        }
+    }
+
+    /// The directories of a machine recorded before [`RemoteDirs`] existed:
+    /// exactly what that version used — everything under the volume mount
+    /// path, kernels at the server's default.
+    fn legacy_dirs(&self) -> RemoteDirs {
+        RemoteDirs {
+            workdir: self.runpod.volume_mount_path.clone(),
+            state_dir: crate::machine_scripts::state_dir(&self.runpod.volume_mount_path),
+            kernel_path: None,
+            stage_dir: None,
+        }
+    }
+
     /// The image's own start command, when known — the precondition for
     /// wrapping it with the pre-SSH orphan guard. An explicit
     /// `image-start-cmd` was configured against `image-name`, so it applies
@@ -634,7 +694,7 @@ impl RunPodRuntime {
     /// image's own start command), or the note telling the user the guard is
     /// off and why. `(None, None)` means the guard is off by explicit choice
     /// (cleanup = "disabled", or image-start-cmd = "") — no nagging.
-    fn guard_wrapper(&self, image_name: &str, cleanup: Cleanup) -> GuardWrapper {
+    fn guard_wrapper(&self, image_name: &str, cleanup: Cleanup, state_dir: &str) -> GuardWrapper {
         // cleanup = "disabled" documents itself as "no automatic cleanup
         // (user manages pod lifecycle manually)" — the guard keeps that
         // promise too: nothing this runtime places on the pod may stop it.
@@ -680,16 +740,13 @@ impl RunPodRuntime {
             format!("exec {cmd}")
         };
         // Preservation-aware halt: once the pod has ever held session state
-        // (its persistent state dir exists on the volume), the guard stops
+        // (this machine's persistent state dir exists), the guard stops
         // rather than applying a terminate policy — a resume the guard ends
         // must not destroy data (invariant: failure degrades toward
         // preservation). A never-reached fresh pod has no data to lose, so
         // the configured action applies.
         let stop_cmd = self_cleanup_command(Cleanup::Stop).expect("stop is always available");
-        let halt = format!(
-            "if [ -e \"{state_dir}\" ]; then {stop_cmd}; else {halt_cmd}; fi",
-            state_dir = crate::machine_scripts::state_dir(&self.runpod.volume_mount_path),
-        );
+        let halt = format!("if [ -e \"{state_dir}\" ]; then {stop_cmd}; else {halt_cmd}; fi");
         let script = format!(
             "{} {invoke}",
             crate::ssh_exec::orphan_guard_line(&halt, self.orphan_halt_mins)
@@ -890,7 +947,65 @@ pub(crate) fn validate_storage_and_cloud(
             runpod.volume_gb
         ));
     }
+    if let Some(workdir) = &runpod.workdir {
+        let workdir = normalized_workdir(workdir, config_path)?;
+        if runpod.has_volume()
+            && path_within(&runpod.volume_mount_path, &workdir)
+            && !path_within(&workdir, &runpod.volume_mount_path)
+        {
+            return Err(format!(
+                "[runpod] workdir {workdir:?} contains volume-mount-path {:?}: sync() mirrors \
+                 the project into the workdir and deletes what the project lacks, the volume \
+                 included. Use a workdir beside the mount (e.g. \"/root/work\") or inside it \
+                 — edit {config_path}",
+                runpod.volume_mount_path
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Whether `path` is `ancestor` or below it, compared by components (so
+/// `/work` is not within `/wo`, and trailing or repeated slashes don't
+/// matter). Lexical: symlinks are not resolved.
+fn path_within(path: &str, ancestor: &str) -> bool {
+    let components = |path: &str| -> Vec<String> {
+        path.split('/')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    components(path).starts_with(&components(ancestor))
+}
+
+/// `[runpod] workdir` in canonical form (one leading `/`, no empty or
+/// trailing components), or why it can't be used. The one check for it: it
+/// becomes an rsync `--delete` destination and goes into shell commands, so
+/// only a plain absolute path below `/` passes.
+pub(crate) fn normalized_workdir(value: &str, config_path: &str) -> Result<String, String> {
+    let fail = |why: &str| {
+        Err(format!(
+            "[runpod] workdir {why} (got {value:?}) — edit {config_path}"
+        ))
+    };
+    if !value.starts_with('/') {
+        return fail("must be an absolute path");
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+    {
+        return fail("may only contain letters, digits, '/', '.', '_' and '-'");
+    }
+    let parts: Vec<&str> = value.split('/').filter(|part| !part.is_empty()).collect();
+    // Jupyter refuses hidden paths, so a kernel could not start there.
+    if parts.iter().any(|part| part.starts_with('.')) {
+        return fail("must not contain components starting with '.'");
+    }
+    if parts.is_empty() {
+        return fail("must not be the filesystem root");
+    }
+    Ok(format!("/{}", parts.join("/")))
 }
 
 /// Whether a failed pod query proves the pod no longer exists.
@@ -914,6 +1029,10 @@ impl Runtime for RunPodRuntime {
 
     fn capabilities(&self) -> Capabilities {
         capabilities(&self.runpod)
+    }
+
+    fn remote_dirs(&self, machine_id: &str, image: Option<&str>) -> Option<RemoteDirs> {
+        Some(self.dirs_for(machine_id, image.unwrap_or(&self.image_name)))
     }
 
     /// Try each configured GPU type in order, following `RunPod`'s published
@@ -1153,6 +1272,12 @@ impl Runtime for RunPodRuntime {
         external_id: &str,
         ctx: &ConnectionContext,
     ) -> anyhow::Result<RunPodConnection> {
+        // From the record, never re-derived: a config edit since creation
+        // must not move this machine's files or lifecycle state.
+        let dirs = ctx
+            .remote_dirs
+            .clone()
+            .unwrap_or_else(|| self.legacy_dirs());
         // SSH is best-effort ONLY where config doesn't promise it (community
         // cloud without support-public-ip): Jupyter rides RunPod's HTTPS
         // proxy, so such a machine is still usable for kernels — only
@@ -1224,7 +1349,7 @@ impl Runtime for RunPodRuntime {
                         ssh: Some(tunnel_ssh),
                         tunnel: Some(tunnel),
                         degraded: false,
-                        remote_workdir: self.runpod.volume_mount_path.clone(),
+                        dirs,
                         config_path: self.config_path.clone(),
                     });
                 }
@@ -1264,7 +1389,7 @@ impl Runtime for RunPodRuntime {
             ssh,
             tunnel: None,
             degraded,
-            remote_workdir: self.runpod.volume_mount_path.clone(),
+            dirs,
             config_path: self.config_path.clone(),
         })
     }
@@ -1285,8 +1410,8 @@ pub struct RunPodConnection {
     /// True when this session wanted the tunnel but degraded to the public
     /// proxy because SSH was unreachable (see [`Connection::startup_note`]).
     degraded: bool,
-    /// Where uploads land (the volume mount path).
-    remote_workdir: String,
+    /// Recorded at creation (see [`RemoteDirs`]).
+    dirs: RemoteDirs,
     /// The config file a `[runpod]` suggestion tells the reader to edit.
     config_path: String,
 }
@@ -1389,7 +1514,19 @@ impl Connection for RunPodConnection {
     }
 
     fn workdir(&self) -> &str {
-        &self.remote_workdir
+        &self.dirs.workdir
+    }
+
+    fn state_dir(&self) -> String {
+        self.dirs.state_dir.clone()
+    }
+
+    fn kernel_path(&self) -> Option<&str> {
+        self.dirs.kernel_path.as_deref()
+    }
+
+    fn stage_dir(&self) -> Option<&str> {
+        self.dirs.stage_dir.as_deref()
     }
 
     fn startup_note(&self) -> Option<String> {
@@ -1426,7 +1563,7 @@ impl Connection for RunPodConnection {
         crate::sync::upload_over_ssh(
             project_dir,
             self.ssh_endpoint()?,
-            &self.remote_workdir,
+            &self.dirs.workdir,
             extra_includes,
         )
         .await
@@ -1437,7 +1574,7 @@ impl Connection for RunPodConnection {
             self.ssh_endpoint()?,
             remote_path,
             local_path,
-            &self.remote_workdir,
+            &self.dirs.workdir,
         )
         .await
     }
@@ -1624,8 +1761,12 @@ mod tests {
             ssh_public_key: "ssh-ed25519 AAAA test".to_string(),
             jupyter_token: "tok".to_string(),
             cleanup: Cleanup::Terminate,
+            remote_dirs: None,
         }
     }
+
+    /// The state dir of the default config: under the default volume mount.
+    const LEGACY_STATE_DIR: &str = "/workspace/.remote-kernels";
 
     /// The serialized v2 create body for a config, as it goes on the wire.
     fn body(config_toml: &str) -> serde_json::Value {
@@ -1661,7 +1802,7 @@ mod tests {
     #[test]
     fn guard_args_round_trip_through_shell_parsing() {
         let rt = runtime_with("");
-        let (wrapper, _) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        let (wrapper, _) = rt.guard_wrapper(&default_image(), Cleanup::Terminate, LEGACY_STATE_DIR);
         let wrapper = wrapper.expect("guard must arm for the default image");
         let encoded = args_from_argv(&wrapper);
         assert!(encoded.starts_with("sh -c "), "{encoded}");
@@ -1734,6 +1875,214 @@ mod tests {
             "{json}"
         );
         assert!(json["mounts"]["persistent"].is_null(), "{json}");
+    }
+
+    /// The directories a machine is created with, through the runtime
+    /// wrapper the server uses.
+    fn dirs(config_toml: &str, image: Option<&str>) -> RemoteDirs {
+        let config: Config = toml::from_str(config_toml).unwrap();
+        let runtime =
+            super::super::AnyRuntime::Runpod(RunPodRuntime::new("test-key".to_string(), &config));
+        runtime.remote_dirs("01JMACHINE", image).unwrap()
+    }
+
+    #[test]
+    fn remote_dirs_keep_the_old_layout_unless_a_network_volume_is_shared() {
+        // Default config (20 GB pod volume at /workspace), and no volume at
+        // all: exactly the layout before workdir existed.
+        for config in ["", "[runpod]\nvolume-gb = 0"] {
+            let d = dirs(config, None);
+            assert_eq!(d.workdir, "/workspace", "{config}");
+            assert_eq!(d.state_dir, "/workspace/.remote-kernels", "{config}");
+        }
+        // A network volume can be mounted by several pods: each machine gets
+        // its own state dir on it, also when it is still the workdir.
+        let d = dirs("[runpod]\nnetwork-volume-id = \"vol_1\"", None);
+        assert_eq!(d.workdir, "/workspace");
+        assert_eq!(
+            d.state_dir,
+            "/workspace/.remote-kernels/machines/01JMACHINE"
+        );
+        // The reported layout: volume for data, project on the pod's disk;
+        // the state stays on the volume, which survives the pod's stop.
+        let d = dirs(
+            "[runpod]\nnetwork-volume-id = \"vol_1\"\nvolume-mount-path = \"/persist\"\n\
+             workdir = \"/workspace/\"",
+            None,
+        );
+        assert_eq!(d.workdir, "/workspace");
+        assert_eq!(d.state_dir, "/persist/.remote-kernels/machines/01JMACHINE");
+        // A pod volume is the pod's own: one state dir, on it.
+        let d = dirs(
+            "[runpod]\nvolume-mount-path = \"/persist\"\nworkdir = \"/root/work\"",
+            None,
+        );
+        assert_eq!(d.state_dir, "/persist/.remote-kernels");
+        // No volume: the state can only follow the workdir.
+        let d = dirs("[runpod]\nvolume-gb = 0\nworkdir = \"/root/work\"", None);
+        assert_eq!(d.state_dir, "/root/work/.remote-kernels");
+    }
+
+    #[test]
+    fn queued_downloads_are_staged_only_off_the_volume() {
+        // The workdir is wiped on stop but a volume can hold the copies.
+        let d = dirs(
+            "[runpod]\nnetwork-volume-id = \"vol_1\"\nvolume-mount-path = \"/persist\"\n\
+             workdir = \"/root/work\"",
+            None,
+        );
+        assert_eq!(
+            d.stage_dir.as_deref(),
+            Some("/persist/.remote-kernels/machines/01JMACHINE/staged")
+        );
+        let d = dirs(
+            "[runpod]\nvolume-mount-path = \"/persist\"\nworkdir = \"/root/work\"",
+            None,
+        );
+        assert_eq!(
+            d.stage_dir.as_deref(),
+            Some("/persist/.remote-kernels/staged")
+        );
+        // The workdir is on the volume (at or under the mount), or there is
+        // no volume to stage to.
+        for config in [
+            "",
+            "[runpod]\nnetwork-volume-id = \"vol_1\"",
+            "[runpod]\nworkdir = \"/workspace/project\"",
+            "[runpod]\nworkdir = \"/workspace/\"",
+            "[runpod]\nvolume-gb = 0\nworkdir = \"/root/work\"",
+        ] {
+            assert_eq!(dirs(config, None).stage_dir, None, "{config}");
+        }
+    }
+
+    #[test]
+    fn kernels_start_in_the_workdir_only_where_the_jupyter_root_is_known() {
+        assert_eq!(dirs("", None).kernel_path.as_deref(), Some("workspace"));
+        assert_eq!(
+            dirs("[runpod]\nworkdir = \"/root/work\"", None)
+                .kernel_path
+                .as_deref(),
+            Some("root/work")
+        );
+        let qualified = format!("docker.io/{}", default_image());
+        assert!(dirs("", Some(&qualified)).kernel_path.is_some());
+        // A custom image's Jupyter root is unknown: its server's own default.
+        assert_eq!(dirs("", Some("my/image:latest")).kernel_path, None);
+        assert_eq!(
+            dirs("[runpod]\nimage-name = \"my/image:latest\"", None).kernel_path,
+            None
+        );
+    }
+
+    #[test]
+    fn machines_recorded_before_remote_dirs_keep_their_layout() {
+        // Even after the config gains a workdir: the machine was created
+        // without one.
+        let rt = runtime_with("[runpod]\nnetwork-volume-id = \"vol_1\"\nworkdir = \"/root/work\"");
+        assert_eq!(
+            rt.legacy_dirs(),
+            RemoteDirs {
+                workdir: "/workspace".to_string(),
+                state_dir: LEGACY_STATE_DIR.to_string(),
+                kernel_path: None,
+                stage_dir: None,
+            }
+        );
+    }
+
+    #[test]
+    fn the_orphan_guard_checks_this_machines_state_dir() {
+        let rt = runtime_with("[runpod]\nnetwork-volume-id = \"vol_1\"");
+        let (input, _) = rt.pod_create_request(&provision_req(), "GPU").unwrap();
+        let args = input.args.unwrap();
+        assert!(
+            args.contains("/workspace/.remote-kernels/machines/m1"),
+            "{args}"
+        );
+        // The server's snapshot wins over the current config.
+        let mut req = provision_req();
+        req.remote_dirs = Some(RemoteDirs {
+            workdir: "/w".to_string(),
+            state_dir: "/snap/.remote-kernels".to_string(),
+            kernel_path: None,
+            stage_dir: None,
+        });
+        let (input, _) = rt.pod_create_request(&req, "GPU").unwrap();
+        assert!(input.args.unwrap().contains("/snap/.remote-kernels"));
+    }
+
+    #[test]
+    fn workdir_must_be_a_plain_absolute_path() {
+        let ok = |value: &str| normalized_workdir(value, "cfg").unwrap();
+        assert_eq!(ok("/workspace"), "/workspace");
+        assert_eq!(ok("//root//work/"), "/root/work");
+        for bad in [
+            "",
+            "/",
+            "//",
+            "work",
+            "/root/..",
+            "/work/../persist",
+            "/a/./b",
+            "/with space",
+            "/quote'",
+            "/dollar$HOME",
+            "/back\\slash",
+        ] {
+            let err = normalized_workdir(bad, "cfg").unwrap_err();
+            assert!(err.contains("[runpod] workdir"), "{bad}: {err}");
+        }
+        for hidden in ["/root/.work", "/.cache/x"] {
+            assert!(normalized_workdir(hidden, "cfg").is_err(), "{hidden}");
+        }
+    }
+
+    #[test]
+    fn workdir_may_not_contain_the_volume() {
+        let check = |toml: &str| {
+            let config: Config = toml::from_str(toml).unwrap();
+            validate_storage_and_cloud(&config.runpod, "cfg")
+        };
+        let err =
+            check("[runpod]\nvolume-mount-path = \"/root/vol/\"\nworkdir = \"/root\"").unwrap_err();
+        assert!(err.contains("contains volume-mount-path"), "{err}");
+        assert!(
+            check("[runpod]\nnetwork-volume-id = \"v\"\nvolume-mount-path = \"/workspace/data\"\nworkdir = \"/workspace\"")
+                .is_err()
+        );
+        // Beside, equal, or inside the mount: fine.
+        for workdir in ["/root/work", "/workspace", "/workspace/project", "/work"] {
+            check(&format!("[runpod]\nworkdir = \"{workdir}\"")).unwrap();
+        }
+        // Without a volume there is nothing to protect.
+        check("[runpod]\nvolume-gb = 0\nvolume-mount-path = \"/root/vol\"\nworkdir = \"/root\"")
+            .unwrap();
+        // An invalid workdir is rejected here too, before any create.
+        assert!(check("[runpod]\nworkdir = \"/root/..\"").is_err());
+    }
+
+    #[test]
+    fn records_without_remote_dirs_still_load() {
+        let record: crate::state::InstanceRecord = serde_json::from_value(serde_json::json!({
+            "runtime": "runpod",
+            "external_id": "pod1",
+            "phase": "running",
+            "cleanup": "terminate",
+        }))
+        .unwrap();
+        assert_eq!(record.remote_dirs, None);
+        let marker: crate::state::UnconfirmedRecord = serde_json::from_value(serde_json::json!({
+            "runtime": "runpod",
+            "expected_name": "n",
+            "created_at_epoch": 1,
+            "error": "e",
+            "cleanup": "terminate",
+            "jupyter_token": "t",
+            "ssh_key_path": "k",
+        }))
+        .unwrap();
+        assert_eq!(marker.remote_dirs, None);
     }
 
     #[test]
@@ -1883,7 +2232,7 @@ mod tests {
         assert!(json["supportPublicIp"].is_null(), "{json}");
         let rt = runtime_with(config);
         assert!(rt.ssh_expected());
-        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate, LEGACY_STATE_DIR);
         assert!(cmd.is_some(), "the guard must still arm");
         assert_eq!(note, None);
     }
@@ -1948,7 +2297,7 @@ mod tests {
         // Default image + default config (SECURE, terminate): guard on,
         // shaped ["sh", "-c", guard-then-exec], no note.
         let rt = runtime_with("");
-        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate, LEGACY_STATE_DIR);
         let cmd = cmd.expect("guard must arm for the default image");
         assert_eq!(note, None);
         assert_eq!(&cmd[..2], ["sh", "-c"]);
@@ -1973,7 +2322,7 @@ mod tests {
         // cleanup = "disabled" promises no automatic cleanup: no guard, and
         // no note either (explicit choice).
         assert_eq!(
-            rt.guard_wrapper(&default_image(), Cleanup::Disabled),
+            rt.guard_wrapper(&default_image(), Cleanup::Disabled, LEGACY_STATE_DIR),
             (None, None)
         );
 
@@ -1982,7 +2331,7 @@ mod tests {
         // live Jupyter-only session. The note offers the one fix, and never
         // the deprecated flag.
         let rt = runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"");
-        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate, LEGACY_STATE_DIR);
         assert_eq!(cmd, None);
         let note = note.unwrap();
         assert!(note.contains("cloud-type = \"SECURE\""), "{note}");
@@ -1991,14 +2340,14 @@ mod tests {
         // ...and a config that still carries the deprecated flag keeps the
         // behavior it selected: the guard arms again.
         let rt = runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"\nsupport-public-ip = true");
-        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate, LEGACY_STATE_DIR);
         assert!(cmd.is_some());
         assert_eq!(note, None);
 
         // Custom image without image-start-cmd: unknown, no guard, note tells
         // the user how to enable it.
         let rt = runtime_with(r#"image-name = "my/image:latest""#);
-        let (cmd, note) = rt.guard_wrapper("my/image:latest", Cleanup::Terminate);
+        let (cmd, note) = rt.guard_wrapper("my/image:latest", Cleanup::Terminate, LEGACY_STATE_DIR);
         assert_eq!(cmd, None);
         assert!(note.unwrap().contains("image-start-cmd"));
 
@@ -2010,27 +2359,27 @@ mod tests {
             image-start-cmd = "/entry.sh serve"
             "#,
         );
-        let (cmd, _) = rt.guard_wrapper("my/image:latest", Cleanup::Terminate);
+        let (cmd, _) = rt.guard_wrapper("my/image:latest", Cleanup::Terminate, LEGACY_STATE_DIR);
         assert!(cmd.unwrap()[2].ends_with("& exec /entry.sh serve"));
         // ...not to unrelated overrides...
-        let (cmd, note) = rt.guard_wrapper("other/image:v2", Cleanup::Terminate);
+        let (cmd, note) = rt.guard_wrapper("other/image:v2", Cleanup::Terminate, LEGACY_STATE_DIR);
         assert_eq!(cmd, None);
         assert!(note.is_some());
         // ...but the default image stays known even with a configured
         // image-start-cmd for a different image (regression: this used to
         // fall through to no-guard).
-        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        let (cmd, note) = rt.guard_wrapper(&default_image(), Cleanup::Terminate, LEGACY_STATE_DIR);
         assert!(cmd.unwrap()[2].ends_with("& exec /start.sh"));
         assert_eq!(note, None);
 
         // Empty string is the explicit opt-out — every image, no note.
         let rt = runtime_with("[runpod]\nimage-start-cmd = \"\"");
         assert_eq!(
-            rt.guard_wrapper(&default_image(), Cleanup::Terminate),
+            rt.guard_wrapper(&default_image(), Cleanup::Terminate, LEGACY_STATE_DIR),
             (None, None)
         );
         assert_eq!(
-            rt.guard_wrapper("other/image:v2", Cleanup::Terminate),
+            rt.guard_wrapper("other/image:v2", Cleanup::Terminate, LEGACY_STATE_DIR),
             (None, None)
         );
     }
@@ -2040,7 +2389,7 @@ mod tests {
     #[test]
     fn money_windows_flow_from_config() {
         let rt = runtime_with("orphan-halt-mins = 10");
-        let (cmd, _) = rt.guard_wrapper(&default_image(), Cleanup::Terminate);
+        let (cmd, _) = rt.guard_wrapper(&default_image(), Cleanup::Terminate, LEGACY_STATE_DIR);
         assert!(cmd.unwrap()[2].contains("sleep 600"));
 
         let rt = runtime_with("[runpod]\nprovision-timeout-mins = 5");
@@ -2054,7 +2403,7 @@ mod tests {
     fn image_equality_ignores_docker_io_prefix() {
         let rt = runtime_with("");
         let qualified = format!("docker.io/{}", default_image());
-        let (cmd, _) = rt.guard_wrapper(&qualified, Cleanup::Terminate);
+        let (cmd, _) = rt.guard_wrapper(&qualified, Cleanup::Terminate, LEGACY_STATE_DIR);
         assert!(cmd.is_some(), "docker.io/ spelling must not drop the guard");
     }
 
@@ -2701,6 +3050,7 @@ mod tests {
             known_hosts_path: std::path::PathBuf::from("/dev/null"),
             jupyter_token: "t".to_string(),
             proxy_port_mapped: true,
+            remote_dirs: None,
         }
     }
 
@@ -2752,7 +3102,7 @@ mod tests {
         assert!(community.ssh_expected());
         assert!(
             community
-                .guard_wrapper(&default_image(), Cleanup::Terminate)
+                .guard_wrapper(&default_image(), Cleanup::Terminate, LEGACY_STATE_DIR)
                 .0
                 .is_some()
         );
@@ -2770,7 +3120,7 @@ mod tests {
             image-start-cmd = "/prep.sh && /start.sh"
             "#,
         );
-        let (cmd, _) = rt.guard_wrapper("my/image:latest", Cleanup::Terminate);
+        let (cmd, _) = rt.guard_wrapper("my/image:latest", Cleanup::Terminate, LEGACY_STATE_DIR);
         let script = &cmd.unwrap()[2];
         assert!(script.ends_with("& /prep.sh && /start.sh"), "{script}");
         assert!(!script.contains("exec /prep.sh"), "{script}");

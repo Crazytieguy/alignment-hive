@@ -206,8 +206,18 @@ impl Config {
 
 # Network volume ID (optional, for persistent data across pod terminations).
 # Must be in the same datacenter as the pod — pin one via a passthrough
-# field, e.g. data-center-ids = ["EU-RO-1"].
+# field, e.g. data-center-ids = ["EU-RO-1"]. Several pods can use it at once.
+# With a network volume, set workdir (below) off the mount: the volume then
+# holds data (models, caches, results) and sync() never writes there.
 # network-volume-id = "vol_abc123"
+
+# Directory on the pod that files sync to and kernels run in. sync() mirrors
+# the project into it, deleting files the project doesn't have, so keep
+# other data outside it. Off the volume it is the pod's own disk: fast for
+# venvs and many small files, but wiped when the pod stops (files queued for
+# a finish() download are first copied to the volume, if there is one).
+# Default: volume-mount-path
+# workdir = "/root/work"
 
 # Cloud type: "SECURE" or "COMMUNITY".
 # COMMUNITY is cheaper but may have less reliable availability. SSH is not

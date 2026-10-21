@@ -30,9 +30,9 @@ pub fn rsync_upload_args(extra_includes: &[String]) -> Vec<String> {
         "--exclude=target".to_string(),
         "--exclude=node_modules".to_string(),
         // The machine-side supervision state (lease, intent/outcome markers,
-        // kernel-output logs) lives in <workdir>/.remote-kernels. `--delete`
-        // MUST NOT touch it: wiping the lease mid-session unfences the
-        // machine and destroys finalize/recovery state.
+        // kernel-output logs) may live in <workdir>/.remote-kernels.
+        // `--delete` MUST NOT touch it: wiping the lease mid-session unfences
+        // the machine and destroys finalize/recovery state.
         "--exclude=.remote-kernels".to_string(),
     ]);
     args
@@ -184,6 +184,16 @@ pub async fn upload_over_ssh(
     extra_includes: &[String],
 ) -> anyhow::Result<String> {
     ensure_remote_rsync(ssh).await?;
+    // rsync creates only the destination's last component.
+    ssh.cmd(
+        &format!(
+            "mkdir -p {}",
+            crate::machine_scripts::shell_quote(remote_path)
+        ),
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create {remote_path} on the machine: {e}"))?;
 
     let ssh_cmd = ssh.rsync_transport();
 

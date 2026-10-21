@@ -47,6 +47,7 @@ fn connection_context_for_record(
             .join("known_hosts"),
         jupyter_token,
         proxy_port_mapped: record.proxy_port_mapped,
+        remote_dirs: record.remote_dirs.clone(),
     })
 }
 

@@ -321,6 +321,19 @@ finish_armed() {
     fi
 
     sync "$outcome_path" 2>/dev/null || sync
+    # A stop wipes a workdir off the volume: copy queued downloads to the
+    # volume first (stage.sh exists only then), for attach() to collect.
+    # Bounded like the finalize command: a stop must not wait forever on it.
+    # A copy that fails is never published (see stage_script), so attach()
+    # reports that download as failed rather than collecting a partial one;
+    # the stop still runs, as it does when the finalize command fails.
+    if [ "$decided_action" = "stop" ] && [ -f "$state_dir/stage.sh" ]; then
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "$finalize_timeout_secs" bash "$state_dir/stage.sh"
+        else
+            bash "$state_dir/stage.sh"
+        fi >/dev/null 2>&1 || true
+    fi
     pause_after_enter_for_test
     # bash -lc consumes the next argument as $0; the validated action is $1.
     exec bash -lc "$action_cmd" rk-action "$decided_action"

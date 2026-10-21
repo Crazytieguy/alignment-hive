@@ -7,6 +7,7 @@
 //! budget runs out. Everything they share lives under [`state_dir`] on the
 //! machine.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -141,7 +142,7 @@ pub async fn clear_outcome<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<(
 }
 
 pub async fn read_outcome(conn: &AnyConnection) -> Result<crate::state::OutcomeMarker, LeaseError> {
-    let path = format!("{}/outcome.json", state_dir(conn.workdir()));
+    let path = format!("{}/outcome.json", conn.state_dir());
     let command = format!("cat {}", shell_quote(&path));
     let output = conn
         .exec(&command, Duration::from_secs(10))
@@ -155,7 +156,7 @@ pub async fn install_watchdog<C: Connection + ?Sized>(
     policy: &crate::runtime::WatchdogPolicy,
     action_command: &str,
 ) -> anyhow::Result<()> {
-    let dir = state_dir(conn.workdir());
+    let dir = conn.state_dir();
     let lease_path = format!("{dir}/rk-lease.sh");
     let watchdog_path = format!("{dir}/rk-watchdog.sh");
     let finalize_wait = policy.finalize_wait_secs.unwrap_or(0).to_string();
@@ -202,17 +203,34 @@ pub fn intent_marker_json(downloads_pending: bool, then: crate::state::FinishThe
 }
 
 /// Write the intent marker atomically on the machine (command transport).
+/// `downloads` are plan `plan`'s workdir-relative paths still to download.
+/// Where the workdir doesn't survive a stop (see [`Connection::stage_dir`]),
+/// it also writes `stage.sh`, which the watchdog runs before stopping the
+/// machine itself, so the files wait on the volume instead.
 pub async fn write_intent<C: Connection + ?Sized>(
     conn: &C,
-    downloads_pending: bool,
+    plan: &str,
+    downloads: &[String],
     then: crate::state::FinishThen,
 ) -> anyhow::Result<()> {
-    let dir = state_dir(conn.workdir());
+    let dir = conn.state_dir();
     let destination = format!("{dir}/intent.json");
     let temporary = format!("{dir}/.intent.{}.tmp", uuid::Uuid::new_v4());
-    let payload = intent_marker_json(downloads_pending, then);
+    let payload = intent_marker_json(!downloads.is_empty(), then);
+    let stage_path = shell_quote(&format!("{dir}/stage.sh"));
+    let stage = match conn.stage_dir() {
+        Some(stage_dir) if !downloads.is_empty() && !plan.is_empty() => format!(
+            "; printf '%s\\n' {script} > {stage_path}",
+            script = shell_quote(&stage_script(
+                conn.workdir(),
+                &plan_stage_dir(stage_dir, plan),
+                downloads
+            )),
+        ),
+        _ => format!("; rm -f {stage_path}"),
+    };
     let command = format!(
-        "mkdir -p {dir}; printf '%s\\n' {payload} > {temporary} && mv -f {temporary} {destination}",
+        "mkdir -p {dir}; printf '%s\\n' {payload} > {temporary} && mv -f {temporary} {destination}{stage}",
         dir = shell_quote(&dir),
         payload = shell_quote(&payload),
         temporary = shell_quote(&temporary),
@@ -222,9 +240,58 @@ pub async fn write_intent<C: Connection + ?Sized>(
     Ok(())
 }
 
+/// Where plan `plan`'s downloads are staged: each plan its own dir, so a
+/// plan only ever collects copies made for it.
+pub fn plan_stage_dir(stage_dir: &str, plan: &str) -> String {
+    format!("{stage_dir}/{plan}")
+}
+
+/// The commands that copy each of `downloads` (relative to `workdir`) to
+/// the same relative path under `stage_dir`, replacing an earlier copy.
+/// Each copy goes to a `.partial` name first and is renamed into place only
+/// once complete, so a copy cut short (the watchdog's time bound, a full
+/// volume) never shows up where `attach()` would collect it.
+pub fn stage_script(workdir: &str, stage_dir: &str, downloads: &[String]) -> String {
+    let mut script = format!("cd {} || exit 1", shell_quote(workdir));
+    for path in downloads {
+        let target = format!("{stage_dir}/{}", path.trim_end_matches('/'));
+        let partial = format!("{target}.partial");
+        let parent = target
+            .rsplit_once('/')
+            .map_or(stage_dir, |(parent, _)| parent);
+        write!(
+            script,
+            "\n[ -e {source} ] && rm -rf {partial} && mkdir -p {parent} \
+             && cp -a -- {source} {partial} && rm -rf {target} && mv -- {partial} {target}",
+            source = shell_quote(path),
+            partial = shell_quote(&partial),
+            target = shell_quote(&target),
+            parent = shell_quote(parent),
+        )
+        .expect("writing to a String");
+    }
+    script
+}
+
 /// Remove the intent marker (queued finish completed or cancelled).
-pub async fn clear_intent<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
-    remove_state_file(conn, "intent.json").await
+/// Staged copies go only for the plan whose downloads were `collected`: a
+/// cancelled plan's may be the only copy left.
+pub async fn clear_intent<C: Connection + ?Sized>(
+    conn: &C,
+    collected: Option<&str>,
+) -> anyhow::Result<()> {
+    remove_state_file(conn, "intent.json").await?;
+    remove_state_file(conn, "stage.sh").await?;
+    if let Some(plan) = collected.filter(|plan| !plan.is_empty())
+        && let Some(stage_dir) = conn.stage_dir()
+    {
+        conn.exec(
+            &format!("rm -rf {}", shell_quote(&plan_stage_dir(stage_dir, plan))),
+            Duration::from_secs(60),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Remove the persisted budget deadline (a session with no budget must not
@@ -234,7 +301,7 @@ pub async fn clear_budget_deadline<C: Connection + ?Sized>(conn: &C) -> anyhow::
 }
 
 async fn remove_state_file<C: Connection + ?Sized>(conn: &C, name: &str) -> anyhow::Result<()> {
-    let path = format!("{}/{name}", state_dir(conn.workdir()));
+    let path = format!("{}/{name}", conn.state_dir());
     conn.exec(
         &format!("rm -f {}", shell_quote(&path)),
         Duration::from_secs(10),
@@ -247,7 +314,7 @@ pub async fn set_budget_deadline<C: Connection + ?Sized>(
     conn: &C,
     secs_from_now: u64,
 ) -> anyhow::Result<()> {
-    let dir = state_dir(conn.workdir());
+    let dir = conn.state_dir();
     let destination = format!("{dir}/budget_deadline");
     // The temp name is quoted on the machine, so "$$" would be literal —
     // use a locally unique suffix instead.
@@ -282,7 +349,7 @@ pub fn shell_quote(value: &str) -> String {
 }
 
 async fn invoke(conn: &AnyConnection, args: &[&str]) -> Result<String, LeaseError> {
-    let state_dir = state_dir(conn.workdir());
+    let state_dir = conn.state_dir();
     let arguments = args
         .iter()
         .map(|arg| shell_quote(arg))
@@ -328,6 +395,77 @@ async fn invoke(conn: &AnyConnection, args: &[&str]) -> Result<String, LeaseErro
 #[cfg(test)]
 mod tests {
     use super::{LeaseState, age_secs};
+
+    /// The staging script copies each queued download, as its workdir
+    /// relative path, under the stage dir, and runs in a real shell.
+    #[test]
+    fn stage_script_copies_queued_downloads_under_the_stage_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let workdir = root.path().join("work");
+        let stage = root.path().join("vol/staged");
+        std::fs::create_dir_all(workdir.join("out/run 1")).unwrap();
+        std::fs::write(workdir.join("out/run 1/model.pt"), "weights").unwrap();
+        std::fs::write(workdir.join("log.txt"), "log").unwrap();
+        // A stale copy from an earlier stop is replaced, not nested.
+        std::fs::create_dir_all(stage.join("out/run 1")).unwrap();
+        std::fs::write(stage.join("out/run 1/old.pt"), "old").unwrap();
+        let downloads = [
+            "out/run 1/".to_string(),
+            "missing".to_string(),
+            "log.txt".to_string(),
+        ];
+        let script = super::stage_script(
+            workdir.to_str().unwrap(),
+            stage.to_str().unwrap(),
+            &downloads,
+        );
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(stage.join("out/run 1/model.pt")).unwrap(),
+            "weights"
+        );
+        assert!(!stage.join("out/run 1/old.pt").exists());
+        assert!(!stage.join("out/run 1/run 1").exists());
+        // A missing source skips only its own line.
+        assert_eq!(
+            std::fs::read_to_string(stage.join("log.txt")).unwrap(),
+            "log"
+        );
+    }
+
+    /// A copy that fails partway is never published under the name
+    /// `attach()` collects.
+    #[test]
+    fn a_failed_stage_copy_is_not_published() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let workdir = root.path().join("work");
+        let stage = root.path().join("staged");
+        std::fs::create_dir_all(workdir.join("ckpt")).unwrap();
+        std::fs::write(workdir.join("ckpt/a.pt"), "a").unwrap();
+        let unreadable = workdir.join("ckpt/b.pt");
+        std::fs::write(&unreadable, "b").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&unreadable).is_ok() {
+            return; // running as root: the copy cannot be made to fail this way
+        }
+        let script = super::stage_script(
+            workdir.to_str().unwrap(),
+            stage.to_str().unwrap(),
+            &["ckpt".to_string()],
+        );
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(!stage.join("ckpt").exists());
+    }
 
     /// The lease/watchdog scripts travel inside single-quote-wrapped SSH
     /// commands — a single quote anywhere in them breaks the transport.

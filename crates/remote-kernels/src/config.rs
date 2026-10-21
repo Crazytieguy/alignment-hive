@@ -356,6 +356,10 @@ pub struct RunpodConfig {
     #[serde_inline_default("/workspace".to_string())]
     pub volume_mount_path: String,
 
+    /// Directory on the pod that files sync to and kernels run in. Unset:
+    /// `volume_mount_path` (the layout before this key existed).
+    pub workdir: Option<String>,
+
     /// Network volume ID to attach (optional).
     pub network_volume_id: Option<String>,
 
@@ -410,6 +414,13 @@ impl RunpodConfig {
     /// handling, which must never disagree.
     pub fn ssh_expected(&self) -> bool {
         self.cloud_type.eq_ignore_ascii_case("SECURE") || self.support_public_ip == Some(true)
+    }
+
+    /// Whether pods get a volume at `volume_mount_path` (a network volume,
+    /// or a pod volume of `volume_gb`): storage that survives the pod's own
+    /// stop, unlike its container disk.
+    pub fn has_volume(&self) -> bool {
+        self.network_volume_id.is_some() || self.volume_gb > 0
     }
 }
 
@@ -510,6 +521,20 @@ impl Config {
             || "remote-kernels.toml".to_string(),
             |path| path.display().to_string(),
         )
+    }
+
+    /// Config changes this file would benefit from, by id, for the plugin's
+    /// session-start notice (`config-check`):
+    /// - `runpod-workdir`: a network volume that is still where files sync,
+    ///   because `[runpod] workdir` is unset. `sync()` mirrors the project over
+    ///   the volume's other files, and the venv sits on network storage.
+    ///   Setting workdir, even to the mount path, is the explicit choice.
+    pub fn migrations(&self) -> Vec<&'static str> {
+        let mut ids = Vec::new();
+        if self.runpod.network_volume_id.is_some() && self.runpod.workdir.is_none() {
+            ids.push("runpod-workdir");
+        }
+        ids
     }
 
     /// Effective runpod GPU shortlist:

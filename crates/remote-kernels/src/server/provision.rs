@@ -209,6 +209,7 @@ impl RemoteKernelsServer {
             known_hosts_path,
             cleanup,
             proxy_port_mapped,
+            remote_dirs,
         ) = {
             let mut state = self.state.lock().await;
             let project_dir = state.project_dir.clone();
@@ -222,6 +223,7 @@ impl RemoteKernelsServer {
                 known_hosts_path,
                 inst.cleanup,
                 inst.proxy_port_mapped,
+                inst.remote_dirs.clone(),
             )
         };
         let operation_lock = match operation_lock {
@@ -247,6 +249,7 @@ impl RemoteKernelsServer {
                     known_hosts_path,
                     jupyter_token: jupyter_token.clone(),
                     proxy_port_mapped,
+                    remote_dirs,
                 },
             )
             .await?;

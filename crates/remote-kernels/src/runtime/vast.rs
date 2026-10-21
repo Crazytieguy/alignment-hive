@@ -35,7 +35,7 @@ use crate::vast::types::{CreateInstanceRequest, Offer};
 
 use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
-    ProvisionRequest, Runtime, StillProvisioning, StopSupport, WatchdogPolicy,
+    ProvisionRequest, RemoteDirs, Runtime, StillProvisioning, StopSupport, WatchdogPolicy,
 };
 
 const JUPYTER_PORT: u16 = 18888;
@@ -552,6 +552,11 @@ impl Runtime for VastRuntime {
         capabilities(&self.vast)
     }
 
+    /// Derived from config on every connect; nothing to record.
+    fn remote_dirs(&self, _machine_id: &str, _image: Option<&str>) -> Option<RemoteDirs> {
+        None
+    }
+
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
         // Both get embedded single-quoted in the onstart script. The key is
         // plugin-generated (can't contain quotes today), but validate anyway —
@@ -1005,6 +1010,19 @@ impl Connection for VastConnection {
         &self.workdir
     }
 
+    fn state_dir(&self) -> String {
+        crate::machine_scripts::state_dir(self.workdir())
+    }
+
+    /// This runtime launches Jupyter itself with its root at the workdir.
+    fn kernel_path(&self) -> Option<&str> {
+        None
+    }
+
+    fn stage_dir(&self) -> Option<&str> {
+        None
+    }
+
     fn recorder_ws_url(&self) -> String {
         recorder_ws_url()
     }
@@ -1375,6 +1393,7 @@ mod tests {
             vast_offers: Some(offers),
             priority: None,
             cleanup: crate::config::Cleanup::Terminate,
+            remote_dirs: None,
             env: HashMap::new(),
             ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY test".to_string(),
             jupyter_token: "tok".to_string(),

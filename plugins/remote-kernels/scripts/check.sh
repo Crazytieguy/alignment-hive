@@ -1,8 +1,9 @@
 #!/bin/bash
 # Run once per session by hooks/register.tsx: prints the band's rows as JSON
 # ({"notices": [...]}, the Notice shape in hooks/notice-band.tsx), or nothing.
-# Nudges users to set up remote-kernels if not configured. An update asks
-# nothing of a configured project, so it gets no row.
+# Nudges users to set up remote-kernels if not configured, and to make a
+# config change the binary advises (`config-check`). An update asks nothing
+# else of a configured project, so it gets no row.
 
 # One row whose button runs /remote-kernels:setup: id, severity, text, button label.
 setup_notice() {
@@ -18,4 +19,13 @@ fi
 
 if [ ! -f "$CLAUDE_PROJECT_DIR/remote-kernels.toml" ]; then
   setup_notice setup action "not configured" "Run setup"
+  exit 0
+fi
+
+# Advised config changes, asked of the binary only when it is already
+# installed: session start never waits on a download.
+CHECK=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh" if-installed config-check \
+  --project-dir "$CLAUDE_PROJECT_DIR" 2>/dev/null)
+if printf '%s' "$CHECK" | grep -q '"runpod-workdir"'; then
+  setup_notice runpod-workdir action "files sync onto your RunPod network volume: set [runpod] workdir" "Run setup"
 fi

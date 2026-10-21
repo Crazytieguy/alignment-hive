@@ -83,6 +83,7 @@ fn unconfirmed_marker(
         ssh_key_path: "/tmp/missing-key".to_string(),
         label: None,
         last_checked_epoch: 0,
+        remote_dirs: None,
     }
 }
 
@@ -342,6 +343,7 @@ async fn a_second_admission_of_one_machine_is_refused_under_the_lock() {
         gpu_name: Some("Fake GPU".to_string()),
         cost_per_hr: 1.0,
         proxy_port_mapped: false,
+        remote_dirs: None,
         kernels: Vec::new(),
     };
     let provisioned = |label: &str| {
@@ -408,6 +410,7 @@ async fn a_retried_interval_open_does_not_double_the_resume() {
         gpu_name: Some("Fake GPU".to_string()),
         cost_per_hr: 1.0,
         proxy_port_mapped: false,
+        remote_dirs: None,
         kernels: Vec::new(),
     };
     {
@@ -911,14 +914,15 @@ mod transport_outage {
         // The successor's marker is not ours to clear either.
         crate::machine_scripts::write_intent(
             &*leased.conn,
-            false,
+            "",
+            &[],
             crate::state::FinishThen::Terminate,
         )
         .await
         .unwrap();
         leased
             .server
-            .clear_finish_marker(&leased.machine_id, &leased.external_id)
+            .clear_finish_marker(&leased.machine_id, &leased.external_id, "")
             .await;
         assert!(leased.marker().exists());
 

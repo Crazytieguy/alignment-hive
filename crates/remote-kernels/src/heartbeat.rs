@@ -856,7 +856,7 @@ async fn reconcile_finish_marker(
     {
         return Ok(());
     }
-    crate::machine_scripts::clear_intent(conn).await
+    crate::machine_scripts::clear_intent(conn, None).await
 }
 
 /// Handle for stopping an instance's heartbeat on shutdown.
@@ -925,11 +925,10 @@ mod tests {
             crate::runtime::fake::FakeConnection::for_test(machine_dir.path(), false).unwrap(),
         );
         let machine_id = crate::ulid::new();
-        let marker = std::path::PathBuf::from(crate::machine_scripts::state_dir(conn.workdir()))
-            .join("intent.json");
+        let marker = std::path::PathBuf::from(conn.state_dir()).join("intent.json");
 
         // Cancelled plan: the local record is clean, the marker is not.
-        crate::machine_scripts::write_intent(&conn, false, crate::state::FinishThen::Terminate)
+        crate::machine_scripts::write_intent(&conn, "", &[], crate::state::FinishThen::Terminate)
             .await
             .unwrap();
         assert!(marker.exists());
@@ -942,7 +941,7 @@ mod tests {
         );
 
         // A still-queued plan owns its marker: attach() resumes that plan.
-        crate::machine_scripts::write_intent(&conn, false, crate::state::FinishThen::Terminate)
+        crate::machine_scripts::write_intent(&conn, "", &[], crate::state::FinishThen::Terminate)
             .await
             .unwrap();
         let mut lifecycle = crate::state::load_lifecycle_record(dir.path(), &machine_id);

@@ -242,6 +242,33 @@ pub struct ProvisionRequest {
     /// `install_watchdog`, so provision-time guards (`RunPod`'s orphan
     /// guard) can't diverge from the watchdog's policy.
     pub cleanup: crate::config::Cleanup,
+    /// [`Runtime::remote_dirs`] for this machine, computed once by the server
+    /// before the create and persisted with it, so the create body (`RunPod`'s
+    /// orphan guard) and every later connection agree.
+    pub remote_dirs: Option<RemoteDirs>,
+}
+
+/// Where a machine keeps things, decided once when it is created and kept in
+/// its durable record: a later config edit must not move an existing
+/// machine's files or lifecycle state. Runtimes that derive these from their
+/// config on every connect (vast, Kubernetes) have none.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteDirs {
+    /// Where `sync()` lands files, downloads resolve, and kernels run.
+    pub workdir: String,
+    /// The lifecycle state dir (lease, watchdog, markers, kernel output). It
+    /// has to survive the machine's own stop and belong to this machine
+    /// alone.
+    pub state_dir: String,
+    /// The Jupyter API path (relative to the server's root dir) kernels are
+    /// created at, when the server's root is known; `None` creates them at
+    /// the server's own default.
+    pub kernel_path: Option<String>,
+    /// Where queued `finish()` downloads are copied before the machine stops
+    /// itself, when the workdir is on storage that stop wipes and a volume
+    /// can hold them; `attach()` collects them from there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_dir: Option<String>,
 }
 
 /// Provider-assigned identity and pricing of a machine.
@@ -433,6 +460,9 @@ pub struct ConnectionContext {
     pub jupyter_token: String,
     /// From the instance record: see [`InstanceHandle::proxy_port_mapped`].
     pub proxy_port_mapped: bool,
+    /// From the instance record: see [`RemoteDirs`]. `None` for machines
+    /// recorded before it existed.
+    pub remote_dirs: Option<RemoteDirs>,
 }
 
 /// On-machine self-cleanup policy, installed via [`Connection::install_watchdog`].
@@ -460,8 +490,19 @@ pub trait Connection: Send + Sync {
     /// How the shared Jupyter layer reaches this machine's Jupyter server.
     fn jupyter(&self) -> &JupyterEndpoint;
 
-    /// Persistent machine workdir. Lifecycle state lives below this path.
+    /// Where `sync()` lands files and relative download paths resolve.
     fn workdir(&self) -> &str;
+
+    /// The lifecycle state dir: lease, watchdog, finish and outcome markers,
+    /// kernel-output logs. Persistent across the machine's own stop.
+    fn state_dir(&self) -> String;
+
+    /// The Jupyter API path new kernels start in (see
+    /// [`RemoteDirs::kernel_path`]); `None` for the server's default.
+    fn kernel_path(&self) -> Option<&str>;
+
+    /// See [`RemoteDirs::stage_dir`].
+    fn stage_dir(&self) -> Option<&str>;
 
     /// Loopback WebSocket endpoint as seen from the machine itself. Production
     /// Jupyter servers use port 8888; the fake runtime overrides its random
@@ -548,6 +589,10 @@ pub trait Runtime: Send + Sync {
 
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> Capabilities;
+
+    /// The directories a machine created now with `image` (the `start()`
+    /// override, if any) would use; see [`RemoteDirs`].
+    fn remote_dirs(&self, machine_id: &str, image: Option<&str>) -> Option<RemoteDirs>;
 
     /// Create a new machine. Implementations handle provider-specific
     /// selection/retry policy (e.g. `RunPod`'s GPU-type fallback list).
@@ -723,6 +768,10 @@ impl Runtime for AnyRuntime {
         dispatch!(self, r => r.capabilities())
     }
 
+    fn remote_dirs(&self, machine_id: &str, image: Option<&str>) -> Option<RemoteDirs> {
+        dispatch!(self, r => r.remote_dirs(machine_id, image))
+    }
+
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
         dispatch!(self, r => r.provision(req).await)
     }
@@ -785,6 +834,18 @@ impl Connection for AnyConnection {
 
     fn workdir(&self) -> &str {
         dispatch!(self, c => c.workdir())
+    }
+
+    fn state_dir(&self) -> String {
+        dispatch!(self, c => c.state_dir())
+    }
+
+    fn kernel_path(&self) -> Option<&str> {
+        dispatch!(self, c => c.kernel_path())
+    }
+
+    fn stage_dir(&self) -> Option<&str> {
+        dispatch!(self, c => c.stage_dir())
     }
 
     fn recorder_ws_url(&self) -> String {

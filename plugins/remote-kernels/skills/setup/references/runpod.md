@@ -21,6 +21,26 @@ tooling is usually better installed via `startup-commands` than a custom
 image. Only read the Advanced section below if the user genuinely needs a
 custom image.
 
+## Network volumes
+
+A network volume (`network-volume-id`) outlives every pod, and several pods
+can mount it at once: the place for data worth keeping across pods (model
+downloads, HF/uv caches, datasets, checkpoints), pointed at through `[env]`
+(e.g. `HF_HOME`). Keep the project itself off it by setting `workdir` to a
+directory outside the mount. Otherwise `sync()` mirrors the project onto the
+volume, deleting everything there the project doesn't have (gitignored
+paths excepted), and venvs and imports run on network storage, many times
+slower than the pod's own disk.
+
+For a volume already in use (the session-start row "files sync onto your
+RunPod network volume"), keep `volume-mount-path` where it is so the data's
+paths don't move, and set `workdir` to a directory on the pod's disk such as
+`/root/work`. Code that reaches project files by absolute paths under the
+mount needs updating. The pod's disk is wiped on stop, so the tree and venv
+come back with the next sync and install. A user who would rather keep the
+project on the volume sets `workdir` to the mount path explicitly, which
+also clears the row.
+
 ## Advanced: custom images (`image-start-cmd`)
 
 The template's `image-start-cmd` comment documents the guard mechanics

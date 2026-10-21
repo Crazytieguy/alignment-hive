@@ -32,6 +32,12 @@ and collaborators need to add the entry for their own machines.
 
 Then tell the user to restart Claude Code and re-run this skill.
 
+## Existing config with a RunPod network volume
+
+When `remote-kernels.toml` sets `[runpod] network-volume-id` but no
+`workdir`, settle that first: the "Network volumes" section of
+`references/runpod.md` covers it.
+
 ## 1. Pick the runtime(s)
 
 - **RunPod** — managed pods, reliable stop/resume; the simplest choice

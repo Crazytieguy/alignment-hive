@@ -83,6 +83,11 @@ pub struct InstanceRecord {
     /// consults it.
     #[serde(default = "default_true")]
     pub proxy_port_mapped: bool,
+    /// Where the machine keeps its files and lifecycle state, decided at
+    /// creation (see `RemoteDirs`). Absent for runtimes that derive them
+    /// from config, and for machines created before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_dirs: Option<crate::runtime::RemoteDirs>,
     /// Kernel/notebook bindings survive MCP server restarts.
     #[serde(default)]
     pub kernels: Vec<KernelRecord>,
@@ -195,6 +200,11 @@ pub struct UnconfirmedRecord {
     pub ssh_key_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The directories the create was made with (its body embeds them), so a
+    /// later promotion records those rather than re-deriving them from a
+    /// config that may have changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_dirs: Option<crate::runtime::RemoteDirs>,
     /// When the provider was last asked whether `expected_name` exists.
     /// Bounds how often a `status()` loop re-probes; zero means never asked.
     #[serde(default)]
@@ -248,6 +258,9 @@ pub struct InstanceState {
     pub ssh_key_path: PathBuf,
     /// See `InstanceHandle::proxy_port_mapped`.
     pub proxy_port_mapped: bool,
+    /// See `InstanceRecord::remote_dirs`. Set by the caller after
+    /// [`Self::provisioning`] wherever it comes from a record or a create.
+    pub remote_dirs: Option<crate::runtime::RemoteDirs>,
     pub connection: Option<Arc<AnyConnection>>,
     pub heartbeat: Option<HeartbeatState>,
     /// Set when a lease refresh proves this process no longer owns the
@@ -307,6 +320,7 @@ impl InstanceState {
             notebooks: HashMap::new(),
             ssh_key_path,
             proxy_port_mapped,
+            remote_dirs: None,
             connection: None,
             heartbeat: None,
             fenced: None,
@@ -330,6 +344,7 @@ impl InstanceState {
             gpu_name: Some(self.gpu_name.clone()),
             cost_per_hr: self.cost_per_hr,
             proxy_port_mapped: self.proxy_port_mapped,
+            remote_dirs: self.remote_dirs.clone(),
             kernels: self.kernels.clone(),
         }
     }
@@ -1208,6 +1223,7 @@ mod tests {
             notebooks: HashMap::new(),
             ssh_key_path: PathBuf::from("/tmp/test-key"),
             proxy_port_mapped: false,
+            remote_dirs: None,
             connection: None,
             heartbeat: None,
             fenced: None,

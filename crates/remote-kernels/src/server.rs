@@ -190,6 +190,7 @@ impl RemoteKernelsServer {
             (state.project_dir.clone(), keypair)
         };
         let jupyter_token = generate_token();
+        let remote_dirs = runtime.remote_dirs(&machine_id, params.image.as_deref());
 
         let req = ProvisionRequest {
             machine_id: machine_id.clone(),
@@ -201,6 +202,7 @@ impl RemoteKernelsServer {
             ssh_public_key: ssh_keypair.public_key_openssh,
             jupyter_token: jupyter_token.clone(),
             cleanup,
+            remote_dirs: remote_dirs.clone(),
         };
 
         tracing::info!(instance = %machine_id, runtime = %runtime_name, "Provisioning machine...");
@@ -227,6 +229,7 @@ impl RemoteKernelsServer {
                             jupyter_token: jupyter_token.clone(),
                             ssh_key_path: ssh_keypair.private_key_path.display().to_string(),
                             label: label.clone(),
+                            remote_dirs: remote_dirs.clone(),
                             // Never probed yet: the first status() must not
                             // be throttled out of asking.
                             last_checked_epoch: 0,
@@ -247,7 +250,7 @@ impl RemoteKernelsServer {
         // a crash from here on must not orphan a paid machine.
         {
             let mut state = self.state.lock().await;
-            let inst = InstanceState::provisioning(
+            let mut inst = InstanceState::provisioning(
                 machine_id.clone(),
                 label.clone(),
                 runtime_name.clone(),
@@ -259,6 +262,7 @@ impl RemoteKernelsServer {
                 ssh_keypair.private_key_path,
                 handle.proxy_port_mapped,
             );
+            inst.remote_dirs = remote_dirs;
             let record = inst.record();
             state.instances.insert(machine_id.clone(), inst);
             if let Err(e) = state.admit_provision(&machine_id, &record, &lifecycle) {
@@ -659,8 +663,9 @@ impl RemoteKernelsServer {
         // this server's own drain task works from. Written under the state
         // lock: intent read-modify-writes race only against other in-process
         // writers (the drain), never across processes (fenced lease).
+        let plan = uuid::Uuid::new_v4().to_string();
         let intent = crate::state::FinishIntent {
-            uuid: uuid::Uuid::new_v4().to_string(),
+            uuid: plan.clone(),
             downloads: downloads.clone(),
             then,
         };
@@ -682,8 +687,7 @@ impl RemoteKernelsServer {
         // transport also have no finalizer that could consume a marker, so
         // there is deliberately no fallback channel — the reply just says
         // the plan runs only while a server is connected.
-        let downloads_pending = !downloads.is_empty();
-        let marker = crate::machine_scripts::write_intent(&*conn, downloads_pending, then)
+        let marker = crate::machine_scripts::write_intent(&*conn, &plan, &downloads, then)
             .await
             .map_err(|error| format!("{error:#}"));
         drop(mutation_guard);
@@ -1025,9 +1029,23 @@ impl RemoteKernelsServer {
             Err(message) => return err_text(message),
         };
 
-        // HTTP call happens outside the state lock.
+        // HTTP calls happen outside the state lock. The kernel starts in the
+        // workdir, which may not exist before the first sync().
+        let kernel_path = machine_connection.kernel_path();
+        let mut workdir_warning = String::new();
+        if let Some(path) = kernel_path
+            && let Err(error) = jupyter.ensure_directory(path).await
+        {
+            tracing::warn!("Could not create the kernel's working directory: {error}");
+            workdir_warning = format!(
+                "\nWarning: could not create the machine's workdir {} ({error}), so this \
+                 kernel may run in a parent directory: use absolute paths, or sync() and \
+                 create a new kernel.",
+                machine_connection.workdir()
+            );
+        }
         let kernel = jupyter
-            .create_kernel()
+            .create_kernel(kernel_path)
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to create kernel: {e}"), None))?;
         let kernel_id = kernel.id;
@@ -1091,6 +1109,7 @@ impl RemoteKernelsServer {
                 "\nWarning: could not save this kernel's record to disk ({error}); after a server restart it won't reconnect automatically (the kernel itself is fine now)."
             );
         }
+        msg.push_str(&workdir_warning);
         Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
     }
 

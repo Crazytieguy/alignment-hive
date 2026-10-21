@@ -687,6 +687,50 @@ fn pending_downloads_downgrade_terminate_intent_to_stop() {
     assert!(log.contains("action=stop"));
 }
 
+/// Where the workdir doesn't survive a stop, the server leaves `stage.sh`
+/// beside the intent: the watchdog runs it before stopping, and only then.
+#[test]
+fn pending_downloads_are_staged_before_the_stop() {
+    for (intent, staged) in [
+        (
+            "{\"downloads_pending\":true,\"then\":\"terminate\"}\n",
+            true,
+        ),
+        (
+            "{\"downloads_pending\":false,\"then\":\"terminate\"}\n",
+            false,
+        ),
+    ] {
+        let name = "pending_downloads_are_staged_before_the_stop";
+        let Some(harness) = Harness::new(name) else {
+            return;
+        };
+        let jupyter = FakeJupyter::start(&harness, "idle", name);
+        harness.lease_ok(&["acquire", "owner-a"]);
+        stale_heartbeat(&harness, 1);
+        fs::write(harness.state_dir().join("intent.json"), intent).expect("write intent");
+        let marker = harness.temp.path().join("staged");
+        fs::write(
+            harness.state_dir().join("stage.sh"),
+            format!("touch {}\n", marker.display()),
+        )
+        .expect("write stage.sh");
+        let action_log = harness.temp.path().join("actions.log");
+        let config = WatchdogConfig {
+            stale_secs: 1,
+            grace_secs: 2,
+            finalize_wait_secs: 0,
+            finalize_timeout_secs: 3,
+            default_action: "terminate",
+            finalize_cmd: Path::new("-"),
+        };
+        let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
+        let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
+        assert_eq!(log.contains("action=stop"), staged, "{log}");
+        assert_eq!(marker.exists(), staged);
+    }
+}
+
 #[test]
 fn budget_grace_expiry_stops_even_while_kernel_is_busy() {
     let Some(harness) = Harness::new("budget_grace_expiry_stops_even_while_kernel_is_busy") else {

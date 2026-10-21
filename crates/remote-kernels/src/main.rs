@@ -1,5 +1,6 @@
-//! Binary entry point: serves the MCP server over stdio, or prints the
-//! config template (`config-template`).
+//! Binary entry point: serves the MCP server over stdio, prints the config
+//! template (`config-template`), or reports advised config changes
+//! (`config-check`).
 
 use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
@@ -31,6 +32,10 @@ enum Command {
         #[arg(long = "runtime")]
         runtimes: Vec<String>,
     },
+    /// Print the config changes the project's remote-kernels.toml would
+    /// benefit from, as JSON (`{"migrations": ["runpod-workdir"]}`); nothing
+    /// when the file doesn't load.
+    ConfigCheck,
 }
 
 #[tokio::main]
@@ -46,6 +51,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config::Config::template_for(&names)?
             };
             print!("{template}");
+            return Ok(());
+        }
+        Some(Command::ConfigCheck) => {
+            if let Ok(config) = config::Config::load(&cli.project_dir) {
+                println!(
+                    "{}",
+                    serde_json::json!({ "migrations": config.migrations() })
+                );
+            }
             return Ok(());
         }
         None => serve(cli.project_dir).await,
