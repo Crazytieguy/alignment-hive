@@ -2,12 +2,16 @@
 /**
  * Post plugin updates to Slack (.github/workflows/release-notes.yml).
  *
- * Compares current plugin versions to last announced versions (state.json),
- * extracts commit messages for changed plugins, and posts to Slack. Without
- * SLACK_WEBHOOK_URL it is a dry run that leaves state.json as it was.
+ * Compares current plugin versions to last announced versions (state.json)
+ * and, for each changed plugin, lists the commits that shipped between the
+ * commit that set the announced version and the one that set the current
+ * version. Bump commits are left out: the version line already says what they
+ * say. Without SLACK_WEBHOOK_URL it is a dry run that leaves state.json as it
+ * was.
  */
 
 import { $ } from "bun";
+import { existsSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { join, dirname } from "path";
 
@@ -15,6 +19,12 @@ const ROOT_DIR = dirname(import.meta.dir);
 const PLUGINS_DIR = join(ROOT_DIR, "plugins");
 const STATE_FILE = join(import.meta.dir, "state.json");
 const MARKETPLACE_FILE = join(ROOT_DIR, ".claude-plugin", "marketplace.json");
+// The workflow that publishes the CLI the hive plugin installs; its paths are
+// the hive-cli sources.
+const HIVE_CLI_WORKFLOW = join(ROOT_DIR, ".github", "workflows", "release-hive-cli.yml");
+// A bump commit is one that changes any plugin's version.
+const VERSION_LINE = '"version"';
+const ALL_PLUGIN_JSONS = ":(glob)plugins/*/.claude-plugin/plugin.json";
 
 interface PluginJson {
   name: string;
@@ -23,39 +33,42 @@ interface PluginJson {
 }
 
 interface MarketplaceJson {
-  plugins: Array<{ name: string }>;
+  plugins: Array<{ name: string; source: unknown }>;
 }
 
 interface State {
   lastAnnouncedVersions: Record<string, string>;
-  lastRunTimestamp: string;
 }
 
 interface PluginUpdate {
   name: string;
-  oldVersion: string;
+  oldVersion: string | undefined;
   newVersion: string;
-  commits: string[];
+  description?: string;
+  // Null when the announced version isn't in the history (a new plugin).
+  commits: string[] | null;
 }
 
-async function readPluginVersions(): Promise<Record<string, string>> {
-  const versions: Record<string, string> = {};
+async function readPlugins(): Promise<Record<string, PluginJson>> {
+  const plugins: Record<string, PluginJson> = {};
 
   const marketplaceContent = await readFile(MARKETPLACE_FILE, "utf-8");
   const marketplace: MarketplaceJson = JSON.parse(marketplaceContent);
 
   for (const entry of marketplace.plugins) {
+    // Archive entries (per-platform binaries) have no plugin directory.
+    if (typeof entry.source !== "string") continue;
     const pluginJsonPath = join(PLUGINS_DIR, entry.name, ".claude-plugin", "plugin.json");
     try {
       const content = await readFile(pluginJsonPath, "utf-8");
       const plugin: PluginJson = JSON.parse(content);
-      versions[plugin.name] = plugin.version;
+      plugins[plugin.name] = plugin;
     } catch (error) {
       console.error(`Failed to read plugin.json for ${entry.name}:`, error);
     }
   }
 
-  return versions;
+  return plugins;
 }
 
 async function readState(): Promise<State> {
@@ -67,42 +80,74 @@ async function writeState(state: State): Promise<void> {
   await writeFile(STATE_FILE, JSON.stringify(state, null, 2) + "\n");
 }
 
-async function getCommitsSinceLastRun(
-  pluginName: string,
-  lastTimestamp: string
-): Promise<string[]> {
-  const pluginPath = `plugins/${pluginName}`;
+async function git(args: string[]): Promise<string[]> {
+  const result = await $`git ${args}`.cwd(ROOT_DIR).text();
+  return result.split("\n").filter((line) => line.length > 0);
+}
 
-  try {
-    const result =
-      await $`git log --since="${lastTimestamp}" --pretty=format:"%s" -- ${pluginPath}`.text();
+function pluginJsonOf(name: string): string {
+  return `plugins/${name}/.claude-plugin/plugin.json`;
+}
 
-    if (!result.trim()) {
-      return [];
-    }
-
-    return result
-      .trim()
-      .split("\n")
-      .filter((msg) => msg.length > 0);
-  } catch (error) {
-    console.error(`Failed to get commits for ${pluginName}:`, error);
-    return [];
+/** The newest commit at which the plugin's version became `version`. */
+async function commitSettingVersion(name: string, version: string): Promise<string | undefined> {
+  const path = pluginJsonOf(name);
+  for (const sha of await git(["log", "--format=%H", `-G${VERSION_LINE}`, "--", path])) {
+    const content = (await git(["show", `${sha}:${path}`])).join("\n");
+    if ((JSON.parse(content) as PluginJson).version === version) return sha;
   }
+  return undefined;
+}
+
+/** Paths whose changes ship in the plugin's releases. */
+async function sourcePaths(name: string): Promise<string[]> {
+  const paths = [`plugins/${name}`];
+  if (existsSync(join(ROOT_DIR, "crates", name))) paths.push(`crates/${name}`);
+  if (name === "hive") {
+    const workflow = Bun.YAML.parse(await readFile(HIVE_CLI_WORKFLOW, "utf-8")) as {
+      on: { push: { paths: string[] } };
+    };
+    paths.push(...workflow.on.push.paths.map((path) => `:(glob)${path}`));
+  }
+  return paths;
+}
+
+async function releasedCommits(
+  name: string,
+  oldVersion: string,
+  newVersion: string
+): Promise<string[] | null> {
+  const from = await commitSettingVersion(name, oldVersion);
+  const to = await commitSettingVersion(name, newVersion);
+  if (!from || !to) return null;
+
+  const range = `${from}..${to}`;
+  const bumps = new Set(
+    await git(["log", "--format=%H", `-G${VERSION_LINE}`, range, "--", ALL_PLUGIN_JSONS])
+  );
+  const commits = await git(["log", "--format=%H %s", range, "--", ...(await sourcePaths(name))]);
+  return commits
+    .map((line) => line.split(" "))
+    .filter(([sha]) => !bumps.has(sha!))
+    .map(([, ...subject]) => subject.join(" "));
 }
 
 function formatSlackMessage(updates: PluginUpdate[]): string {
   const lines: string[] = [];
 
   for (const update of updates) {
-    lines.push(`*${update.name}* \`${update.oldVersion}\` → \`${update.newVersion}\``);
-
-    if (update.commits.length > 0) {
-      for (const commit of update.commits) {
-        lines.push(`• ${commit}`);
-      }
+    if (update.commits === null) {
+      lines.push(`*${update.name}* \`${update.newVersion}\` (new)`);
+      if (update.description) lines.push(`• ${update.description}`);
     } else {
-      lines.push("• Version bump");
+      lines.push(`*${update.name}* \`${update.oldVersion}\` → \`${update.newVersion}\``);
+      if (update.commits.length > 0) {
+        for (const commit of update.commits) {
+          lines.push(`• ${commit}`);
+        }
+      } else {
+        lines.push("• Version bump");
+      }
     }
 
     lines.push("");
@@ -136,7 +181,10 @@ async function postToSlack(message: string): Promise<void> {
 
 async function main(): Promise<void> {
   console.log("Reading current plugin versions...");
-  const currentVersions = await readPluginVersions();
+  const plugins = await readPlugins();
+  const currentVersions = Object.fromEntries(
+    Object.values(plugins).map((plugin) => [plugin.name, plugin.version])
+  );
   console.log("Current versions:", currentVersions);
 
   console.log("Reading state...");
@@ -151,13 +199,14 @@ async function main(): Promise<void> {
     if (oldVersion !== newVersion) {
       console.log(`Found update: ${name} ${oldVersion} → ${newVersion}`);
 
-      const commits = await getCommitsSinceLastRun(name, state.lastRunTimestamp);
+      const commits = oldVersion ? await releasedCommits(name, oldVersion, newVersion) : null;
       console.log(`Commits for ${name}:`, commits);
 
       updates.push({
         name,
-        oldVersion: oldVersion || "unknown",
+        oldVersion,
         newVersion,
+        description: plugins[name]!.description,
         commits,
       });
     }
@@ -183,13 +232,8 @@ async function main(): Promise<void> {
   await postToSlack(message);
   console.log("Posted successfully!");
 
-  const newState: State = {
-    lastAnnouncedVersions: currentVersions,
-    lastRunTimestamp: new Date().toISOString(),
-  };
-
   console.log("Updating state...");
-  await writeState(newState);
+  await writeState({ lastAnnouncedVersions: currentVersions });
   console.log("State updated.");
 }
 

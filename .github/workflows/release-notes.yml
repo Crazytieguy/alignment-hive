@@ -1,10 +1,15 @@
 name: Release Notes
 
+# Posts when a push changes a plugin version. (GitHub's schedule trigger
+# started this workflow one to eight hours late.)
 on:
-  schedule:
-    # 9 AM PST (5 PM UTC) weekdays only
-    - cron: '0 17 * * 1-5'
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/*/.claude-plugin/plugin.json'
   workflow_dispatch:
+
+concurrency: release-notes
 
 jobs:
   post:
