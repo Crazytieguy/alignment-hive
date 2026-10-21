@@ -4,7 +4,7 @@ import MarkdownIt from 'markdown-it';
 import { parseFragment } from 'parse5';
 import {
   SCRIPT_URLS, escapeCss, escapeHtml, escapeJson, escapeScript,
-  renderMarkdownHtml, validateMarkdownImages,
+  renderMarkdownHtml, renderMarkdownInline, validateMarkdownImages,
 } from './html';
 import type { DefaultTreeAdapterMap } from 'parse5';
 
@@ -213,6 +213,22 @@ describe('CSS parser resource validation', () => {
 });
 
 describe('complete Markdown fragment integration', () => {
+  test('a one-line field takes a glossed term and no other HTML', () => {
+    const inline = (source: string) => renderMarkdownInline(source, context);
+    expect(inline('A <abbr title="runs without a live backend">stub mode</abbr> run')).toBe('A <abbr title="runs without a live backend">stub mode</abbr> run');
+    expect(inline('Read <session> and <b>bold</b>, `<abbr>`')).not.toContain('<b>');
+    expect(inline('Read <session>')).not.toContain('<session>');
+    expect(inline('<abbr onclick="x" title="t">no</abbr>')).not.toContain('onclick="x"');
+  });
+
+  test('raw HTML in an image\'s alt is its text, in a one-line field and in a body', () => {
+    const image = '![<abbr title=" srcset=https://example.test/leak onerror=alert(1) ">term</abbr>](data:image/png;base64,AA==)';
+    for (const html of [renderMarkdownInline(image, context), renderMarkdownHtml(md(), image, context).html]) {
+      const img = parseFragment(html).childNodes.flatMap((node) => 'childNodes' in node ? [node, ...node.childNodes] : [node]).find((node) => 'tagName' in node && node.tagName === 'img') as DefaultTreeAdapterMap['element'];
+      expect(img.attrs.map((attr) => attr.name).sort()).toEqual(['alt', 'src']);
+    }
+  });
+
   test('preserves normal inline open/close structure across emphasis and links', () => {
     const result = renderMarkdownHtml(md(), 'A <span title="é">**bold** and [docs](https://example.test)</span> end.', context);
     expect(result.html).toBe('<p>A <span title="&#233;"><strong>bold</strong> and <a href="https://example.test">docs</a></span> end.</p>\n');

@@ -371,6 +371,24 @@ function reviewPage(copy, times, seen) {
   var arrival = window.performance && performance.getEntriesByType ? performance.getEntriesByType("navigation")[0] : null;
   var revisit = !!arrival && (arrival.type === "reload" || arrival.type === "back_forward") && !!location.hash && location.hash === state.lastHash;
 
+  /* A glossed term (abbr with a title) shows its gloss on hover, focus or tap, in place of the browser's slow native
+     tooltip; a tap on one inside an item's heading shows the gloss instead of opening the item. */
+  document.querySelectorAll("abbr[title]").forEach(function (abbr) {
+    abbr.setAttribute("data-gloss", abbr.getAttribute("title"));
+    abbr.setAttribute("aria-label", abbr.textContent + ": " + abbr.getAttribute("title"));
+    abbr.removeAttribute("title");
+    abbr.tabIndex = 0;
+    abbr.addEventListener("click", function (e) { if (abbr.closest("summary")) { e.preventDefault(); abbr.focus(); } });
+    /* The gloss opens under the term's first line; near the right edge it shifts left to stay on screen (its width is the
+       stylesheet's cap, min(40ch, 80vw), at 13px). */
+    function place() {
+      var left = abbr.getClientRects()[0].left, width = Math.min(40 * 8, innerWidth * 0.8);
+      abbr.style.setProperty("--gloss-shift", Math.max(16 - left, Math.min(0, innerWidth - 16 - left - width)) + "px");
+    }
+    abbr.addEventListener("mouseenter", place);
+    abbr.addEventListener("focus", place);
+  });
+
   /* An item with nothing behind its summary is a plain row: only its seen box and links respond. */
   document.querySelectorAll(".item-empty > summary").forEach(function (s) {
     s.addEventListener("click", function (e) { if (!e.target.closest("a[href], label, button, input, select, textarea")) e.preventDefault(); });

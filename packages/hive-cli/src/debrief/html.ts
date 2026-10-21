@@ -360,6 +360,10 @@ export function renderMarkdownHtml(markdown: Markdown, source: string, context: 
     token.children = [];
     markdown.inline.parse(content, markdown, env, token.children);
   }
+  // An image's alt is an attribute: raw HTML written inside it is its text, never markup.
+  visitTokens(tokens, (token) => {
+    if (token.type === 'image') for (const child of token.children ?? []) if (child.type === 'html_inline') child.type = 'text';
+  });
   visitTokens(tokens, (token, line) => {
     if (token.type !== 'html_block' && token.type !== 'html_inline') return;
     const marker = remember(token.content, context.line + line);
@@ -379,8 +383,17 @@ export function renderMarkdownHtml(markdown: Markdown, source: string, context: 
   return processHtml(html, context, ranges);
 }
 
-/** One-line fields take no raw HTML: `<session>` in a lede is text. Only item bodies allow HTML. */
-const inlineMarkdown = new MarkdownIt({ html: false, linkify: false });
+/**
+ * One-line fields take no raw HTML but a glossed term, `<abbr title="...">term</abbr>`: any other tag, such as
+ * `<session>` in a lede, is text. Only item bodies allow HTML.
+ */
+const inlineMarkdown = new MarkdownIt({ html: true, linkify: false });
+const glossTag = /^(?:<abbr title="[^"<>]*">|<\/abbr>)$/;
+inlineMarkdown.core.ruler.push('gloss_only', (state) => {
+  for (const token of state.tokens) {
+    for (const child of token.children ?? []) if (child.type === 'html_inline' && !glossTag.test(child.content)) child.type = 'text';
+  }
+});
 /** Authored one-line Markdown (headings, ledes, alternatives, captions, summaries), validated like bodies. */
 export function renderMarkdownInline(source: string, context: HtmlContext): string {
   validateMarkdownImages(source, context, true);

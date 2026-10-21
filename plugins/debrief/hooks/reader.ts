@@ -4,7 +4,7 @@
 // opening from the cache plus the item's body, up to 16 at a time.
 import type { Register } from 'claude-code'
 
-const MODEL = 'sonnet'
+const DEFAULT_MODEL = 'sonnet'
 const MAX_IN_FLIGHT = 16
 
 const BRIEF = `You are the person who delegated a task to an AI agent, reading the report it wrote for you. You run the project, but you did not watch the agent work and skipped most of its messages. What you knew before opening the report is under <known>.
@@ -53,6 +53,7 @@ export const register: Register = (on) => {
           round: { type: 'number' },
           data: { type: 'string', description: 'The debrief plugin\'s data directory.' },
           cwd: { type: 'string', description: 'The directory the work was done in.' },
+          model: { type: 'string', description: 'The readers\' model, an alias or full id; default sonnet.' },
         },
         required: ['session', 'round', 'data', 'cwd'],
       },
@@ -61,7 +62,7 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', { tool: 'mcp__debrief__read' }, async ($, e) => {
-    const input = e as unknown as { session: string; round: number; data: string; cwd: string }
+    const input = e as unknown as { session: string; round: number; data: string; cwd: string; model?: string }
     const ran = await $.process.run(['hive', 'debrief', 'view', '--session', input.session, '--round', String(input.round), '--data', input.data], { cwd: input.cwd, timeoutMs: 120000 })
     if (ran.exitCode !== 0) return { result: `hive debrief view failed: ${ran.stderr.trim() || ran.stdout.trim()}`, isError: true }
     const view = JSON.parse(ran.stdout) as View
@@ -76,7 +77,10 @@ export const register: Register = (on) => {
         // One retry: a reply cut off or not the JSON asked for usually comes back whole the second time.
         let reason = ''
         for (let attempt = 0; attempt < 2; attempt++) {
-          const r = await $.model.complete({ model: MODEL, prompt, maxTokens: 4000, timeoutMs: 180000 })
+          let r
+          // The engine refuses to send for a model it blocks, which no retry changes.
+          try { r = await $.model.complete({ model: input.model || DEFAULT_MODEL, prompt, maxTokens: 4000, timeoutMs: 180000 }) }
+          catch (err) { reason = `refused: ${String(err)}`; break }
           const questions = r.isAnswered ? parseQuestions(r.text) : null
           if (questions !== null) return questions
           reason = r.isAnswered ? 'unreadable reply' : r.reason

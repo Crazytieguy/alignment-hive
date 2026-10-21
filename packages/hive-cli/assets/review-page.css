@@ -274,6 +274,15 @@ p { margin: 0 0 .9em; }
 /* The lede inherits body ink and size, so it reads as the item's first sentence rather than a caption. */
 .item-lede { grid-area: lede; margin: 2px 0 0; line-height: 1.5; }
 .item-lede code { background: none; padding: 0; }
+/* A glossed term: dotted underline; its gloss shows below it on hover, focus or tap. */
+abbr[data-gloss] { position: relative; text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
+abbr[data-gloss]:focus { outline: none; }
+abbr[data-gloss]:hover::after, abbr[data-gloss]:focus::after {
+  content: attr(data-gloss); position: absolute; left: var(--gloss-shift, 0); top: calc(100% + 4px); z-index: 20;
+  box-sizing: border-box; width: max-content; max-width: min(40ch, 80vw); padding: 6px 10px; border-radius: 6px;
+  background: var(--ink); color: var(--bg); box-shadow: var(--shadow);
+  font: 400 13px/1.45 var(--font-body); white-space: normal; text-transform: none; letter-spacing: normal;
+}
 .item > summary > .seen { grid-area: seen; justify-self: end; font-size: 11px; color: var(--faint); display: inline-flex; gap: 4px; align-items: center; padding-top: 4px; }
 .item > summary > .seen input { margin: 0; accent-color: var(--accent); }
 .item.is-seen > summary :is(.item-h, .item-lede) { color: var(--muted); }
