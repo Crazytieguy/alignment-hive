@@ -8,6 +8,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod acquire;
+mod cache_marks;
 mod capture;
 mod claude_settings;
 mod client_window;

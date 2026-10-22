@@ -593,6 +593,15 @@ fn rewrite_gpt_body(
             );
         }
     }
+    if route.family.splits_messages_at_cache_marks() {
+        let added = crate::cache_marks::split_at_cache_marks(&mut document);
+        if added > 0 {
+            tracing::debug!(
+                messages = added,
+                "ended user messages at their inner cache marks"
+            );
+        }
+    }
     let affected = crate::tool_schema::drop_unportable_patterns(&mut document);
     if !affected.is_empty() {
         tracing::debug!(

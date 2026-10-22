@@ -169,6 +169,20 @@ impl ModelFamily {
             Self::Gpt | Self::Grok | Self::OpenAiCompat => false,
         }
     }
+
+    /// Whether a cache mark inside a user message becomes a message boundary
+    /// ([`crate::cache_marks`]), where the backend caches only up to message
+    /// ends and the request's end. Measured on the Codex backend; the
+    /// others' caching is unmeasured.
+    ///
+    /// Matched exhaustively on purpose: a new family must decide.
+    #[must_use]
+    pub const fn splits_messages_at_cache_marks(self) -> bool {
+        match self {
+            Self::Gpt => true,
+            Self::Grok | Self::Muse | Self::OpenAiCompat => false,
+        }
+    }
 }
 
 // No `Debug` outside tests: `ingress_token` and the providers' keys must not
