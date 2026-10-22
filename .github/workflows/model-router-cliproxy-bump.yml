@@ -1,0 +1,130 @@
+# Keeps model-router's CLIProxyAPI pin current without ever tracking "latest".
+#
+# Weekly, scripts/bump-cliproxyapi.py picks the newest CLIProxyAPI release
+# published at least 7 days ago, verifies the four archives against that
+# release's checksums.txt, and rewrites UPSTREAM_VERSION and the vendored
+# hashes in crates/model-router/src/acquire.rs. The managed upstream holds the
+# Codex credential and sees every GPT request, so the week is the point: it
+# gives the ecosystem time to catch and pull a bad release before it is
+# downloaded here.
+#
+# An aged bump that passes the model-router gates is merged by this workflow.
+# That is a small step, not a release: model-router-autotag.yml cuts a release
+# only when plugins/model-router/binary-version changes, so users get the new
+# pin with the next deliberate release, which is where the tool-schema and
+# max_tokens behaviour is re-checked against the new upstream.
+#
+# A newer model can need a release younger than a week. That is manual:
+# dispatch with `version` and `allow-fresh`, and the PR waits for review; this
+# workflow never merges a fresh pin.
+#
+# The gates run here rather than in rust-ci.yml because a PR opened with
+# GITHUB_TOKEN does not trigger other workflows. Opening the PR needs the repo
+# setting "Allow GitHub Actions to create and approve pull requests"; if branch
+# protection refuses the merge, the PR stays open for a human.
+
+name: Bump model-router CLIProxyAPI pin
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact CLIProxyAPI version (e.g. 7.3.13); empty = newest release at least 7 days old'
+        required: false
+        default: ''
+      allow-fresh:
+        description: 'Allow a version younger than 7 days (the PR is never auto-merged)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: model-router-cliproxy-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_ALLOW_FRESH: ${{ inputs.allow-fresh }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Choose and verify the release
+        id: bump
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${INPUT_VERSION:-}" ]; then args+=(--version "$INPUT_VERSION"); fi
+          if [ "${INPUT_ALLOW_FRESH:-false}" = "true" ]; then args+=(--allow-fresh); fi
+          python3 scripts/bump-cliproxyapi.py "${args[@]}"
+
+      - name: Skip when a PR for this version is already open
+        id: gate
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="model-router/cliproxyapi-v$VERSION"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if [ -n "$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            echo "A PR from $branch is already open; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.bump.outputs.changed == 'true' && steps.gate.outputs.skip == 'false'
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.bump.outputs.changed == 'true' && steps.gate.outputs.skip == 'false'
+        with:
+          shared-key: rust-ci
+
+      - name: model-router gates
+        if: steps.bump.outputs.changed == 'true' && steps.gate.outputs.skip == 'false'
+        working-directory: crates/model-router
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: Open the PR, and merge it when the release has aged
+        if: steps.bump.outputs.changed == 'true' && steps.gate.outputs.skip == 'false'
+        env:
+          BRANCH: ${{ steps.gate.outputs.branch }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          PREVIOUS: ${{ steps.bump.outputs.previous }}
+          PUBLISHED: ${{ steps.bump.outputs.published }}
+          FRESH: ${{ steps.bump.outputs.fresh }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$BRANCH"
+          git commit -am "model-router: pin CLIProxyAPI $VERSION (was $PREVIOUS)"
+          git push --force-with-lease origin "$BRANCH"
+          if [ "$FRESH" = "true" ]; then
+            policy="**Fresh release (under 7 days old), dispatched by hand: review before merging.** This workflow never merges it."
+          else
+            policy="Published at least 7 days ago; the model-router gates passed in this run, so the workflow merges it."
+          fi
+          body=$(printf '%s\n\n- Release: https://github.com/router-for-me/CLIProxyAPI/releases/tag/v%s (published %s)\n- Upstream changes: https://github.com/router-for-me/CLIProxyAPI/compare/v%s...v%s\n- The four archive sha256s were checked against the release'"'"'s checksums.txt.\n\nThis changes the pin only. Users get it with the next model-router release (a binary-version bump), which is where the tool-schema and max_tokens behaviour should be re-checked.\n' \
+            "$policy" "$VERSION" "$PUBLISHED" "$PREVIOUS" "$VERSION")
+          gh pr create --base main --head "$BRANCH" \
+            --title "model-router: pin CLIProxyAPI $VERSION" --body "$body"
+          if [ "$FRESH" != "true" ]; then
+            gh pr merge "$BRANCH" --squash --delete-branch \
+              || gh pr comment "$BRANCH" --body "Auto-merge was refused (branch protection?); leaving this for review."
+          fi
