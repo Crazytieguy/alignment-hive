@@ -1,4 +1,5 @@
-//! A loopback gateway Claude Code uses as its `ANTHROPIC_BASE_URL`. Requests
+//! A loopback gateway Claude Code uses as its `ANTHROPIC_BASE_URL`, or
+//! reaches as its `HTTPS_PROXY` (the experimental front in [`mitm`]). Requests
 //! for a routed model ID go to GPT, Grok, or OpenAI-compatible backends
 //! through `CLIProxyAPI` (normally a child the router supervises); everything
 //! else is forwarded to Anthropic. The request path starts in [`proxy`];
@@ -20,6 +21,7 @@ mod exclusions;
 mod headers;
 mod identity;
 mod logins;
+pub mod mitm;
 pub mod muse;
 mod overflow;
 mod prompt_cache;

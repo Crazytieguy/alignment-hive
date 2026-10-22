@@ -18,9 +18,9 @@ const retrying = atom({ plugin: 'model-router', key: 'retrying' } as const, null
 let projectDir = ''
 
 /**
- * Runs the plugin's check and keeps its rows; none when it fails. The check reads
- * ANTHROPIC_BASE_URL from the environment Claude Code passes on, settings' `env` included, and
- * restarts a stopped router.
+ * Runs the plugin's check and keeps its rows; none when it fails. The check reads the wiring
+ * (ANTHROPIC_BASE_URL, or HTTPS_PROXY) from the environment Claude Code passes on, settings'
+ * `env` included, and restarts a stopped router.
  */
 async function check($: EngineInterface): Promise<void> {
   try {
@@ -133,9 +133,9 @@ async function editSettings($: EngineInterface, operation: 'models' | 'windows' 
   }
   if (result.status === 'shared-file') {
     const file = shown(result.file ?? '.claude/settings.json')
-    return `In shared ${file}, remove ANTHROPIC_BASE_URL (and a GPT "model"), then restart Claude Code.`
+    return `In shared ${file}, remove the router's wiring (and a GPT "model"), then restart Claude Code.`
   }
-  return 'ANTHROPIC_BASE_URL is not in your settings files: unset it where you set it, then restart Claude Code'
+  return 'Not wired in your settings: unset ANTHROPIC_BASE_URL or HTTPS_PROXY where you set it, then restart Claude Code.'
 }
 
 export const register: Register = on => {

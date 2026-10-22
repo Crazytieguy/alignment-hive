@@ -4,7 +4,9 @@
 //! route, strips Claude credentials, and sends it to the `CLIProxyAPI`
 //! upstream (or the built-in stub). Responses get the `WebSearch` tap, usage
 //! rewriting and overflow translation (GPT only), and capture. `WebSearch`
-//! sub-calls are answered in [`search`].
+//! sub-calls are answered in [`search`]. CONNECT requests (the HTTPS-proxy
+//! front) are handled in [`connect`], which feeds intercepted requests back
+//! through the same handler.
 
 use std::convert::Infallible;
 use std::future::{Future, IntoFuture as _};
@@ -29,6 +31,7 @@ use crate::stub;
 use crate::usage::{GptPolicies, SseUsageTransformer, estimate_input_tokens};
 use crate::websearch;
 
+mod connect;
 mod search;
 
 pub use search::SearchStreams;
@@ -119,7 +122,14 @@ impl AppState {
         } else {
             None
         };
-        let client = reqwest::Client::builder()
+        let mut client = reqwest::Client::builder();
+        if proxies_through_self(&config) {
+            // Launched from a shell that routes through this router: honoring
+            // it would loop every Claude request back in.
+            tracing::warn!("ignoring HTTPS_PROXY: it points at this router");
+            client = client.no_proxy();
+        }
+        let client = client
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(10))
             // Idle-read timeout: resets on every received chunk, so long SSE
@@ -183,6 +193,25 @@ impl AppState {
         self.pending_searches
             .consume(&websearch::PendingKey::for_subcall(session_id, subcall))
     }
+}
+
+/// Whether the environment's HTTPS proxy is this router's own port on a
+/// loopback address.
+fn proxies_through_self(config: &Config) -> bool {
+    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .filter_map(|value| reqwest::Url::parse(&value).ok())
+        .any(|url| {
+            url.port_or_known_default() == Some(config.port)
+                && url.host_str().is_some_and(|host| {
+                    let host = host.trim_start_matches('[').trim_end_matches(']');
+                    host.eq_ignore_ascii_case("localhost")
+                        || host
+                            .parse::<std::net::IpAddr>()
+                            .is_ok_and(|ip| ip.is_loopback())
+                })
+        })
 }
 
 /// The unauthenticated introspection endpoint: exempt from the ingress gate
@@ -299,12 +328,26 @@ async fn build(
     let state = AppState::new(config, managed).await?;
     let searches = Arc::clone(&state.search_streams);
     Ok((
-        Router::new().fallback(any(handle)).with_state(state),
+        Router::new().fallback(any(dispatch)).with_state(state),
         searches,
     ))
 }
 
-async fn handle(State(state): State<AppState>, request: Request) -> Response {
+/// CONNECT and absolute-form requests go to the HTTPS-proxy front;
+/// everything else is a gateway request.
+async fn dispatch(State(state): State<AppState>, request: Request) -> Response {
+    if request.method() == Method::CONNECT {
+        return connect::connect(&state, request.into_parts().0).await;
+    }
+    if request.uri().scheme().is_some()
+        && request.extensions().get::<connect::Intercepted>().is_none()
+    {
+        return connect::forward(&state, request).await;
+    }
+    handle(state, request).await
+}
+
+async fn handle(state: AppState, request: Request) -> Response {
     let (mut parts, body) = request.into_parts();
 
     if !apply_ingress_gate(&state.config, &mut parts) {
@@ -886,6 +929,9 @@ async fn local_stub_response(
 /// health endpoint stays reachable so `doctor` can tell a service that is
 /// not running from one that rejects its token.
 fn apply_ingress_gate(config: &Config, parts: &mut axum::http::request::Parts) -> bool {
+    if parts.extensions.get::<connect::Intercepted>().is_some() {
+        return true;
+    }
     let Some(token) = &config.ingress_token else {
         return true;
     };

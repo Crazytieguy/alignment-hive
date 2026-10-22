@@ -25,12 +25,18 @@ use crate::config::{
 use crate::context_check::{self, is_superseded_default, recommended_entry};
 
 mod file;
+mod proxy;
 
 #[cfg(test)]
 use file::create_temp;
 use file::{Doc, Read, lock, read, same_file, write};
+use proxy::{EXTRA_CA, HELPER, HELPER_GATE, PROXY, is_our_helper, wired_file};
+pub use proxy::{Install, ProxyEnv, Trust, proxy};
 
 const BASE_URL: &str = "ANTHROPIC_BASE_URL";
+/// Keeps a base-URL session on Claude Code's first-party behaviour; it goes
+/// with the base URL.
+const ASSUME_FIRST_PARTY: &str = "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL";
 const OPTION: &str = "ANTHROPIC_CUSTOM_MODEL_OPTION";
 const OPTION_NAME: &str = "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME";
 
@@ -123,7 +129,7 @@ fn plan_models(
         Read::Found(original, doc) => (original, doc),
     };
     let settings = settings_by_precedence(Some(home), project);
-    let wired = winning_setting(&settings, &["env", BASE_URL]).map(|(file, _)| file.to_path_buf());
+    let wired = wired_file(&settings).map(Path::to_path_buf);
     let project_wired = wired.as_ref().filter(|file| !same_file(file, &path));
     let blocked = |adds: Vec<&'static str>, reason: String| Plan::Blocked { adds, reason };
 
@@ -414,7 +420,7 @@ fn plan_windows(
     config: &Config,
     target: Option<&Path>,
 ) -> WindowsPlan {
-    let Some((wired, _)) = winning_setting(settings, &["env", BASE_URL]) else {
+    let Some(wired) = wired_file(settings) else {
         return WindowsPlan::Current;
     };
     let files = settings_paths(Some(home), project);
@@ -861,9 +867,10 @@ enum BypassPlan {
     Edits(Vec<(PathBuf, String, Doc)>),
 }
 
-/// `settings bypass`: takes this install's `ANTHROPIC_BASE_URL` (one
-/// carrying `/t/<token>` for one of `tokens`) out of every settings file
-/// that has it, and a default `model` naming a routed ID, so the next
+/// `settings bypass`: takes this install's wiring out of every settings file
+/// that has it, either kind (an `ANTHROPIC_BASE_URL` carrying `/t/<token>`
+/// for one of `tokens`; the router's `proxyAuthHelper` with its
+/// `HTTPS_PROXY`), and a default `model` naming a routed ID, so the next
 /// session talks to Anthropic directly. A lower file's copy would win once a
 /// higher one goes, so every file is cleared. The checked-in project file is
 /// shared with collaborators: when it holds either, nothing is edited.
@@ -924,6 +931,31 @@ fn bypass_with(
     Ok(json!({"status": "changed", "reason": CHANGED, "files": written}))
 }
 
+/// Whether `doc` holds this install's `ANTHROPIC_BASE_URL`: one carrying
+/// `/t/<token>` for one of `tokens`.
+fn holds_base_url(doc: &Doc, tokens: &[String]) -> bool {
+    doc.str_at(&["env", BASE_URL])
+        .is_some_and(|url| is_our_base_url(url, tokens))
+}
+
+/// Whether `url` is this install's base URL: one carrying `/t/<token>` for
+/// one of `tokens`.
+fn is_our_base_url(url: &str, tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            url.match_indices(&format!("/t/{token}"))
+                .any(|(at, found)| {
+                    url[at + found.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|next| next == '/')
+                })
+        })
+}
+
 fn plan_bypass(home: Option<&Path>, project: &Path, tokens: &[String]) -> BypassPlan {
     let shared = project.join(".claude/settings.json");
     let user = home.map(user_settings_file);
@@ -939,15 +971,6 @@ fn plan_bypass(home: Option<&Path>, project: &Path, tokens: &[String]) -> Bypass
                 _ => None,
             })
             .collect();
-    let tokens: Vec<&str> = tokens
-        .iter()
-        .map(|token| token.trim())
-        .filter(|token| !token.is_empty())
-        .collect();
-    if tokens.is_empty() {
-        return BypassPlan::NotFound;
-    }
-
     // Routed IDs: every picker row and an older single-slot option, plus
     // (in `is_routed`) every built-in route of any family, enabled or not.
     let mut routed: BTreeSet<String> = BTreeSet::new();
@@ -961,27 +984,20 @@ fn plan_bypass(home: Option<&Path>, project: &Path, tokens: &[String]) -> Bypass
         );
         routed.extend(doc.str_at(&["env", OPTION]).map(str::to_string));
     }
-    let is_ours = |doc: &Doc| {
-        doc.str_at(&["env", BASE_URL]).is_some_and(|url| {
-            tokens.iter().any(|token| {
-                url.match_indices(&format!("/t/{token}"))
-                    .any(|(at, found)| {
-                        url[at + found.len()..]
-                            .chars()
-                            .next()
-                            .is_none_or(|next| next == '/')
-                    })
-            })
-        })
-    };
+    let base_url = |doc: &Doc| holds_base_url(doc, tokens);
+    let proxied = |doc: &Doc| doc.str_at(&[HELPER]).is_some_and(is_our_helper);
     let is_routed = |doc: &Doc| {
         doc.str_at(&["model"])
             .is_some_and(|model| routed.contains(model) || is_built_in_route(model))
     };
 
+    // Without wiring a routed default model is someone else's business.
+    let wired = files
+        .iter()
+        .any(|(_, _, doc)| base_url(doc) || proxied(doc));
     let touched: Vec<(PathBuf, String, Doc)> = files
         .into_iter()
-        .filter(|(_, _, doc)| is_ours(doc) || is_routed(doc))
+        .filter(|(_, _, doc)| wired && (base_url(doc) || proxied(doc) || is_routed(doc)))
         .collect();
     if touched.is_empty() {
         return BypassPlan::NotFound;
@@ -994,10 +1010,29 @@ fn plan_bypass(home: Option<&Path>, project: &Path, tokens: &[String]) -> Bypass
             .into_iter()
             .map(|(path, original, doc)| {
                 let mut edited = doc.clone();
-                if is_ours(&doc)
+                if base_url(&doc)
                     && let Some(env) = edited.get_mut("env")
                 {
                     env.remove(BASE_URL);
+                }
+                if proxied(&doc) {
+                    edited.remove(HELPER);
+                    // The rest of the proxy wiring, where it is the router's.
+                    let loopback = doc
+                        .str_at(&["env", PROXY])
+                        .is_some_and(proxy::is_loopback_proxy);
+                    let our_ca = doc
+                        .str_at(&["env", EXTRA_CA])
+                        .is_some_and(|path| path.ends_with(proxy::CA_SUFFIX));
+                    if let Some(env) = edited.get_mut("env") {
+                        env.remove(HELPER_GATE);
+                        if loopback {
+                            env.remove(PROXY);
+                        }
+                        if our_ca {
+                            env.remove(EXTRA_CA);
+                        }
+                    }
                 }
                 if is_routed(&doc) {
                     edited.remove("model");

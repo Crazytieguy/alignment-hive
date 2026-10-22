@@ -80,19 +80,44 @@ here works until the binary resolves.
 5. **Wire Claude Code (ask first)**: find where the plugin is installed by
    checking which settings file lists it — `~/.claude/settings.json`
    (global) or the project's `.claude/settings.json` /
-   `.claude/settings.local.json` — and add to that same file's `env` block,
-   using `.base_url` from `$ROUTER doctor --json` (it embeds a per-install
-   ingress token, so requests from other local processes are rejected):
-   ```json
-   "ANTHROPIC_BASE_URL": "<base_url from doctor --json>",
-   "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1",
-   "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"
-   ```
-   `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude sessions on
-   Claude Code's first-party behaviour (refusal fallback, WebSearch modes,
-   API betas), which it otherwise withholds behind a custom base URL.
-   `CLAUDE_CODE_GATEWAY_HINT_HEADERS` lets the router recognize compaction
-   requests.
+   `.claude/settings.local.json`; the wiring goes in that same file. There
+   are two wirings; offer the HTTPS proxy first:
+   - **HTTPS proxy (recommended).** Claude Code keeps talking to
+     `api.anthropic.com` through the router as its `HTTPS_PROXY`, so Remote
+     Control keeps working and desktop-app sessions route too. The router
+     decrypts only Claude Code's own `api.anthropic.com` traffic, with a
+     local certificate authority that can vouch for no other host;
+     everything else (your tools' traffic included) passes through
+     untouched. The trade: while the router is down, Claude Code and the
+     tools it runs have no network. On macOS, first `$ROUTER trust-ca`: it
+     adds that CA to the login keychain, and macOS asks for the user's
+     password — say so before running it. On Linux (and WSL, which runs
+     the Linux build) there is no trust step, as the wiring names the CA
+     in `NODE_EXTRA_CA_CERTS`; tell the user this path is untested there,
+     and that the base-URL wiring is the tested one. Then `$ROUTER settings
+     proxy --apply --project-dir <project>` (add `--file <that file>` for a
+     file other than the one it reports). It sets `HTTPS_PROXY`,
+     `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER`,
+     `CLAUDE_CODE_GATEWAY_HINT_HEADERS` (lets the router recognize
+     compaction requests) and a `proxyAuthHelper` that prints the router's
+     credential, and removes an earlier base-URL wiring. When it prints
+     `"applied": false`, its `reason` says what stands in the way: another
+     proxy or a `NO_PROXY` the next session would honour instead, or a
+     different `NODE_EXTRA_CA_CERTS`. These are the user's own settings, so
+     don't remove them unasked: offer the base-URL wiring instead.
+   - **Base URL.** Add to the file's `env` block, using `.base_url` from
+     `$ROUTER doctor --json` (it embeds a per-install ingress token, so
+     requests from other local processes are rejected):
+     ```json
+     "ANTHROPIC_BASE_URL": "<base_url from doctor --json>",
+     "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1",
+     "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1"
+     ```
+     `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` keeps Claude sessions on
+     Claude Code's first-party behaviour (refusal fallback, WebSearch
+     modes, API betas), which it otherwise withholds behind a custom base
+     URL. Remote Control refuses to start under this wiring, and the
+     desktop app ignores it.
    Then size the routes: `$ROUTER settings windows --apply --project-dir
    <project>`. It sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (every route's
    context window) to 1000000 and gives each route a `modelSettings`
@@ -137,7 +162,8 @@ here works until the binary resolves.
    block exists it silently overrides shell-provided values. (If the user
    declined step 5, prefixing `ANTHROPIC_BASE_URL=<base_url>` onto the
    routing test is instead required.)
-   Routing: `claude -p 'reply with ok' --model gpt-6-astra`.
+   Routing: `claude -p 'reply with ok' --model gpt-6-astra`. Under the
+   HTTPS-proxy wiring, also offer `claude remote-control` as a check.
    Picker rows: `/model` in a fresh interactive session lists them after
    the Claude models.
 7. Ask whether the user also wants (a) open-weights models (Kimi, GLM, ...)
@@ -152,10 +178,21 @@ here works until the binary resolves.
    project's `.claude/agents/`): offer to replace them following
    `references/custom-agents.md`.
 
+## Moving to the HTTPS-proxy wiring
+
+When doctor's `wiring` check names `ANTHROPIC_BASE_URL` (the session band
+offers this too), the rest of the install stays as it is: run the
+HTTPS-proxy bullet of step 5 (`trust-ca` on macOS, then `settings proxy
+--apply`), which replaces the base URL in place. Same notes as there: say
+that macOS asks for a password, mark Linux and WSL as untested, and on a
+`reason`, keep the base-URL wiring rather than touching the user's own
+proxy settings. Staying on the base URL is fine too; Remote Control and the
+desktop app are what it costs. Then step 6's restart and smoke test.
+
 ## Repair
 
 `$ROUTER doctor` names the failing layer (config, binary cache, auth,
-service, upstream). Fix only that layer using the matching step above;
+service, upstream, wiring). Fix only that layer using the matching step above;
 `$ROUTER service restart` after config changes. A picker row that fails on its
 first turn with "There's an issue with the selected model" names a route the
 gateway doesn't serve: compare the rows with doctor's `routed-models`. A
@@ -166,14 +203,16 @@ the user's call.
 
 ## Disable / uninstall
 
-1. `$ROUTER settings bypass --project-dir <project>` removes
-   `ANTHROPIC_BASE_URL` from every settings file that has it, and a `model`
-   key naming a routed ID (else new sessions start on a model Anthropic
-   doesn't serve) — this alone restores direct Anthropic access. On
-   `"status": "shared-file"` it edits nothing: the checked-in project file
-   holds them, so ask before removing them there. Optionally remove the
-   other keys step 5 added, `modelPicker` included.
-2. `$ROUTER service uninstall`.
+1. `$ROUTER settings bypass --project-dir <project>` removes the wiring
+   (`ANTHROPIC_BASE_URL`, or `HTTPS_PROXY` with its `proxyAuthHelper`) from
+   every settings file that has it, and a `model` key naming a routed ID
+   (else new sessions start on a model Anthropic doesn't serve) — this
+   alone restores direct Anthropic access. On `"status": "shared-file"` it
+   edits nothing: the checked-in project file holds them, so ask before
+   removing them there. Optionally remove the other keys step 5 added,
+   `modelPicker` included.
+2. `$ROUTER service uninstall`. On macOS, `$ROUTER trust-ca --remove` takes
+   the router's CA out of the keychain.
 3. Optionally delete `~/.config/model-router`, `~/.local/state/model-router`,
    and `~/.cache/model-router` (the state dir includes the Codex auth login —
    warn before deleting).

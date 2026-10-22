@@ -66,6 +66,16 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Print the Proxy-Authorization value for Claude Code's
+    /// `proxyAuthHelper` (the HTTPS-proxy front).
+    ProxyAuthorization,
+    /// Trust the HTTPS-proxy CA in the login keychain (macOS; asks for your
+    /// password), creating it first if needed.
+    TrustCa {
+        /// Remove the trust and the certificate from the keychain instead.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Edit Claude Code's settings files for the router; prints one JSON
     /// object.
     Settings {
@@ -102,8 +112,23 @@ enum SettingsCommand {
         #[arg(long)]
         file: Option<PathBuf>,
     },
-    /// Take this install's `ANTHROPIC_BASE_URL`, and a default model naming a
-    /// routed ID, out of the project's and the user's settings files.
+    /// Wire Claude Code to the router as its HTTPS proxy, replacing this
+    /// install's `ANTHROPIC_BASE_URL` (a report, unless --apply).
+    Proxy {
+        /// Make the change rather than report it.
+        #[arg(long)]
+        apply: bool,
+        /// The project whose settings files decide the wiring (default: cwd).
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+        /// The settings file to write, rather than the one that wires the
+        /// router now (or the user's).
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Take this install's wiring (`ANTHROPIC_BASE_URL`, or the HTTPS-proxy
+    /// keys), and a default model naming a routed ID, out of the project's
+    /// and the user's settings files.
     Bypass {
         /// The project whose settings files to edit.
         #[arg(long)]
@@ -260,6 +285,16 @@ async fn main() -> anyhow::Result<()> {
             ServiceCommand::Restart => service::restart(),
             ServiceCommand::Refresh => service::refresh(&dirs),
         },
+        Command::ProxyAuthorization => {
+            let config = Config::load(&config_path)?;
+            let token = config
+                .ingress_token
+                .or_else(|| state::load_ingress_token(&dirs))
+                .context("no ingress token yet: start the router once")?;
+            println!("{}", model_router::mitm::proxy_authorization(&token));
+            Ok(())
+        }
+        Command::TrustCa { remove } => trust_ca(&dirs, remove),
         Command::Settings { command } => {
             let report = settings(&dirs, &config_path, command)?;
             println!("{}", serde_json::to_string(&report)?);
@@ -284,6 +319,13 @@ fn settings(
             .ok()
             .filter(|output| output.status.success())?;
         settings_edit::Version::parse(&String::from_utf8_lossy(&output.stdout))
+    };
+    // The token the service minted, and one pinned in the config.
+    let tokens = |config: &Config| -> Vec<String> {
+        state::load_ingress_token(dirs)
+            .into_iter()
+            .chain(config.ingress_token.clone())
+            .collect()
     };
     let project = |project_dir: Option<PathBuf>| match project_dir {
         Some(dir) => std::path::absolute(dir),
@@ -323,15 +365,67 @@ fn settings(
                 apply.then_some(lock.as_path()),
             )
         }
+        SettingsCommand::Proxy {
+            apply,
+            project_dir,
+            file,
+        } => {
+            let home = home.context("HOME is not set")?;
+            let project = project(project_dir)?;
+            let config = config.map_err(|error| anyhow::anyhow!(error))?;
+            let ca_cert = model_router::mitm::ca_cert_path(&model_router::mitm::ca_dir(dirs));
+            let install = settings_edit::Install {
+                address: std::net::SocketAddr::new(config.bind_address, config.port),
+                tokens: &tokens(&config),
+                launcher: &dirs.launcher_dir().join("bootstrap.sh"),
+                ca_cert: &ca_cert,
+                trust: settings_edit::Trust::of(&ca_cert),
+            };
+            settings_edit::proxy(
+                &settings_edit::ProxyEnv::read(),
+                &home,
+                &project,
+                file.map(std::path::absolute).transpose()?.as_deref(),
+                &install,
+                apply.then_some(lock.as_path()),
+            )
+        }
         SettingsCommand::Bypass { project_dir } => {
-            // The token the service minted, and one pinned in the config.
-            let tokens: Vec<String> = state::load_ingress_token(dirs)
-                .into_iter()
-                .chain(config.ok().and_then(|config| config.ingress_token))
-                .collect();
+            let tokens = config.map_or_else(
+                |_| state::load_ingress_token(dirs).into_iter().collect(),
+                |config| tokens(&config),
+            );
             settings_edit::bypass(home.as_deref(), &project_dir, &tokens, &lock)
         }
     }
+}
+
+/// `trust-ca`: the keychain trusts the HTTPS-proxy CA (created first if
+/// needed), or with `remove` no longer holds it.
+fn trust_ca(dirs: &Dirs, remove: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        cfg!(target_os = "macos"),
+        "the keychain is macOS's; elsewhere `model-router settings proxy --apply` names the CA \
+         in NODE_EXTRA_CA_CERTS"
+    );
+    let ca_dir = model_router::mitm::ca_dir(dirs);
+    if remove {
+        let ca_cert = model_router::mitm::ca_cert_path(&ca_dir);
+        if ca_cert.exists() {
+            model_router::mitm::untrust(&ca_cert)?;
+        }
+        println!("The keychain no longer trusts the model-router CA.");
+    } else {
+        let ca_cert = model_router::mitm::ensure_ca(&ca_dir)?;
+        if !model_router::mitm::is_trusted(&ca_cert)? {
+            model_router::mitm::trust(&ca_cert)?;
+        }
+        println!(
+            "The keychain trusts {} for api.anthropic.com.",
+            ca_cert.display()
+        );
+    }
+    Ok(())
 }
 
 async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()> {
@@ -370,6 +464,18 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
         "gateway base URL (for ANTHROPIC_BASE_URL): {}",
         proxy::tokened_base_url(&address, &token)
     );
+    // A CA that cannot be loaded leaves the base-URL wiring working; only
+    // Claude Code's tunnels through the proxy wiring are refused.
+    match model_router::mitm::Interceptor::load(&model_router::mitm::ca_dir(dirs), &token) {
+        Ok(interceptor) => {
+            tracing::info!(
+                ca = %interceptor.ca_cert().display(),
+                "HTTPS proxy (for HTTPS_PROXY): http://{address}"
+            );
+            config.interceptor = Some(std::sync::Arc::new(interceptor));
+        }
+        Err(error) => tracing::error!("HTTPS proxy unavailable: {error:#}"),
+    }
     config.ingress_token = Some(token);
 
     // Ask the hosts for the windows of the provider routes that did not name

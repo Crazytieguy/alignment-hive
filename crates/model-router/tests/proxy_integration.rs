@@ -3614,3 +3614,169 @@ async fn api_key_mode_refuses_gpt_while_a_codex_login_lists_its_own_exclusions()
     let (status, body) = send(&restarted, effort_body("gpt"), &[]).await;
     assert_passed_the_gate(status, &body);
 }
+
+/// The HTTPS-proxy front: a CONNECT to api.anthropic.com carrying the
+/// router credential is terminated with the local CA and routed like a
+/// base-URL request (no ingress token in the path); a wrong credential is
+/// refused; anything else is a blind tunnel to the named host.
+#[tokio::test]
+async fn https_proxy_intercepts_only_credentialed_anthropic_tunnels() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    fn ok(_: &axum::http::request::Parts, _: &Bytes) -> Response {
+        Response::new(Body::from("fake-upstream"))
+    }
+    let (fake_address, observed) = spawn_fake(ok).await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let interceptor = model_router::mitm::Interceptor::load(ca_dir.path(), "testtoken").unwrap();
+    let ca_pem = std::fs::read(interceptor.ca_cert()).unwrap();
+    let config = Config {
+        anthropic_upstream_base: format!("http://{fake_address}"),
+        upstreams: external_upstreams(format!("http://{fake_address}")),
+        ingress_token: Some("testtoken".to_string()),
+        models: vec![ModelRoute {
+            routing_id: "claude-gpt-test".to_string(),
+            upstream: "cliproxy".to_string(),
+            upstream_model: "gpt-test".to_string(),
+            display_name: "GPT Test".to_string(),
+            ..Default::default()
+        }],
+        interceptor: Some(Arc::new(interceptor)),
+        ..Config::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let router = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        model_router::proxy::serve_listener(listener, config, None, std::future::pending())
+            .await
+            .unwrap();
+    });
+
+    let client = |credential: &str| {
+        reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::https(format!("http://{router}"))
+                    .unwrap()
+                    .custom_http_auth(credential.parse().unwrap()),
+            )
+            .add_root_certificate(reqwest::Certificate::from_pem(&ca_pem).unwrap())
+            .build()
+            .unwrap()
+    };
+
+    // Credentialed: intercepted, and routed by model like the base-URL path.
+    let trusted = client("Bearer testtoken");
+    for model in ["claude-sonnet-4-5", "claude-gpt-test"] {
+        let response = trusted
+            .post("https://api.anthropic.com/v1/messages")
+            .header("authorization", "Bearer claude-secret")
+            .body(format!(r#"{{"model":"{model}","messages":[]}}"#))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{model}");
+    }
+    {
+        let observed = observed.lock().await;
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].uri, "/v1/messages");
+        assert_eq!(observed[0].headers["authorization"], "Bearer claude-secret");
+        let routed: serde_json::Value = serde_json::from_slice(&observed[1].body).unwrap();
+        assert_eq!(routed["model"], "gpt-test");
+        assert_eq!(
+            observed[1].headers["authorization"],
+            "Bearer gateway-secret"
+        );
+    }
+
+    // A wrong credential is refused, not tunnelled past the router.
+    let error = client("Bearer stale")
+        .get("https://api.anthropic.com/v1/models")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("ProxyAuthRequired"),
+        "{error:?}"
+    );
+
+    // Without the credential (and with it, to another host): a blind tunnel.
+    for credential in ["", "Proxy-Authorization: Bearer testtoken\r\n"] {
+        let mut stream = tokio::net::TcpStream::connect(router).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "CONNECT {fake_address} HTTP/1.1\r\nHost: {fake_address}\r\n{credential}\r\n\
+                     GET /blind HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.ends_with("fake-upstream"), "{reply}");
+    }
+    {
+        let observed = observed.lock().await;
+        assert_eq!(observed.len(), 4);
+        assert!(observed[2..].iter().all(|request| request.uri == "/blind"));
+    }
+
+    // Plain HTTP through the same proxy (absolute form, as Claude Code sends
+    // an http:// MCP server's requests): forwarded, never the gateway, and
+    // the proxy credential stays behind.
+    let plain = reqwest::Client::builder()
+        .proxy(
+            reqwest::Proxy::http(format!("http://{router}"))
+                .unwrap()
+                .custom_http_auth("Bearer testtoken".parse().unwrap()),
+        )
+        .build()
+        .unwrap();
+    let response = plain
+        .post(format!("http://{fake_address}/mcp?x=1"))
+        .body("ping")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text().await.unwrap(), "fake-upstream");
+    let observed = observed.lock().await;
+    assert_eq!(observed.len(), 5);
+    assert_eq!(observed[4].uri, "/mcp?x=1");
+    assert_eq!(&observed[4].body[..], b"ping");
+    assert!(!observed[4].headers.contains_key("proxy-authorization"));
+}
+
+/// Without a loadable CA, Claude Code's credentialed Anthropic tunnel fails
+/// visibly (503) instead of skipping the router.
+#[tokio::test]
+async fn credentialed_anthropic_tunnels_fail_without_a_ca() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let router = listener.local_addr().unwrap();
+    let config = Config {
+        upstreams: stub_upstreams(),
+        ingress_token: Some("testtoken".to_string()),
+        ..Config::default()
+    };
+    tokio::spawn(async move {
+        model_router::proxy::serve_listener(listener, config, None, std::future::pending())
+            .await
+            .unwrap();
+    });
+    let mut stream = tokio::net::TcpStream::connect(router).await.unwrap();
+    stream
+        .write_all(
+            b"CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\
+              Proxy-Authorization: Bearer testtoken\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut reply = [0; 12];
+    stream.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply, b"HTTP/1.1 503");
+}

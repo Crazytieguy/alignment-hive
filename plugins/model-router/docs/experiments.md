@@ -2300,3 +2300,69 @@ are from round 2's revision of the branch.
     later-turn cache hits were patchy: e.g. 0 of 13,699, 2,036 of 9,815 and
     372 of 22,444 cached, beside full hits like 22,004 of 23,734.
   - Quota for the round: 5-hour window 0% → 8%, weekly 0% → 2%.
+
+## The HTTPS-proxy wiring (2026-10-22, Claude Code 2.1.307/2.1.308, desktop app on macOS)
+
+Method: the router's CONNECT front on a test port, nested `claude -p` runs
+with a scratch `CLAUDE_CONFIG_DIR` and the wiring in `--settings`, the real
+desktop app driven through a project's `.claude/settings.local.json`
+(computer use for clicks, `screencapture` to see it: the app's window is
+black in computer-use screenshots), mitmproxy for the credential timing,
+and reads of the minified 2.1.308 source.
+
+### Why the base-URL wiring falls short
+- Remote Control refuses to start unless `ANTHROPIC_BASE_URL` is unset or
+  names `api.anthropic.com`: "Remote Control is only available when using
+  Claude via api.anthropic.com". The gate reads the variable alone;
+  `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` does not satisfy it.
+- The desktop app launches Claude Code with
+  `ANTHROPIC_BASE_URL=https://api.anthropic.com` and drops every settings
+  `env` key its launch env already sets, so the router never sees desktop
+  sessions. It sets `NODE_EXTRA_CA_CERTS` to its own bundle built from the
+  keychain, and `HTTPS_PROXY` only when macOS has a system proxy (or PAC);
+  without one, a settings `HTTPS_PROXY` reaches the session.
+
+### The proxy wiring
+- `proxyAuthHelper` (schema: "Shell command that outputs a
+  Proxy-Authorization header value (EAP)") runs only with
+  `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER=1`; its value is cached 5 minutes
+  and sent preemptively on Claude Code's CONNECTs. Processes Claude Code
+  spawns (Bash, MCP servers) inherit `HTTPS_PROXY` but neither the helper
+  nor the CA, so their tunnels must stay blind: `curl` and Python's
+  `urllib` to `api.anthropic.com` from the Bash tool got Anthropic's real
+  401 through blind tunnels.
+- A few CONNECTs leave before the helper's value is cached, uncredentialed
+  (`/v1/mcp_servers`, `/api/eval/...`, preconnects); every `/v1/messages`
+  carried the credential.
+- Trust: Claude Code loads the system store by default, so a CA in the
+  login keychain covers terminal sessions, and the desktop app's bundle
+  is built from the keychain, so it covers those too. A CA in settings-env
+  `NODE_EXTRA_CA_CERTS` (not in the keychain) was trusted too: the Linux
+  path. Without either, every request failed: "SSL error
+  (CERT_SIGNATURE_FAILURE)".
+- Remote Control under the proxy wiring: "Connected", and its session
+  traffic (`/v1/code/sessions/...` worker PUT/GET, `worker/events`, the
+  `worker/events/stream` SSE, heartbeats every ~20s) is intercepted; a
+  message sent from the phone reached the session. After a router restart
+  the event stream reconnected by itself within ~25s.
+- Desktop app: a GPT subagent routed (`desktop-pong`), Bash `curl` stayed
+  blind, the Remote Control toggle connected.
+- Router down: "Request failed · Retrying (n/10)" in the desktop app and
+  "Couldn't connect through your proxy (ERR_PROXY_TUNNEL)" in `-p`; a
+  router back mid-retry answered. Tools that honour `HTTPS_PROXY` lose
+  the network meanwhile.
+- `CLAUDE_CODE_GATEWAY_HINT_HEADERS` defaults off for a first-party base
+  URL (a feature flag aside), so the proxy wiring sets it for the
+  compaction header.
+- Proxy selection reads `https_proxy`, then `HTTPS_PROXY`; `NO_PROXY` and
+  `no_proxy` combine, with `*` and domain suffixes. Claude Code's MCP
+  transport sends `http://` URLs to the same proxy in absolute form
+  (`GET http://127.0.0.1:9999/mcp`), so the front forwards those too.
+
+### Alternatives ruled out
+- `ANTHROPIC_UNIX_SOCKET` (the `claude ssh` transport) carries no
+  claude.ai login: the forwarder would hold the user's OAuth token.
+- A mod's `turn.step` hook can rewrite `model`/`effort` or answer a
+  request, but sees no request body (system prompt, tool schemas, cache
+  marks), so it cannot forward one faithfully.
+- `modelSettings` has no per-model endpoint.

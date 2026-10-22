@@ -186,7 +186,7 @@ describe('model-router settings buttons', () => {
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:down:bypass' })
     expect(toasts[0]).toBe(
-      'In shared .claude/settings.json, remove ANTHROPIC_BASE_URL (and a GPT "model"), then restart Claude Code.',
+      `In shared .claude/settings.json, remove the router's wiring (and a GPT "model"), then restart Claude Code.`,
     )
     await ui.unmount()
   })

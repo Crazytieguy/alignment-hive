@@ -22,28 +22,52 @@ if ! bash "$BOOTSTRAP" platform-check >/dev/null 2>&1; then
 fi
 
 BASE="${ANTHROPIC_BASE_URL:-}"
-
-if [ -z "$BASE" ]; then
-  setup_notice setup action "not configured" "Run setup"
-  exit 0
-fi
-
-# A non-loopback base URL is some other gateway; stay out of the way.
-case "$BASE" in
-  http://127.*|http://\[::1\]*) ;;
-  *) exit 0 ;;
-esac
-
-# Only manage a gateway that is actually ours: the base URL must carry this
-# install's ingress token. Another loopback proxy (or a token pinned in the
-# config that we can't read here) is left alone — no restarts, no advice.
+# Claude Code takes the lowercase variable first.
+PROXY="${https_proxy:-${HTTPS_PROXY:-}}"
+PROJECT="${CLAUDE_PROJECT_DIR:-$PWD}"
 TOKEN=$(tr -d '[:space:]' < "${XDG_STATE_HOME:-$HOME/.local/state}/model-router/ingress-token" 2>/dev/null || echo "")
+
+# Which wiring this session runs on, and the router URL it implies. Only a
+# gateway that is actually ours is managed: a base URL must carry this
+# install's ingress token, and the proxy wiring needs the token for its
+# health URL. Another gateway, a loopback proxy of someone else's (or a token
+# pinned in the config that we can't read here) is left alone: no restarts,
+# no advice.
 case "$BASE" in
-  *"/t/$TOKEN"*) [ -n "$TOKEN" ] || exit 0 ;;
+  http://127.*|http://\[::1\]*)
+    case "$BASE" in
+      *"/t/$TOKEN"*) [ -n "$TOKEN" ] || exit 0 ;;
+      *) exit 0 ;;
+    esac
+    WIRING=base-url
+    ROUTER="${BASE%/}"
+    ;;
+  ""|https://api.anthropic.com|https://api.anthropic.com/)
+    # The desktop app pins the second.
+    case "$PROXY" in
+      http://127.*|http://localhost*|http://\[::1\]*) ;;
+      *) PROXY="" ;;
+    esac
+    if [ -n "$PROXY" ] && [ -n "${CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER:-}" ] && [ -n "$TOKEN" ]; then
+      WIRING=proxy
+      ROUTER="${PROXY%/}/t/$TOKEN"
+    elif [ -n "$TOKEN" ] && grep -qsF "/t/$TOKEN" "$HOME/.claude/settings.json" \
+      "$PROJECT/.claude/settings.json" "$PROJECT/.claude/settings.local.json"; then
+      # The settings carry this install's base URL, yet the session runs
+      # without it: the desktop app drops it in favour of its own.
+      setup_notice desktop action "is off in the desktop app, which ignores ANTHROPIC_BASE_URL; setup can wire it as a proxy instead" "Run setup"
+      exit 0
+    else
+      setup_notice setup action "not configured" "Run setup"
+      exit 0
+    fi
+    ;;
+  # Some other gateway; stay out of the way.
   *) exit 0 ;;
 esac
 
-HEALTH=$(curl -sf --max-time 2 "${BASE%/}/__model-router/health" 2>/dev/null || echo "")
+# Straight to the router, past any proxy (it may be the router itself).
+HEALTH=$(curl -sf --noproxy '*' --max-time 2 "$ROUTER/__model-router/health" 2>/dev/null || echo "")
 
 if [ -n "$HEALTH" ]; then
   RUNNING_VERSION=$(printf '%s' "$HEALTH" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
@@ -66,7 +90,7 @@ if [ -n "$HEALTH" ]; then
   # Whether `settings $1` needs a change, its report left in OUT.
   needed() {
     [ "$RUNNING_VERSION" = "$PLUGIN_VERSION" ] &&
-      OUT=$(bash "$BOOTSTRAP" settings "$1" --project-dir "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null) &&
+      OUT=$(bash "$BOOTSTRAP" settings "$1" --project-dir "$PROJECT" 2>/dev/null) &&
       printf '%s' "$OUT" | grep -q '"needed":true'
   }
   # Adds the row for OUT: id, text, and the button's action id and label,
@@ -112,6 +136,26 @@ if [ -n "$HEALTH" ]; then
       add_row windows "context windows need setup" windows "Set"
     fi
   fi
+  SETUP='{"id": "setup", "label": "Run setup", "kind": "command", "command": "/model-router:setup"}'
+  if [ "$WIRING" = base-url ]; then
+    # The base-URL wiring keeps Remote Control off and the desktop app away
+    # from the router. Setup moves it to the HTTPS proxy: not a button's
+    # edit, as macOS asks for a password to trust the router's CA. Offered
+    # only where setup can finish it; a conflict (another proxy, a NO_PROXY
+    # exempting Anthropic) stays quiet, and doctor names it.
+    if needed proxy && printf '%s' "$OUT" | grep -qE '"canApply":true|"untrusted":true'; then
+      ROWS=$(printf '%s{"id": "proxy", "severity": "action", "text": "%s", "version": "%s", "actions": [%s]},' \
+        "$ROWS" "can keep Remote Control on and route in the desktop app too" "$PLUGIN_VERSION" "$SETUP")
+    fi
+  elif [ "$RUNNING_VERSION" = "$PLUGIN_VERSION" ] &&
+    OUT=$(bash "$BOOTSTRAP" settings proxy --project-dir "$PROJECT" 2>/dev/null) &&
+    printf '%s' "$OUT" | grep -q '"reason"'; then
+    # The proxy wiring, but the next session would fail it (an untrusted
+    # CA fails every request) or skip it (another proxy, a NO_PROXY).
+    ROWS=$(printf '%s{"id": "proxy-broken", "severity": "problem", "text": "%s", "actions": [%s, %s]},' \
+      "$ROWS" "isn't routing: the HTTPS-proxy wiring is not in effect (model-router doctor says why)" "$SETUP" \
+      '{"id": "bypass", "label": "Bypass router", "kind": "plugin"}')
+  fi
   [ -n "$ROWS" ] && printf '{"notices": [%s]}\n' "${ROWS%,}"
   exit 0
 fi
@@ -119,12 +163,12 @@ fi
 # Configured but unreachable: one silent restart attempt, then warn.
 bash "$BOOTSTRAP" service restart >/dev/null 2>&1
 sleep 1
-if curl -sf --max-time 2 "${BASE%/}/__model-router/health" >/dev/null 2>&1; then
+if curl -sf --noproxy '*' --max-time 2 "$ROUTER/__model-router/health" >/dev/null 2>&1; then
   exit 0
 fi
-# No setup button: setup is a skill, and the model is out of reach while the router is down.
-# Bypass router takes ANTHROPIC_BASE_URL out of the settings (hooks/register.tsx); Try again runs
-# this check once more, which is one more restart attempt.
+# No setup button: setup is a skill, and the model is out of reach while the router is down
+# (under the proxy wiring, Anthropic too). Bypass router takes the wiring out of the settings
+# (hooks/register.tsx); Try again runs this check once more, which is one more restart attempt.
 printf '{"notices": [{"id": "down", "severity": "urgent", "text": "%s", "actions": [{"id": "bypass", "label": "Bypass router", "kind": "plugin"}, {"id": "retry", "label": "Try again", "kind": "plugin"}]}]}\n' \
   "not running and could not be restarted, so requests fail"
 exit 0

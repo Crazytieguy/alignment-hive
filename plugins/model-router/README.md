@@ -1,10 +1,9 @@
 # model-router
 
 > **Experimental.** This routes all your Claude Code traffic through a local
-> gateway; a bug here breaks your sessions until you remove one settings line
-> (`ANTHROPIC_BASE_URL`), which always restores direct Anthropic access.
->
-> Remote Control doesn't work while model-router is installed.
+> gateway; a bug here breaks your sessions until you take its wiring out of
+> your settings (`ANTHROPIC_BASE_URL`, or `HTTPS_PROXY` and
+> `proxyAuthHelper`), which always restores direct Anthropic access.
 
 model-router lets Claude Code delegate to GPT models as native subagents,
 alongside Claude models, in the same session. It runs a small loopback
@@ -62,11 +61,27 @@ present themselves as Claude.
 Run `/model-router:setup` and follow along; it also covers repair and
 uninstall. `model-router doctor` diagnoses the whole stack in one shot.
 
+Claude Code reaches the gateway one of two ways:
+
+- **As its HTTPS proxy** (recommended). Claude Code still talks to
+  `api.anthropic.com`, so Remote Control keeps working and sessions in the
+  Claude desktop app route too. The gateway decrypts only Claude Code's own
+  `api.anthropic.com` traffic, with a local certificate authority that is
+  restricted to that one host (on macOS, setup adds it to your login
+  keychain, which asks for your password); every other connection,
+  including your tools' own Anthropic calls, passes through untouched.
+  While the gateway is down, Claude Code and the tools it runs have no
+  network until it restarts or you bypass it. Untested on Linux and WSL.
+- **As its `ANTHROPIC_BASE_URL`**, the original wiring. Remote Control
+  refuses to start under it, and the desktop app ignores it. Earlier
+  installs keep working on it; setup moves them to the proxy when you ask.
+
 ## Compliance
 
-Both sides ride supported paths. The Claude side is a standard
-`ANTHROPIC_BASE_URL` gateway configuration: requests are forwarded
-byte-exact and billed to your own subscription, with nothing impersonated.
+Both sides ride supported paths. The Claude side is a standard gateway
+configuration, `ANTHROPIC_BASE_URL` or an HTTPS proxy with your own
+certificate authority: requests are forwarded byte-exact and billed to your
+own subscription, with nothing impersonated.
 The GPT side spends your own Codex subscription through its own OAuth
 login — an arrangement OpenAI has publicly blessed regardless of the harness
 driving it: Codex lead Thibault Sottiaux

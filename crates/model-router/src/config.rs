@@ -250,6 +250,13 @@ pub struct Config {
     #[serde(default)]
     pub web_search: WebSearchConfig,
 
+    /// The HTTPS-proxy front's CA and credential (the CONNECT handling in
+    /// [`crate::proxy`]), loaded by `serve`. `None` while the CA cannot be
+    /// loaded: Claude Code's own tunnels are refused then, the rest still
+    /// pass.
+    #[serde(skip)]
+    pub interceptor: Option<std::sync::Arc<crate::mitm::Interceptor>>,
+
     /// Deprecated, with `context-window-scaling`: the window Claude Code
     /// believes routed models have, which scaled routes report usage
     /// against. Normally absent, so the service reads Claude Code's own

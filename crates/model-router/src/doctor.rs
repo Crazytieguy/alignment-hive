@@ -234,6 +234,9 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
     }
 
     if let Some(config) = config {
+        if let Some(home) = home.as_deref() {
+            checks.push(wiring_check(dirs, &config, home, &project));
+        }
         checks.push(shipped_agent_routes_check(&config));
         checks.extend(context_window_checks(
             config,
@@ -252,6 +255,77 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         healthy,
         base_url,
         checks,
+    }
+}
+
+/// How Claude Code reaches the router, from the settings files and the
+/// environment (`settings proxy`'s report): the HTTPS-proxy wiring passes
+/// unless the next session would skip or fail it (an untrusted CA fails
+/// every request); the base-URL wiring passes with a note that it keeps
+/// Remote Control off and the desktop app away; no wiring is a note too,
+/// as setup wires last.
+fn wiring_check(
+    dirs: &Dirs,
+    config: &Config,
+    home: &std::path::Path,
+    project: &std::path::Path,
+) -> Check {
+    let ca_cert = crate::mitm::ca_cert_path(&crate::mitm::ca_dir(dirs));
+    let tokens: Vec<String> = config
+        .ingress_token
+        .clone()
+        .into_iter()
+        .chain(crate::state::load_ingress_token(dirs))
+        .collect();
+    let install = crate::settings_edit::Install {
+        address: std::net::SocketAddr::new(config.bind_address, config.port),
+        tokens: &tokens,
+        launcher: &dirs.launcher_dir().join("bootstrap.sh"),
+        ca_cert: &ca_cert,
+        trust: crate::settings_edit::Trust::of(&ca_cert),
+    };
+    let env = crate::settings_edit::ProxyEnv::read();
+    let report = match crate::settings_edit::proxy(&env, home, project, None, &install, None) {
+        Ok(report) => report,
+        Err(error) => {
+            return Check {
+                name: "wiring",
+                ok: false,
+                warn: false,
+                detail: format!("reading the settings failed: {error:#}"),
+            };
+        }
+    };
+    let reason = report["reason"].as_str();
+    let (ok, warn, detail) = match (report["wiring"].as_str(), reason) {
+        (Some("proxy"), None) => (
+            true,
+            false,
+            "HTTPS proxy (Remote Control and the desktop app included)".to_string(),
+        ),
+        (Some("proxy"), Some(reason)) => (false, false, format!("HTTPS proxy, but {reason}")),
+        (Some("base-url"), _) => (
+            true,
+            true,
+            format!(
+                "ANTHROPIC_BASE_URL, which keeps Remote Control off and the desktop app off the \
+                 router; `model-router settings proxy --apply` moves to the HTTPS-proxy wiring{}",
+                reason.map_or_else(String::new, |reason| format!(
+                    " once this is fixed: {reason}"
+                ))
+            ),
+        ),
+        _ => (
+            true,
+            true,
+            "Claude Code is not wired to the router yet (setup's last step)".to_string(),
+        ),
+    };
+    Check {
+        name: "wiring",
+        ok,
+        warn,
+        detail,
     }
 }
 
