@@ -133,6 +133,15 @@ function reviewPage(copy, times, seen) {
       }
       box.appendChild(ul); nav.appendChild(box);
     });
+    /* The previous round's dropped items close the rail, as they close the page. */
+    var dropped = document.getElementById("dropped");
+    if (dropped) {
+      var box = document.createElement("div"); box.className = "nav-sec";
+      var t = document.createElement("p"); t.className = "nav-sec-t";
+      var a = document.createElement("a"); a.href = "#dropped"; a.textContent = dropped.getAttribute("data-nav");
+      a.addEventListener("click", function () { dropped.open = true; });
+      t.appendChild(a); box.appendChild(t); nav.appendChild(box);
+    }
     updateActive();
   }
   var vis = Object.create(null);
@@ -338,6 +347,7 @@ function reviewPage(copy, times, seen) {
   /* ---- open items and folds survive reloads and re-renders ---- */
   document.querySelectorAll("details.item:not(.item-empty)").forEach(function (d) { track(d, "item|" + d.getAttribute("data-item")); });
   document.querySelectorAll("details.rest").forEach(function (d) { track(d, "rest|" + d.id.slice("rest-".length)); });
+  document.querySelectorAll("details.dropped").forEach(function (d) { track(d, "dropped"); });
   foldKey.forEach(function (key, d) { track(d, key); });
   function track(d, key) {
     if (state.open[key]) d.open = true;

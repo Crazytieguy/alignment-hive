@@ -1,18 +1,20 @@
-// Rounds: this round's manifest against the previous one (item states, the footer for dropped items), and the page
+// Rounds: this round's manifest against the previous one (item states, the items it dropped and why), and the page
 // overlay marking items new or changed since the viewer's last visit. computeSeen and installSeenOverlay ship into
 // the page as source, so they reference nothing outside themselves.
 import { reviewRoundMessages as msg } from '../lib/messages';
-import { escapeHtml, escapeJson } from './html';
+import { escapeJson } from './html';
 import { reviewError } from './parse';
 import type { ReviewManifest } from './manifest';
 import type { SeenApi } from './seen';
 
-export interface RoundComparison { states: Record<string, 'new' | 'updated' | 'unchanged'>; footerHtml: string; warnings: Array<string> }
+/** A previous round's item this round leaves out; `missing` when the author gave no disposition. */
+export interface DroppedItem { id: string; heading: string; disposition: 'resolved' | 'withdrawn' | 'superseded' | 'missing'; successor?: { id: string; heading: string } }
+export interface RoundComparison { states: Record<string, 'new' | 'updated' | 'unchanged'>; dropped?: { round: number; items: Array<DroppedItem> }; warnings: Array<string> }
 /** Comparisons consume immutable manifests only; no filesystem or transcript readers. */
 export function compareRounds(current: ReviewManifest, previous?: ReviewManifest): RoundComparison {
   if (!previous) {
     if (current.round !== 1) throw reviewError('page', 1, msg.previousRequired);
-    return { states: Object.fromEntries(current.items.map((item) => [item.id, 'new'])), footerHtml: '', warnings: [] };
+    return { states: Object.fromEntries(current.items.map((item) => [item.id, 'new'])), warnings: [] };
   }
   if (previous.session !== current.session || previous.reviewId !== current.reviewId || previous.round !== current.round - 1) throw reviewError('page', 1, msg.wrongPrevious);
   const before = new Map(previous.items.map((item) => [item.id, item]));
@@ -30,20 +32,20 @@ export function compareRounds(current: ReviewManifest, previous?: ReviewManifest
     if (!before.has(id) || consumed.has(id)) throw reviewError(id, 1, msg.invalidDisposition(id));
     if (disposition.startsWith('superseded: ') && !after.has(disposition.slice('superseded: '.length))) throw reviewError(id, 1, msg.invalidSuccessor(disposition));
   }
-  const footer: Array<string> = [], warnings: Array<string> = [];
+  const dropped: Array<DroppedItem> = [], warnings: Array<string> = [];
   for (const prior of previous.items) {
     if (consumed.has(prior.id)) continue;
     const disposition = Object.hasOwn(current.dispositions, prior.id) ? current.dispositions[prior.id] : undefined;
+    const base = { id: prior.id, heading: prior.heading };
     if (!disposition) {
-      const warning = msg.undisposed(prior.heading);
-      warnings.push(reviewError(prior.id, 1, warning).message);
-      footer.push(`<p class="review-warning" data-disposition="missing">${escapeHtml(warning)}</p>`);
+      warnings.push(reviewError(prior.id, 1, msg.undisposed(prior.heading)).message);
+      dropped.push({ ...base, disposition: 'missing' });
     } else if (disposition.startsWith('superseded: ')) {
       const successor = after.get(disposition.slice('superseded: '.length))!;
-      footer.push(`<p data-disposition="superseded"><a href="#item-${successor.id}">${escapeHtml(msg.superseded(prior.heading, successor.heading))}</a></p>`);
-    } else footer.push(`<p data-disposition="${disposition}">${escapeHtml(msg.disposed(prior.heading, disposition))}</p>`);
+      dropped.push({ ...base, disposition: 'superseded', successor: { id: successor.id, heading: successor.heading } });
+    } else dropped.push({ ...base, disposition: disposition as 'resolved' | 'withdrawn' });
   }
-  return { states, footerHtml: footer.join('\n'), warnings };
+  return { states, ...(dropped.length ? { dropped: { round: previous.round, items: dropped } } : {}), warnings };
 }
 
 export interface SeenStore { reviewId: string; highestRound: number; itemHashes: Record<string, string>; savedAt: string }

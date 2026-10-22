@@ -96,7 +96,7 @@ test('manifest schemas reject corrupted history/duplicate ids and hash order is 
   expect(canonicalJson({ z: 1, a: { y: 2, b: 3 } })).toBe(canonicalJson({ a: { b: 3, y: 2 }, z: 1 }));
 });
 
-test('rename/disposition errors are contextual and a dropped item yields warning plus footer', async () => {
+test('rename/disposition errors are contextual and a dropped item yields a warning and is listed as unexplained', async () => {
   const f = await setup(reviewItem('old') + reviewItem('gone'));
   const first = await renderReview(f.input, { cwd: f.repo, projects: f.projects, outDir: join(f.root, 'round1') });
   await writeFile(f.input, reviewDocument(reviewItem('new', '', 'was: old\n'), 'round: 2\n'));

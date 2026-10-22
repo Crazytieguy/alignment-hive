@@ -28,6 +28,7 @@ import type { ChangedFile, ReviewContext } from './git';
 import type { ParsedReview, ReviewItem, ReviewPage } from './parse';
 import type { SecretFound, SecretHits } from './redact';
 import type { ReviewManifest } from './manifest';
+import type { DroppedItem, RoundComparison } from './rounds';
 
 /** `projects`: where transcripts live (default ~/.claude/projects). */
 export interface PrepareReviewOptions { cwd?: string; projects?: string }
@@ -57,7 +58,7 @@ export interface AssemblyOptions {
   reviewId?: string;
   manifest?: unknown;
   states?: Record<string, 'new' | 'updated' | 'unchanged'>;
-  footerHtml?: string;
+  dropped?: RoundComparison['dropped'];
   overlayScript?: string;
 }
 export interface AssembledReview { html: string; warnings: Array<string> }
@@ -153,6 +154,32 @@ ${foryou}
 </header>`;
 }
 
+/** The previous round's items this round leaves out, folded after the last section and grouped by why each went; a
+ * replaced item points to its successor, and items sharing one successor share its row. */
+function droppedHtml({ round, items }: NonNullable<RoundComparison['dropped']>): string {
+  const copy = pageMsg.dropped;
+  const heading = (item: Pick<DroppedItem, 'id' | 'heading'>) => inline(item.heading, item.id, 1);
+  const groups = (['missing', 'superseded', 'resolved', 'withdrawn'] as const).flatMap((kind) => {
+    const members = items.filter((item) => item.disposition === kind);
+    if (!members.length) return [];
+    let rows: Array<string>;
+    if (kind === 'superseded') {
+      const bySuccessor = Map.groupBy(members, (item) => item.successor!.id);
+      rows = [...bySuccessor.values()].map((olds) => {
+        const successor = olds[0].successor!, to = heading(successor);
+        // A heading that carries its own link shows as text: links don't nest.
+        const label = to.includes('<a ') ? escapeHtml(successor.heading) : to;
+        return `<li class="dropped-row"><ul class="dropped-old">${olds.map((item) => `<li>${heading(item)}</li>`).join('')}</ul><a class="dropped-to" href="#item-${successor.id}"><span class="dropped-arrow" aria-hidden="true">&#8594;</span><span>${label}</span></a></li>`;
+      });
+    } else rows = members.map((item) => `<li>${heading(item)}</li>`);
+    const group = copy.groups[kind];
+    return [{ kind, n: members.length, html: `<div class="dropped-group" data-disposition="${kind}"><h3 class="dropped-h">${escapeHtml(group.label)}<span class="rest-count">${members.length}</span></h3><p class="dropped-why">${escapeHtml(group.note)}</p><ul class="dropped-list">${rows.join('')}</ul></div>` }];
+  });
+  const kinds = groups.map(({ kind, n }) => `<span${kind === 'missing' ? ' class="dropped-attn"' : ''}>${n} ${escapeHtml(copy.groups[kind].count)}</span>`).join('<span class="rest-sep" aria-hidden="true"> &#183; </span>');
+  const label = copy.label(round);
+  return `<details class="dropped" id="dropped" data-nav="${escapeHtml(label)}"${groups[0].kind === 'missing' ? ' data-attn' : ''}><summary class="dropped-sum"><span class="item-mark" aria-hidden="true"></span><span class="dropped-label">${escapeHtml(label)}<span class="rest-count">${items.length}</span></span><span class="dropped-kinds">${kinds}</span><span class="dropped-note">${escapeHtml(copy.note(round))}</span></summary><div class="dropped-body">${groups.map((group) => group.html).join('')}</div></details>`;
+}
+
 export function assembleReview(prepared: PreparedReview, options: AssemblyOptions = {}): AssembledReview {
   const warnings: Array<string> = [];
   const diffs: Array<MountedDiff> = [];
@@ -189,7 +216,7 @@ export function assembleReview(prepared: PreparedReview, options: AssemblyOption
 <main class="content" data-review="${escapeHtml(reviewId)}">
 ${header}
 ${sections}
-${options.footerHtml ? `<footer class="foot">${options.footerHtml}</footer>` : ''}
+${options.dropped ? droppedHtml(options.dropped) : ''}
 </main>
 ${rail}
 </div>
@@ -271,7 +298,7 @@ export async function renderReview(inputPath: string, options: RenderReviewOptio
     const manifest = buildManifest(prepared, { previous, reviewId, coverage: coverage?.coverage });
     refuseLeak(prepared, findSecretsInValue(manifest));
     const comparison = compareRounds(manifest, previous);
-    const page = assembleReview(prepared, { reviewId: manifest.reviewId, manifest, states: previous ? comparison.states : undefined, footerHtml: comparison.footerHtml, overlayScript: seenOverlayScript() });
+    const page = assembleReview(prepared, { reviewId: manifest.reviewId, manifest, states: previous ? comparison.states : undefined, dropped: comparison.dropped, overlayScript: seenOverlayScript() });
     await writeFile(temporaryPage, page.html, { flag: 'wx', mode: 0o600 });
     await writeFile(temporaryManifest, JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     // Both complete files exist before replacement. Manifest publication is the

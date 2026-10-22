@@ -19,9 +19,12 @@ test('round changes honor ids/renames and require valid dispositions', () => {
   current.dispositions = { resolved: 'resolved', superseded: 'superseded: new', withdrawn: 'withdrawn' };
   const comparison = compareRounds(current, before);
   expect(comparison.states).toEqual({ same: 'unchanged', 'new-name': 'updated', new: 'new' });
-  expect(comparison.footerHtml).toContain('data-disposition="resolved"');
-  expect(comparison.footerHtml).toContain('href="#item-new"');
-  expect(comparison.footerHtml).toContain('data-disposition="withdrawn"');
+  expect(comparison.dropped).toEqual({ round: 1, items: [
+    { id: 'resolved', heading: 'Changed resolved', disposition: 'resolved' },
+    { id: 'superseded', heading: 'Changed superseded', disposition: 'superseded', successor: { id: 'new', heading: 'Changed new' } },
+    { id: 'withdrawn', heading: 'Changed withdrawn', disposition: 'withdrawn' },
+    { id: 'constructor', heading: 'Changed constructor', disposition: 'missing' },
+  ] });
   expect(comparison.warnings).toHaveLength(1);
   expect(comparison.warnings[0]).toContain('constructor');
   current.dispositions.same = 'resolved';

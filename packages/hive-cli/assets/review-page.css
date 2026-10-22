@@ -545,10 +545,40 @@ abbr[data-gloss]:hover::after, abbr[data-gloss]:focus::after {
 .item-quiet > summary .item-h { color: var(--muted); }
 .item-quiet[open] > summary .item-h { color: var(--ink); }
 
-/* ---------- footer ---------- */
-.foot { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--rule); font-size: 12.5px; color: var(--faint); font-family: var(--font-mono); display: flex; flex-wrap: wrap; gap: 6px 18px; }
-.foot p { margin: 0; }
-.foot .review-warning { color: var(--attn); }
+/* ---------- items dropped since the previous round ---------- */
+/* A dashed fold after the last section: the tray's summary layout, for what is no longer on the page. */
+.dropped { margin: 40px 0 6px; border: 1px dashed var(--rule-strong); border-radius: 10px; }
+.dropped[data-attn] { border-color: var(--attn); }
+.dropped > summary.dropped-sum { cursor: pointer; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; grid-template-areas: "mark label kinds" ". note note"; column-gap: 10px; row-gap: 4px; align-items: baseline; padding: 11px 13px 12px; border-radius: 9px; }
+.dropped > summary.dropped-sum:hover { background: color-mix(in srgb, var(--ink) 3.5%, transparent); }
+.dropped[open] > summary.dropped-sum { border-bottom: 1px dashed var(--rule-strong); border-radius: 9px 9px 0 0; }
+.dropped-sum .item-mark { font: 500 12px/1.35 var(--font-mono); }
+.dropped-sum .item-mark::before { -webkit-mask-size: 11px 11px; mask-size: 11px 11px; }
+.dropped[open] > .dropped-sum .item-mark::before { transform: translateY(-.5px) rotate(90deg); }
+.dropped-label { grid-area: label; display: inline-flex; align-items: baseline; gap: 9px; font: 500 12px/1.35 var(--font-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.dropped-kinds { grid-area: kinds; font: 11px/1.35 var(--font-mono); color: var(--faint); white-space: nowrap; }
+.dropped-attn { color: var(--attn); }
+.dropped-note { grid-area: note; font-size: 13.5px; line-height: 1.4; color: var(--muted); }
+.dropped-body { padding: 2px 13px 14px 41px; }
+.dropped-group { margin-top: 16px; }
+.dropped-h { display: flex; align-items: baseline; gap: 9px; margin: 0; font: 500 11px/1.35 var(--font-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.dropped-group[data-disposition="missing"] .dropped-h { color: var(--attn); }
+.dropped-why { margin: 3px 0 6px; font-size: 13px; color: var(--faint); }
+.dropped-list, .dropped-old { list-style: none; margin: 0; padding: 0; }
+.dropped-list > li { padding: 7px 0; border-top: 1px solid var(--rule); font-size: 14px; line-height: 1.45; color: var(--muted); text-wrap: pretty; }
+/* A replaced row: what went on the left, the item that now covers it on the right. */
+.dropped-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 20px; align-items: start; }
+.dropped-old li + li { margin-top: 5px; }
+.dropped-to { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px; align-items: baseline; color: var(--ink); font-weight: 500; }
+.dropped-arrow { color: var(--accent); }
+.dropped-to:hover span:last-child { color: var(--accent); }
+@media (max-width: 960px) {
+  .dropped > summary.dropped-sum { grid-template-columns: 14px minmax(0, 1fr); grid-template-areas: "mark label" ". kinds" ". note"; }
+  .dropped-kinds { white-space: normal; }
+  .dropped-body { padding-left: 13px; }
+  .dropped-row { grid-template-columns: minmax(0, 1fr); }
+  .dropped-to { padding-left: 14px; }
+}
 
 /* ---------- responsive ---------- */
 @media (max-width: 960px) {
@@ -557,7 +587,7 @@ abbr[data-gloss]:hover::after, abbr[data-gloss]:focus::after {
   .content { display: contents; }
   .head { order: 1; }
   .rail { order: 2; position: static; max-height: none; overflow: visible; margin-bottom: 18px; padding-left: 0; }
-  .sec, .foot { order: 3; }
+  .sec, .dropped { order: 3; }
   .rail-fold > summary { display: block; }
   .rail-fold > summary { cursor: pointer; font-family: var(--font-mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); padding: 8px 0; }
   .rail-fold > summary::before { content: "\25B8\00a0"; }

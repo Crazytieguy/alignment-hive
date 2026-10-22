@@ -90,7 +90,7 @@ Every claim must hold against its source, whether the transcript, git, or the da
 
 ## Rounds
 
-`round` defaults to 1. Each round covers the whole session up to when it was requested; items that still apply keep their ids. The reader's comments on the last round count as asks: answer each in the item, or the story, it was placed on. Every dropped id needs a disposition in `dispositions`: `resolved`, `"superseded: <id>"` or `withdrawn`.
+`round` defaults to 1. Each round covers the whole session up to when it was requested; items that still apply keep their ids. The reader's comments on the last round count as asks: answer each in the item, or the story, it was placed on. Every dropped id needs a disposition in `dispositions`: `"superseded: <id>"` when a current item now covers it, `resolved` when what it raised is settled, or `withdrawn` when it no longer belongs on the page.
 
 ## Flow
 

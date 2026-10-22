@@ -79,6 +79,17 @@ export const reviewPageMessages = {
   /** Templates the page fills: `{k}` seen of `{n}` items. */
   restSeen: '{k} of {n} seen',
   restNav: '+ {n} lower priority',
+  /** The fold of the previous round's items this round leaves out, grouped by why; the page styles labels upper case. */
+  dropped: {
+    label: (round: number) => `Dropped since round ${round}`,
+    note: (round: number) => `Items the round ${round} page had that this one leaves out, and why each went.`,
+    groups: {
+      missing: { label: 'No reason given', count: 'unexplained', note: 'The author did not say why these went.' },
+      superseded: { label: 'Replaced', count: 'replaced', note: 'Each now lives on in the current item it points to.' },
+      resolved: { label: 'Resolved', count: 'resolved', note: 'Settled since that round.' },
+      withdrawn: { label: 'Withdrawn', count: 'withdrawn', note: 'Taken back, or no longer worth a place on the page.' },
+    },
+  },
   contents: 'Contents',
   theme: 'Theme',
   themes: { auto: 'Auto', light: 'Light', dark: 'Dark' },
@@ -180,8 +191,6 @@ export const reviewRoundMessages = {
   invalidDisposition: (id: string) => `Disposition must name a dropped previous item: ${id}`,
   invalidSuccessor: (id: string) => `Superseded item must link to a current item: ${id}`,
   undisposed: (heading: string) => `No disposition: ${heading}`,
-  disposed: (heading: string, state: string) => `${heading}: ${state}`,
-  superseded: (heading: string, successor: string) => `${heading}: superseded by ${successor}`,
   outputConflict: 'Output manifest belongs to another session, round, or debrief; choose another directory',
   overwritePrevious: 'Output must not overwrite the previous-round manifest',
   unseen: 'changed',

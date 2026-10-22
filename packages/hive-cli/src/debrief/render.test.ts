@@ -334,10 +334,32 @@ test('authored page and section titles are checked too', async () => {
   await expect(prepareReview(titled.input, { cwd: titled.repo, projects: titled.projects })).rejects.toThrow('debrief: page, line 2: The page would show a JWT');
 });
 
-test('the last guard reads the whole page: a secret in the footer fails assembly', async () => {
+test('dropped items fold after the last section, grouped by disposition, sharing a row per successor', async () => {
+  const f = await setup(reviewItem('a', 'Body.'));
+  const prepared = await prepareReview(f.input, { cwd: f.repo, projects: f.projects });
+  const successor = { id: 'a', heading: 'Changed a' };
+  const document = parseHTML(assembleReview(prepared, { dropped: { round: 2, items: [
+    { id: 'w', heading: 'Gone', disposition: 'withdrawn' },
+    { id: 's1', heading: 'First `old`', disposition: 'superseded', successor },
+    { id: 's2', heading: 'Second old', disposition: 'superseded', successor },
+    { id: 'm', heading: 'Unexplained', disposition: 'missing' },
+  ] } }).html).document;
+  const fold = document.querySelector('details.dropped')!;
+  expect(fold.previousElementSibling!.classList.contains('sec')).toBe(true);
+  expect(fold.hasAttribute('data-attn')).toBe(true);
+  expect(fold.querySelector('.dropped-label')!.firstChild!.textContent).toBe('Dropped since round 2');
+  expect(fold.querySelector('.dropped-label .rest-count')!.textContent).toBe('4');
+  expect([...fold.querySelectorAll('.dropped-group')].map((group) => group.getAttribute('data-disposition'))).toEqual(['missing', 'superseded', 'withdrawn']);
+  const rows = fold.querySelectorAll('.dropped-row');
+  expect(rows).toHaveLength(1);
+  expect(rows[0].querySelector('.dropped-old')!.innerHTML).toBe('<li>First <code>old</code></li><li>Second old</li>');
+  expect(rows[0].querySelector('a.dropped-to')!.getAttribute('href')).toBe('#item-a');
+});
+
+test('the last guard reads the whole page: a secret in a dropped item fails assembly', async () => {
   const secret = synthetic(11);
   const f = await setup(reviewItem('a', 'Body.'));
   const prepared = await prepareReview(f.input, { cwd: f.repo, projects: f.projects });
-  expect(() => assembleReview(prepared, { footerHtml: `<p>see https://x.test/cb?a=1&amp;token=${secret}</p>` })).toThrow('debrief: page, line 1: The page would show a secret URL parameter');
-  expect(() => assembleReview(prepared, { footerHtml: '<p>fine</p>' })).not.toThrow();
+  expect(() => assembleReview(prepared, { dropped: { round: 1, items: [{ id: 'gone', heading: `see https://x.test/cb?a=1&token=${secret}`, disposition: 'withdrawn' }] } })).toThrow('debrief: page, line 1: The page would show a secret URL parameter');
+  expect(() => assembleReview(prepared, { dropped: { round: 1, items: [{ id: 'gone', heading: 'fine', disposition: 'withdrawn' }] } })).not.toThrow();
 });
