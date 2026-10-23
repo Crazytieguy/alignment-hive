@@ -82,15 +82,6 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
   - `model-router@alignment-hive` — Recommended, experimental. GPT models as regular Claude Code subagents (parallel, in workflows), plus optional Grok and open-weights models. Remote Control doesn't work while it's installed; if you use it, pick Codex
 - **Session debriefs**: `debrief@alignment-hive` — In beta. `/debrief:debrief` turns a finished session into a page of what was done, how it was checked and what needs your call; needs the hive CLI
 - **Reply TL;DRs**: `tldr@alignment-hive` — Long replies collapse to a one-sentence TL;DR, [ more ] expands one; /tldr turns it off — **Always recommend**
-- **Hidden-payload stripping**: `agent-sanitizer@agent-sanitizer` — Catches prompt injections hidden inside text that looks harmless: invisible characters, hidden HTML and look-alike glyphs are stripped before Claude reads them — **Always recommend**
-
-#### After installing agent-sanitizer
-
-Ask one follow-up, Yes / No:
-
-> **Secret redaction** (off by default): redacts credentials from tool output on your machine before Claude sees them, so they can't end up in a commit, another tool call, or the transcript. Needs python3 or uv on PATH; occasionally over-redacts credential-shaped text.
-
-On Yes, set `AGENT_SANITIZER_SECRETS_ENABLED` to `"1"` in the `env` block of the settings file the install scope wrote to (`.claude/settings.json`, `.claude/settings.local.json`, or `~/.claude/settings.json`). On No, record it in `.claude/hive/align-rejected.md`.
 
 #### Platform-specific entries for remote-kernels and model-router
 
@@ -114,7 +105,6 @@ claude plugin install <coordinate> --scope <scope>
 |---|---|---|---|
 | precis | `precis@precis` | `Crazytieguy/precis` | `https://raw.githubusercontent.com/Crazytieguy/precis/main/README.md` |
 | codex | `codex@codex-plugin-cc` | `Crazytieguy/codex-plugin-cc` | `https://raw.githubusercontent.com/Crazytieguy/codex-plugin-cc/main/README.md` |
-| agent-sanitizer | `agent-sanitizer@agent-sanitizer` | `AlexanderMattTurner/agent-sanitizer` | `https://raw.githubusercontent.com/AlexanderMattTurner/agent-sanitizer/main/README.md` |
 
 The marketplace name is the part of the coordinate after `@`. After `marketplace add`, add `"autoUpdate": true` to the `extraKnownMarketplaces.<marketplace>` entry it wrote to the scoped settings file — there is no CLI flag for auto-update. Claude Code (v2.1.140+) propagates the field to `~/.claude/plugins/known_marketplaces.json` on next session start.
 
