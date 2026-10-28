@@ -9,7 +9,7 @@ use crate::jupyter::messages::ExecutionOutput;
 use crate::state::KernelRecord;
 use crate::state::{AppState, FenceReason, InstanceRecord, InstanceState, Phase};
 
-fn test_instance(machine_id: &str) -> InstanceState {
+pub(super) fn test_instance(machine_id: &str) -> InstanceState {
     InstanceState::provisioning(
         machine_id.to_string(),
         Some("worker".to_string()),

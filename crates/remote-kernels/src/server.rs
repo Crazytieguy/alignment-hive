@@ -17,6 +17,7 @@ use rmcp::{
     ErrorData as McpError, Peer, RoleServer, ServerHandler, tool, tool_handler, tool_router,
 };
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{Cleanup, Config};
 use crate::runtime::{AnyRuntime, Connection, ProvisionRequest, Runtime};
@@ -36,6 +37,7 @@ mod unconfirmed;
 
 use self::budget::ledger_blocked_notice;
 use self::cleanup::{CleanupAction, CleanupTarget};
+use self::execution::CallContext;
 use self::provision::{
     BudgetUnenforceable, ConnectMode, generate_token, validate_label, validate_vast_offers,
 };
@@ -1126,8 +1128,10 @@ impl RemoteKernelsServer {
         params: Parameters<ExecuteParams>,
         meta: RequestMetaObject,
         peer: Peer<RoleServer>,
+        cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
-        self.execute_inner(params.0, Some((meta, peer))).await
+        self.execute_inner(params.0, CallContext::mcp(meta, peer, cancel))
+            .await
     }
 
     /// Direct entry point used by integration tests; MCP callers use `execute_tool`.
@@ -1135,7 +1139,7 @@ impl RemoteKernelsServer {
         &self,
         params: Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.execute_inner(params.0, None).await
+        self.execute_inner(params.0, CallContext::detached()).await
     }
 
     /// Wait for the kernel's oldest pending execution — or, with no kernel_id, for every
@@ -1149,13 +1153,15 @@ impl RemoteKernelsServer {
         params: Parameters<WaitParams>,
         meta: RequestMetaObject,
         peer: Peer<RoleServer>,
+        cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
-        self.wait_inner(params.0, Some((meta, peer))).await
+        self.wait_inner(params.0, CallContext::mcp(meta, peer, cancel))
+            .await
     }
 
     /// Direct entry point used by integration tests; MCP callers use `wait_tool`.
     pub async fn wait(&self, params: Parameters<WaitParams>) -> Result<CallToolResult, McpError> {
-        self.wait_inner(params.0, None).await
+        self.wait_inner(params.0, CallContext::detached()).await
     }
 
     /// Collect a pending execution's output or check whether it is still running.
@@ -1169,8 +1175,10 @@ impl RemoteKernelsServer {
         params: Parameters<GetOutputParams>,
         meta: RequestMetaObject,
         peer: Peer<RoleServer>,
+        cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
-        self.get_output_inner(params.0, Some((meta, peer))).await
+        self.get_output_inner(params.0, CallContext::mcp(meta, peer, cancel))
+            .await
     }
 
     /// Direct entry point used by integration tests; MCP callers use `get_output_tool`.
@@ -1178,7 +1186,8 @@ impl RemoteKernelsServer {
         &self,
         params: Parameters<GetOutputParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.get_output_inner(params.0, None).await
+        self.get_output_inner(params.0, CallContext::detached())
+            .await
     }
 
     /// Sync the project directory to a machine's workdir (where kernels run).
@@ -1714,6 +1723,9 @@ impl ServerHandler for RemoteKernelsServer {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cancel_tests;
 
 #[cfg(all(test, feature = "fake-runtime"))]
 mod fencing_tests;

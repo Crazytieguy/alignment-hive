@@ -2302,3 +2302,126 @@ async fn same_server_concurrent_attach_has_one_winner() {
     assert!(text_of(refusal).contains("already attached"));
     terminate(&second, Some(&machine_id)).await;
 }
+
+/// A client cancel (Claude Code stopping an auto-backgrounded call, Esc)
+/// arrives as a real `notifications/cancelled`; rmcp keeps the handler
+/// running and drops its reply, so the handler must leave the execution
+/// collectable rather than consume it. The cells print after their sleep, so
+/// collecting that text also shows the cancel didn't interrupt the kernel.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn cancelled_calls_leave_results_collectable() {
+    use rmcp::ServiceExt;
+    use rmcp::model::{CallToolRequest, CallToolRequestParams, ClientRequest};
+    use rmcp::service::PeerRequestOptions;
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("cancel")).await;
+    let kernel_id = create_kernel(&server, Some(&machine_id)).await;
+
+    let (server_io, client_io) = tokio::io::duplex(1 << 20);
+    let served = server.clone();
+    tokio::spawn(async move {
+        if let Ok(running) = served.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let client = ().serve(client_io).await.unwrap();
+    let call_then_cancel = async |tool: &'static str, arguments: serde_json::Value| {
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(
+            CallToolRequestParams::new(tool).with_arguments(arguments.as_object().unwrap().clone()),
+        ));
+        let handle = client
+            .peer()
+            .send_cancellable_request(request, PeerRequestOptions::no_options())
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        handle.cancel(None).await.unwrap();
+        // Let the handler observe the cancel and re-park.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    };
+    let start_background = async |label: &str| -> u32 {
+        let started = server
+            .execute(Parameters(remote_kernels::server::ExecuteParams {
+                kernel_id: kernel_id.clone(),
+                code: format!("import time; time.sleep(2); print('{label}')"),
+                timeout: None,
+                background: Some(true),
+                queue: Some(true),
+            }))
+            .await
+            .unwrap();
+        text_of(&started)
+            .lines()
+            .find_map(|line| line.strip_prefix("Cell number: "))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let assert_collected = |result: CallToolResult, label: &str| {
+        let text = text_of(&result);
+        assert!(
+            !is_error(&result) && text.contains(label),
+            "{label}: {text}"
+        );
+    };
+
+    // execute() without a cap, and with its own bounded wait: wait() collects.
+    for (label, timeout) in [("uncapped done", 0), ("bounded done", 60)] {
+        call_then_cancel(
+            "execute",
+            serde_json::json!({
+                "kernel_id": kernel_id,
+                "code": format!("import time; time.sleep(2); print('{label}')"),
+                "timeout": timeout,
+            }),
+        )
+        .await;
+        let result = server
+            .wait(Parameters(remote_kernels::server::WaitParams {
+                kernel_id: Some(kernel_id.clone()),
+                timeout: Some(30),
+            }))
+            .await
+            .unwrap();
+        assert_collected(result, label);
+    }
+
+    // wait() and get_output() holding a background cell: get_output() collects.
+    let held_by_wait = start_background("held by wait").await;
+    call_then_cancel(
+        "wait",
+        serde_json::json!({ "kernel_id": kernel_id, "timeout": 0 }),
+    )
+    .await;
+    let held_by_get_output = start_background("held by get_output").await;
+    call_then_cancel(
+        "get_output",
+        serde_json::json!({
+            "kernel_id": kernel_id,
+            "cell_number": held_by_get_output,
+            "timeout": 0,
+        }),
+    )
+    .await;
+    for (cell_number, label) in [
+        (held_by_wait, "held by wait"),
+        (held_by_get_output, "held by get_output"),
+    ] {
+        let result = server
+            .get_output(Parameters(remote_kernels::server::GetOutputParams {
+                kernel_id: kernel_id.clone(),
+                cell_number,
+                wait: Some(true),
+                timeout: Some(30),
+            }))
+            .await
+            .unwrap();
+        assert_collected(result, label);
+    }
+
+    client.cancel().await.unwrap();
+    terminate(&server, Some(&machine_id)).await;
+}

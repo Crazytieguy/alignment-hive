@@ -2,11 +2,18 @@
 //! background execution parks its result receiver in the instance's
 //! `pending_executions`; a call that takes it out reinserts it if the
 //! execution is still running, so a later call can still collect the result.
+//!
+//! A call the client cancels is treated like a timeout: rmcp keeps running the
+//! handler but drops its reply, so the handler re-parks what it holds, and
+//! outputs that completed for that reply go to `recovered_executions` for
+//! `get_output()` instead of being consumed. Cancelling never interrupts the
+//! kernel.
 
 use std::fmt::Write;
 
 use rmcp::model::{CallToolResult, ContentBlock, ProgressNotificationParam, RequestMetaObject};
 use rmcp::{ErrorData as McpError, Peer, RoleServer};
+use tokio_util::sync::CancellationToken;
 
 use crate::config::Cleanup;
 use crate::images::ImageCollector;
@@ -14,6 +21,34 @@ use crate::jupyter::messages::ExecutionOutput;
 
 use super::params::{ExecuteParams, GetOutputParams, WaitParams};
 use super::{RemoteKernelsServer, err_text};
+
+/// What the engines need from the MCP request: its progress channel (absent
+/// for direct calls) and the client's cancellation.
+pub(super) struct CallContext {
+    pub(super) progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
+    pub(super) cancel: CancellationToken,
+}
+
+impl CallContext {
+    pub(super) fn mcp(
+        meta: RequestMetaObject,
+        peer: Peer<RoleServer>,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            progress: Some((meta, peer)),
+            cancel,
+        }
+    }
+
+    /// A direct (non-MCP) call: no progress, never cancelled.
+    pub(super) fn detached() -> Self {
+        Self {
+            progress: None,
+            cancel: CancellationToken::new(),
+        }
+    }
+}
 
 struct HeldExecution {
     result_rx: tokio::sync::oneshot::Receiver<ExecutionOutput>,
@@ -23,12 +58,39 @@ struct HeldExecution {
     cleanup: Cleanup,
 }
 
+impl HeldExecution {
+    fn completed(self, output: ExecutionOutput) -> CompletedOutput {
+        CompletedOutput {
+            machine_id: self.machine_id,
+            kernel_id: self.kernel_id,
+            cell_number: self.cell_number,
+            output,
+        }
+    }
+}
+
+/// A finished execution's output, still owned by the reply being built so a
+/// cancelled reply can park it (see `park_completed`).
+struct CompletedOutput {
+    machine_id: String,
+    kernel_id: String,
+    cell_number: Option<u32>,
+    output: ExecutionOutput,
+}
+
 /// Result of holding one pending execution open (see `wait_execution`).
 enum WaitOutcome {
-    Completed(ExecutionOutput),
+    Completed(CompletedOutput),
     StillRunning,
+    Cancelled,
     Fenced(String),
     ConnectionLost,
+}
+
+/// The reply of a cancelled call. rmcp drops it; it exists only to end the
+/// handler.
+fn cancelled_reply() -> Result<CallToolResult, McpError> {
+    err_text("Cancelled by the client; pending results were kept for wait()/get_output().")
 }
 
 /// Render an output's reply text, adding its images to `images`. Image
@@ -78,7 +140,7 @@ impl RemoteKernelsServer {
     pub(super) async fn execute_inner(
         &self,
         params: ExecuteParams,
-        progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
+        ctx: CallContext,
     ) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
 
@@ -216,27 +278,21 @@ impl RemoteKernelsServer {
                         cleanup,
                     },
                     None,
-                    progress,
+                    ctx,
                 )
                 .await;
         }
 
         // Wait for result with timeout. Using select! so we can store the receiver on timeout.
-        let timed_out;
-        let mut completed_output = None;
-
+        // `Err(cancelled)` when the call stops waiting.
         let timeout = std::time::Duration::from_secs(clamp_timeout_secs(timeout_secs));
-        tokio::select! {
-            result = &mut result_rx => {
-                timed_out = false;
-                completed_output = result.ok();
-            }
-            () = tokio::time::sleep(timeout) => {
-                timed_out = true;
-            }
-        }
+        let waited = tokio::select! {
+            result = &mut result_rx => Ok(result.ok()),
+            () = tokio::time::sleep(timeout) => Err(false),
+            () = ctx.cancel.cancelled() => Err(true),
+        };
 
-        if timed_out {
+        if let Err(cancelled) = waited {
             // Store receiver for get_output().
             if let Some(cell_num) = cell_number {
                 let mut state = self.state.lock().await;
@@ -244,6 +300,9 @@ impl RemoteKernelsServer {
                     inst.pending_executions
                         .insert((kernel_id.clone(), cell_num), result_rx);
                 }
+            }
+            if cancelled {
+                return cancelled_reply();
             }
 
             let mut msg =
@@ -257,7 +316,7 @@ impl RemoteKernelsServer {
             return Ok(CallToolResult::success(vec![ContentBlock::text(msg)]));
         }
 
-        let Some(output) = completed_output else {
+        let Ok(Some(output)) = waited else {
             return Err(McpError::internal_error(
                 "Kernel connection dropped before execution completed",
                 None,
@@ -270,21 +329,28 @@ impl RemoteKernelsServer {
                 .await;
         }
 
-        let is_error = output.error.is_some();
-        let (body, images) = render_output(output, ImageCollector::default()).await;
-        self.finish_execution_reply(body, images, cleanup == Cleanup::Disabled, is_error)
-            .await
+        self.single_output_reply(
+            &ctx,
+            CompletedOutput {
+                machine_id,
+                kernel_id,
+                cell_number,
+                output,
+            },
+            Some(cleanup),
+        )
+        .await
     }
 
     pub(super) async fn wait_inner(
         &self,
         params: WaitParams,
-        progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
+        ctx: CallContext,
     ) -> Result<CallToolResult, McpError> {
         // 0 means "no cap", same as omitting the timeout (and as execute()).
         let timeout = params.timeout.filter(|&secs| secs != 0);
         let Some(kernel_id) = params.kernel_id else {
-            return self.wait_all(timeout, progress).await;
+            return self.wait_all(timeout, ctx).await;
         };
         let held = {
             let mut state = self.state.lock().await;
@@ -318,7 +384,7 @@ impl RemoteKernelsServer {
                 cleanup: inst.cleanup,
             }
         };
-        self.wait_held(held, timeout, progress).await
+        self.wait_held(held, timeout, ctx).await
     }
 
     /// Wait for every execution that was pending when the call was made,
@@ -330,14 +396,23 @@ impl RemoteKernelsServer {
     async fn wait_all(
         &self,
         timeout_secs: Option<u64>,
-        progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
+        ctx: CallContext,
     ) -> Result<CallToolResult, McpError> {
+        /// One part of the batch reply. Outputs stay raw until the reply's
+        /// one cancellation check, so a cancelled reply parks every one of
+        /// them.
+        enum Section {
+            Text(String),
+            Output {
+                label: String,
+                done: CompletedOutput,
+            },
+        }
+
         let deadline = timeout_secs.map(|secs| {
             tokio::time::Instant::now() + std::time::Duration::from_secs(clamp_timeout_secs(secs))
         });
-        let mut sections: Vec<String> = Vec::new();
-        // One image cap for the whole batch: it is one reply.
-        let mut images = ImageCollector::default();
+        let mut sections: Vec<Section> = Vec::new();
         let mut any_error = false;
         // Executions on already-fenced machines stay in place, exactly like
         // the single-kernel wait, which refuses before consuming a receiver.
@@ -349,9 +424,9 @@ impl RemoteKernelsServer {
                 }) {
                     let message = Self::fenced_message(inst).expect("filtered on fenced");
                     any_error = true;
-                    sections.push(format!(
+                    sections.push(Section::Text(format!(
                         "{message}; its pending executions were left in place"
-                    ));
+                    )));
                 }
                 let mut keys: Vec<(String, String, u32)> = state
                     .instances
@@ -418,15 +493,16 @@ impl RemoteKernelsServer {
                                     .await;
                                 }
                                 any_error |= output.error.is_some();
-                                let (text, collected) = render_output(output, images).await;
-                                images = collected;
-                                sections.push(format!("[{label}]\n{text}"));
+                                sections.push(Section::Output {
+                                    label,
+                                    done: done.completed(output),
+                                });
                             }
                             Err(message) => {
                                 any_error = true;
-                                sections.push(format!(
+                                sections.push(Section::Text(format!(
                                     "[{label}] {message}; the execution continues on the machine"
-                                ));
+                                )));
                             }
                         }
                     }
@@ -443,7 +519,7 @@ impl RemoteKernelsServer {
                                 .get(&done.machine_id)
                                 .and_then(Self::fenced_message)
                         };
-                        sections.push(match fence {
+                        sections.push(Section::Text(match fence {
                             Some(message) => format!(
                                 "[{}] {message}; the execution continues on the machine",
                                 batch_label(&done)
@@ -451,7 +527,7 @@ impl RemoteKernelsServer {
                             None => {
                                 format!("[{}] Kernel connection was lost.", batch_label(&done))
                             }
-                        });
+                        }));
                     }
                 }
             }
@@ -470,10 +546,10 @@ impl RemoteKernelsServer {
                     if let Some(message) = message {
                         let dropped = held.swap_remove(index);
                         any_error = true;
-                        sections.push(format!(
+                        sections.push(Section::Text(format!(
                             "[{}] {message}; the execution continues on the machine",
                             batch_label(&dropped)
-                        ));
+                        )));
                     } else {
                         index += 1;
                     }
@@ -484,37 +560,22 @@ impl RemoteKernelsServer {
             }
 
             if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-                let mut reinserted = 0usize;
-                let mut orphaned = 0usize;
-                {
-                    let mut state = self.state.lock().await;
-                    for entry in held.drain(..) {
-                        if let Some(inst) = state.instances.get_mut(&entry.machine_id)
-                            && let Some(cell_number) = entry.cell_number
-                        {
-                            inst.pending_executions
-                                .insert((entry.kernel_id, cell_number), entry.result_rx);
-                            reinserted += 1;
-                        } else {
-                            orphaned += 1;
-                        }
-                    }
-                }
+                let (reinserted, orphaned) = self.repark_all(std::mem::take(&mut held)).await;
                 if reinserted > 0 {
-                    sections.push(format!(
+                    sections.push(Section::Text(format!(
                         "Timed out after {}s with {reinserted} execution(s) still pending. Use wait() again to keep waiting.",
                         timeout_secs.expect("deadline requires a timeout")
-                    ));
+                    )));
                 }
                 if orphaned > 0 {
-                    sections.push(format!(
+                    sections.push(Section::Text(format!(
                         "{orphaned} execution(s) belonged to machines that are no longer active; their results are not collectable here."
-                    ));
+                    )));
                 }
                 break;
             }
 
-            if let Some((meta, peer)) = &progress
+            if let Some((meta, peer)) = &ctx.progress
                 && started.elapsed() >= next_progress
             {
                 next_progress += std::time::Duration::from_mins(1);
@@ -531,11 +592,100 @@ impl RemoteKernelsServer {
                         .await;
                 }
             }
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {}
+                () = ctx.cancel.cancelled() => {
+                    self.repark_all(std::mem::take(&mut held)).await;
+                    break;
+                }
+            }
         }
 
-        self.finish_execution_reply(sections.join("\n\n"), images, disabled_cleanup, any_error)
+        if ctx.cancel.is_cancelled() {
+            self.park_completed(sections.into_iter().filter_map(|section| match section {
+                Section::Output { done, .. } => Some(done),
+                Section::Text(_) => None,
+            }))
+            .await;
+            return cancelled_reply();
+        }
+        // One image cap for the whole batch: it is one reply.
+        let mut images = ImageCollector::default();
+        let mut texts = Vec::with_capacity(sections.len());
+        for section in sections {
+            match section {
+                Section::Text(text) => texts.push(text),
+                Section::Output { label, done } => {
+                    let (text, collected) = render_output(done.output, images).await;
+                    images = collected;
+                    texts.push(format!("[{label}]\n{text}"));
+                }
+            }
+        }
+        self.finish_execution_reply(texts.join("\n\n"), images, disabled_cleanup, any_error)
             .await
+    }
+
+    /// Put still-running executions back for a later call, as a timeout or
+    /// a cancelled call leaves them. Returns (reinserted, orphaned): an
+    /// execution whose machine is gone, or that has no cell number, can't be
+    /// put back.
+    async fn repark_all(&self, held: Vec<HeldExecution>) -> (usize, usize) {
+        let mut reinserted = 0usize;
+        let mut orphaned = 0usize;
+        let mut state = self.state.lock().await;
+        for entry in held {
+            if let Some(inst) = state.instances.get_mut(&entry.machine_id)
+                && let Some(cell_number) = entry.cell_number
+            {
+                inst.pending_executions
+                    .insert((entry.kernel_id, cell_number), entry.result_rx);
+                reinserted += 1;
+            } else {
+                orphaned += 1;
+            }
+        }
+        (reinserted, orphaned)
+    }
+
+    /// Keep a cancelled reply's outputs for a later `get_output()`: rmcp drops
+    /// the reply, so consuming them would lose them. Callers check the token
+    /// once per reply, just before rendering; a cancel landing after that
+    /// check can't be caught from here.
+    async fn park_completed(&self, completed: impl IntoIterator<Item = CompletedOutput>) {
+        let mut state = self.state.lock().await;
+        for done in completed {
+            if let Some(inst) = state.instances.get_mut(&done.machine_id)
+                && let Some(cell_number) = done.cell_number
+            {
+                inst.recovered_executions
+                    .insert((done.kernel_id, cell_number), done.output);
+            }
+        }
+    }
+
+    /// Reply with one completed output, or park it if the call was
+    /// cancelled. `cleanup` adds the shared spend/cleanup footer; `None` (an
+    /// output already recovered) replies without it.
+    async fn single_output_reply(
+        &self,
+        ctx: &CallContext,
+        done: CompletedOutput,
+        cleanup: Option<Cleanup>,
+    ) -> Result<CallToolResult, McpError> {
+        if ctx.cancel.is_cancelled() {
+            self.park_completed([done]).await;
+            return cancelled_reply();
+        }
+        let is_error = done.output.error.is_some();
+        let (body, images) = render_output(done.output, ImageCollector::default()).await;
+        match cleanup {
+            Some(cleanup) => {
+                self.finish_execution_reply(body, images, cleanup == Cleanup::Disabled, is_error)
+                    .await
+            }
+            None => Ok(execution_reply(body, images, is_error)),
+        }
     }
 
     /// Shared footer for execution results: spend/budget line, cleanup-disabled nudge, and error-vs-success
@@ -584,18 +734,15 @@ impl RemoteKernelsServer {
         &self,
         held: HeldExecution,
         timeout_secs: Option<u64>,
-        progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
+        ctx: CallContext,
     ) -> Result<CallToolResult, McpError> {
         let cleanup = held.cleanup;
         let deadline = timeout_secs.map(|secs| {
             tokio::time::Instant::now() + std::time::Duration::from_secs(clamp_timeout_secs(secs))
         });
-        match self.wait_execution(held, deadline, progress.as_ref()).await {
-            WaitOutcome::Completed(output) => {
-                let is_error = output.error.is_some();
-                let (body, images) = render_output(output, ImageCollector::default()).await;
-                self.finish_execution_reply(body, images, cleanup == Cleanup::Disabled, is_error)
-                    .await
+        match self.wait_execution(held, deadline, &ctx).await {
+            WaitOutcome::Completed(done) => {
+                self.single_output_reply(&ctx, done, Some(cleanup)).await
             }
             WaitOutcome::StillRunning => {
                 Ok(CallToolResult::success(vec![ContentBlock::text(format!(
@@ -603,6 +750,7 @@ impl RemoteKernelsServer {
                     timeout_secs.expect("StillRunning requires a timeout")
                 ))]))
             }
+            WaitOutcome::Cancelled => cancelled_reply(),
             WaitOutcome::Fenced(message) => {
                 err_text(format!("{message}; the execution continues on the machine"))
             }
@@ -610,18 +758,35 @@ impl RemoteKernelsServer {
         }
     }
 
+    /// Put one still-running execution back for a later call (a timeout or
+    /// a cancelled call). On a fenced machine the receiver is dropped instead
+    /// and the fence message returned; attach recovery collects the output.
+    async fn repark_one(&self, held: HeldExecution) -> Option<String> {
+        let mut state = self.state.lock().await;
+        let inst = state.instances.get_mut(&held.machine_id)?;
+        if let Some(message) = Self::fenced_message(inst) {
+            return Some(message);
+        }
+        if let Some(cell_number) = held.cell_number {
+            inst.pending_executions
+                .insert((held.kernel_id, cell_number), held.result_rx);
+        }
+        None
+    }
+
     /// Hold one pending execution to completion (the engine behind
     /// `wait_held`; `wait_all` polls its batch directly). On `StillRunning`
-    /// the receiver has been reinserted into `pending_executions`; on
-    /// `Fenced` after completion the output is parked in
-    /// `recovered_executions` via `park_if_fenced`.
+    /// and `Cancelled` the receiver has been reinserted into
+    /// `pending_executions`; on `Fenced` after completion the output is
+    /// parked in `recovered_executions` via `park_if_fenced`.
     #[allow(clippy::cast_precision_loss, clippy::collapsible_if)]
     async fn wait_execution(
         &self,
         mut held: HeldExecution,
         deadline: Option<tokio::time::Instant>,
-        progress: Option<&(RequestMetaObject, Peer<RoleServer>)>,
+        ctx: &CallContext,
     ) -> WaitOutcome {
+        let progress = ctx.progress.as_ref();
         let started = std::time::Instant::now();
         let mut fence_check = tokio::time::interval(std::time::Duration::from_millis(200));
         fence_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -658,19 +823,16 @@ impl RemoteKernelsServer {
                     }
                 }
                 () = async { timeout.as_mut().expect("guarded timeout").as_mut().await }, if timeout.is_some() => {
-                    let mut state = self.state.lock().await;
-                    if let Some(inst) = state.instances.get_mut(&held.machine_id) {
-                        if let Some(message) = Self::fenced_message(inst) {
-                            return WaitOutcome::Fenced(message);
-                        }
-                        if let Some(cell_number) = held.cell_number {
-                            inst.pending_executions.insert(
-                                (held.kernel_id.clone(), cell_number),
-                                held.result_rx,
-                            );
-                        }
-                    }
-                    return WaitOutcome::StillRunning;
+                    return match self.repark_one(held).await {
+                        Some(message) => WaitOutcome::Fenced(message),
+                        None => WaitOutcome::StillRunning,
+                    };
+                }
+                () = ctx.cancel.cancelled() => {
+                    return match self.repark_one(held).await {
+                        Some(message) => WaitOutcome::Fenced(message),
+                        None => WaitOutcome::Cancelled,
+                    };
                 }
             }
         };
@@ -692,7 +854,7 @@ impl RemoteKernelsServer {
                     self.update_notebook_cell(&held.kernel_id, cell_number, &output)
                         .await;
                 }
-                WaitOutcome::Completed(output)
+                WaitOutcome::Completed(held.completed(output))
             }
         }
     }
@@ -700,7 +862,7 @@ impl RemoteKernelsServer {
     pub(super) async fn get_output_inner(
         &self,
         params: GetOutputParams,
-        progress: Option<(RequestMetaObject, Peer<RoleServer>)>,
+        ctx: CallContext,
     ) -> Result<CallToolResult, McpError> {
         let wait = params.wait.unwrap_or(true);
         let timeout_secs = params.timeout.unwrap_or(30);
@@ -721,9 +883,13 @@ impl RemoteKernelsServer {
             let key = (params.kernel_id.clone(), params.cell_number);
             if let Some(output) = inst.recovered_executions.remove(&key) {
                 drop(state);
-                let is_error = output.error.is_some();
-                let (body, images) = render_output(output, ImageCollector::default()).await;
-                return Ok(execution_reply(body, images, is_error));
+                let done = CompletedOutput {
+                    machine_id,
+                    kernel_id: params.kernel_id,
+                    cell_number: Some(params.cell_number),
+                    output,
+                };
+                return self.single_output_reply(&ctx, done, None).await;
             }
             let Some(rx) = inst.pending_executions.remove(&key) else {
                 return err_text(format!(
@@ -748,26 +914,19 @@ impl RemoteKernelsServer {
                 tokio::time::Instant::now()
                     + std::time::Duration::from_secs(clamp_timeout_secs(timeout_secs))
             });
-            match self.wait_execution(held, deadline, progress.as_ref()).await {
-                WaitOutcome::Completed(output) => {
-                    let is_error = output.error.is_some();
-                    // Same footer as execute()/wait(): spend line and
-                    // cleanup-disabled reminder apply to results however
-                    // they are collected.
-                    let (body, images) = render_output(output, ImageCollector::default()).await;
-                    self.finish_execution_reply(
-                        body,
-                        images,
-                        cleanup == Cleanup::Disabled,
-                        is_error,
-                    )
-                    .await
+            match self.wait_execution(held, deadline, &ctx).await {
+                // Same footer as execute()/wait(): spend line and
+                // cleanup-disabled reminder apply to results however they
+                // are collected.
+                WaitOutcome::Completed(done) => {
+                    self.single_output_reply(&ctx, done, Some(cleanup)).await
                 }
                 WaitOutcome::StillRunning => {
                     Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                         "Execution still running after {timeout_secs}s. Use get_output() again to check."
                     ))]))
                 }
+                WaitOutcome::Cancelled => cancelled_reply(),
                 WaitOutcome::Fenced(message) => {
                     err_text(format!("{message}; the execution continues on the machine"))
                 }
@@ -779,15 +938,13 @@ impl RemoteKernelsServer {
                 Ok(output) => {
                     self.update_notebook_cell(&params.kernel_id, params.cell_number, &output)
                         .await;
-                    let is_error = output.error.is_some();
-                    let (body, images) = render_output(output, ImageCollector::default()).await;
-                    self.finish_execution_reply(
-                        body,
-                        images,
-                        cleanup == Cleanup::Disabled,
-                        is_error,
-                    )
-                    .await
+                    let done = CompletedOutput {
+                        machine_id,
+                        kernel_id: params.kernel_id,
+                        cell_number: Some(params.cell_number),
+                        output,
+                    };
+                    self.single_output_reply(&ctx, done, Some(cleanup)).await
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                     // Put it back.
