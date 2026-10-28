@@ -1,6 +1,6 @@
 {
   "name": "model-router",
   "version": "0.1.42",
-  "description": "Experimental: non-Claude models (GPT, Grok, Muse) as native Claude Code subagents via a local routing gateway",
+  "description": "Non-Claude models (GPT, Grok, Muse) as native Claude Code subagents via a local routing gateway",
   "types": "./types/index.d.ts"
 }

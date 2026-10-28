@@ -1,6 +1,6 @@
 # model-router
 
-> **Experimental.** This routes all your Claude Code traffic through a local
+> **Beta.** This routes all your Claude Code traffic through a local
 > gateway; a bug here breaks your sessions until you take its wiring out of
 > your settings (`ANTHROPIC_BASE_URL`, or `HTTPS_PROXY` and
 > `proxyAuthHelper`), which always restores direct Anthropic access.

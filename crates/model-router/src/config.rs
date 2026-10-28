@@ -1272,7 +1272,7 @@ impl Config {
     pub fn template() -> String {
         let defaults = Self::default();
         format!(
-            r#"# model-router configuration (experimental)
+            r#"# model-router configuration
 # The router refuses all non-loopback bind addresses.
 # Default: {bind_address}
 # bind-address = "{bind_address}"
