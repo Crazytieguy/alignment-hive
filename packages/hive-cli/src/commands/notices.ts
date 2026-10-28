@@ -22,6 +22,7 @@ export type Notice = {
   id: string;
   severity: 'urgent' | 'problem' | 'action' | 'info';
   text: string;
+  short?: string;
   actions?: Array<{ id: string; label: string; kind: 'command' | 'copy' | 'plugin'; command?: string }>;
   when?: 'start' | 'working';
 };
@@ -75,12 +76,10 @@ async function notices(
     rows.push({
       id: 'session',
       severity: 'info',
-      text:
-        share.state === 'excludable'
-          ? share.isPending
-            ? copy.thisSessionPending
-            : copy.thisSessionReady
-          : copy.thisSession(share.state, share.hadPriorUpload),
+      ...copy.thisSession(
+        share.state === 'excludable' ? (share.isPending ? 'pending' : 'ready') : share.state,
+        share.hadPriorUpload,
+      ),
       // Partly uploaded sessions cannot be excluded: a state, no button.
       actions: share.state === 'excludable' ? [{ id: 'keep-private', label: copy.keepPrivate, kind: 'plugin' }] : [],
       when: 'working',

@@ -7,6 +7,8 @@ const BAND = {
   props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 140, scroll: { offset: 0, bodyRows: 19 }, view: {} },
 }
 
+const FOOTER = { plugin: 'hive', component: 'SessionMode' as const, props: { modes: [] as string[] } }
+
 // The check runs unawaited after session start; a test waits it out. setTimeout is the
 // test runner's, outside the mods' library.
 declare const setTimeout: (run: () => void, ms: number) => void
@@ -57,8 +59,8 @@ function fakeHive(on: On, knownFrom = 1) {
       ...(!isSessionKnown
         ? []
         : isExcluded
-          ? [{ id: 'session', severity: 'info', text: 'this session: excluded', actions: [], when: 'working' }]
-          : [{ id: 'session', severity: 'info', text: 'this session uploads to alignment-hive after 24h idle', actions: [plugin('keep-private', 'Keep private')], when: 'working' }]),
+          ? [{ id: 'session', severity: 'info', text: 'this session: kept private', short: 'kept private', actions: [], when: 'working' }]
+          : [{ id: 'session', severity: 'info', text: 'this session uploads to alignment-hive after 24h idle', short: 'uploads after 24h idle', actions: [plugin('keep-private', 'Keep private')], when: 'working' }]),
     ]
     return ok(0, args[0] === 'notices' ? JSON.stringify({ notices: rows, isSessionKnown }) : 'done')
   })
@@ -91,7 +93,7 @@ describe('hive band', () => {
     await ui.unmount()
   })
 
-  test('Keep private says it is working, then the row shows the session excluded', async ($, on) => {
+  test('Keep private says it is working, then the row shows the session kept private', async ($, on) => {
     const { calls, toasts, state, release } = fakeHive(on)
     await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
     await settle()
@@ -107,9 +109,68 @@ describe('hive band', () => {
     release()
     await pressed
     expect(calls).toContainEqual(['upload', 'exclude', 'abc'])
-    expect(await ui.find({ type: 'Text', text: /this session: excluded/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /this session: kept private/ })).toBeDefined()
     expect(toasts).toEqual([])
     await ui.unmount()
+  })
+
+  test("on the desktop, this session's row folds into a footer label after the first turn; the label opens it again", async ($, on) => {
+    const { calls } = fakeHive(on)
+    await $.session.start({ cwd: '/tmp/project', surface: 'desktop', isInteractive: true })
+    await settle()
+    await $.prompt.submit({ text: 'hi' } as never)
+
+    // Through the first turn the row shows in the band, with Hide; a subagent finishing is not its end.
+    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const footer = await $.ui.mount({ ...FOOTER, surface: 'desktop' })
+    expect(await keys(band)).toEqual(['hive:session:keep-private', 'hive:session:hide'])
+    expect(await footer.find({ key: 'hive:label' })).toBeUndefined()
+    await $.turn.complete({ reason: 'end', agentId: 'child' } as never)
+    await settle()
+    expect(await keys(band)).toEqual(['hive:session:keep-private', 'hive:session:hide'])
+
+    await $.turn.complete({ reason: 'end' } as never)
+    await settle()
+    expect(await keys(band)).toEqual([])
+    expect((await footer.find({ key: 'hive:label' }))?.text).toBe('hive: uploads after 24h idle')
+
+    // Keep private from the reopened row: it folds back, the label saying the new state.
+    await footer.press({ key: 'hive:label' })
+    expect(await keys(band)).toEqual(['hive:session:keep-private', 'hive:session:hide'])
+    expect(await footer.find({ key: 'hive:label' })).toBeUndefined()
+    await band.press({ key: 'hive:session:keep-private' })
+    expect(calls).toContainEqual(['upload', 'exclude', 'abc'])
+    expect(await keys(band)).toEqual([])
+    expect((await footer.find({ key: 'hive:label' }))?.text).toBe('hive: kept private')
+
+    await footer.press({ key: 'hive:label' })
+    await band.press({ key: 'hive:session:hide' })
+    expect(await keys(band)).toEqual([])
+    await band.unmount()
+    await footer.unmount()
+
+    // The terminal keeps the row in the band, under its own collapse, and draws no label.
+    const terminal = await $.ui.mount({ ...FOOTER, surface: 'terminal' })
+    expect(await terminal.find({ key: 'hive:label' })).toBeUndefined()
+    await terminal.unmount()
+  })
+
+  test('on the desktop, a first turn that ends before the row arrives leaves it open until the next', async ($, on) => {
+    fakeHive(on, 2)
+    await $.session.start({ cwd: '/tmp/project', surface: 'desktop', isInteractive: true })
+    await settle()
+    await $.prompt.submit({ text: 'hi' } as never)
+    const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    expect(await keys(band)).toEqual([])
+
+    await $.turn.complete({ reason: 'end' } as never) // the CLI discovers the session only now
+    await settle()
+    expect(await keys(band)).toEqual(['hive:session:keep-private', 'hive:session:hide'])
+
+    await $.turn.complete({ reason: 'end' } as never)
+    await settle()
+    expect(await keys(band)).toEqual([])
+    await band.unmount()
   })
 
   test('Snooze snoozes uploads for a day and the row says so', async ($, on) => {

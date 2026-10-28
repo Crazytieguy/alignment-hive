@@ -2,13 +2,13 @@
 // decides them for this session and is asked again only when they can have changed; the buttons
 // copy a terminal command, run a slash command, or run the CLI's upload commands.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import { cli, hive } from './cli'
-import { noticeRows } from './notice-band'
+import { noticeBand, noticeLabel } from './notice-band'
 import type { Notice, NoticeAction } from './notice-band'
 import { submitWithRecall } from './recall'
-import type { HiveBusy, HiveNotices } from '../types'
+import type { HiveBusy, HiveFolded, HiveNotices } from '../types'
 
 // `when`: which phase of the session shows the row (packages/hive-cli/src/commands/notices.ts).
 type HiveNotice = Notice & { when?: 'start' | 'working' }
@@ -22,6 +22,10 @@ const promptedSession = atom({ plugin: 'hive', key: 'promptedSession' } as const
 const busy = atom({ plugin: 'hive', key: 'busy' } as const, null as HiveBusy | null)
 // The review page's server is running: it serves until stopped, so Review sessions waits for it.
 const isReviewing = atom({ plugin: 'hive', key: 'isReviewing' } as const, false)
+// On the desktop, this session's info rows show in the band through its first turn, then fold
+// into a label in the prompt footer; a press on the label opens them again until Hide. Set once
+// they folded in this session (a /clear starts a new one, open again).
+const folded = atom({ plugin: 'hive', key: 'folded' } as const, null as HiveFolded | null)
 
 // Each `hive notices` costs a few seconds of CPU and a backend call, so a turn refreshes only when
 // something can have changed: a new session id, a session the CLI has not discovered yet, or rows
@@ -104,13 +108,15 @@ async function isRefreshNeeded($: EngineInterface): Promise<boolean> {
 /**
  * Runs a CLI command for a row's button, showing `label` in the row's place until the rows are
  * fresh again; the CLI's words go to a toast only when it fails (the row shows success).
+ * Resolves whether it succeeded.
  */
-async function runForRow($: EngineInterface, row: string, label: string, args: string[]): Promise<void> {
+async function runForRow($: EngineInterface, row: string, label: string, args: string[]): Promise<boolean> {
   await update($, busy, (): HiveBusy => ({ row, label }))
   try {
     const { exitCode, stdout, stderr } = await hive($, args)
     if (exitCode !== 0) $.ui.toast((stderr || stdout).trim() || `hive ${args.join(' ')} failed`)
     await refresh($)
+    return exitCode === 0
   } finally {
     await update($, busy, () => null)
   }
@@ -119,6 +125,58 @@ async function runForRow($: EngineInterface, row: string, label: string, args: s
 /** Work nobody awaits: an unload (a reload, the session's end) aborts it, which is no failure. */
 function inBackground(work: Promise<unknown>): void {
   work.catch(() => undefined)
+}
+
+const isInfo = (notice: Notice) => notice.severity === 'info'
+
+/**
+ * This session's rows, split between the band and the footer label as `surface` shows them. On the
+ * desktop, once the person works, the info rows can fold (`canFold`: the band gives them Hide);
+ * folded, they are the footer's until opened again (see `folded`). `hasFolded`: they folded once
+ * in this session. Null while the rows are another session's.
+ */
+async function visibleRows(
+  $: EngineInterface,
+  surface: RenderSurface,
+): Promise<{ band: Notice[]; footer: Notice[]; canFold: boolean; hasFolded: boolean; sessionId: string } | null> {
+  const [current, hidden, prompted, busyRow, reviewing, foldedIn, sessionId] = await Promise.all([
+    read($, notices),
+    read($, dismissed),
+    read($, promptedSession),
+    read($, busy),
+    read($, isReviewing),
+    read($, folded),
+    $.session.id(),
+  ])
+  if (current?.sessionId !== sessionId) return null
+
+  const isWorking = prompted === sessionId
+  const phase = isWorking ? 'working' : 'start'
+  const rows = (current.rows as HiveNotice[])
+    .filter(notice => !hidden.includes(notice.id) && (notice.when === undefined || notice.when === phase))
+    .map(notice => {
+      if (busyRow?.row === notice.id) return { ...notice, busy: busyRow.label }
+      if (reviewing && notice.actions?.some(action => action.id === 'review')) {
+        return { ...notice, busy: 'review page open, stop it in /tasks' }
+      }
+      return notice
+    })
+
+  const canFold = surface === 'desktop' && isWorking
+  const hasFolded = foldedIn?.sessionId === sessionId
+  const isFolded = canFold && hasFolded && !foldedIn.isOpen
+  return {
+    band: isFolded ? rows.filter(notice => !isInfo(notice)) : rows,
+    footer: isFolded ? rows.filter(isInfo) : [],
+    canFold,
+    hasFolded,
+    sessionId,
+  }
+}
+
+/** Opens or folds this session's info rows on the desktop (see `folded`). */
+function fold($: EngineInterface, sessionId: string, isOpen: boolean): Promise<unknown> {
+  return update($, folded, (): HiveFolded => ({ sessionId, isOpen }))
 }
 
 /** A shell word: the path in single quotes. */
@@ -157,35 +215,20 @@ export const register: Register = (on, options) => {
   })
 
   // A new session is not discovered until its first reply, and a /clear changes the session id
-  // without a session.start.
+  // without a session.start. The end of the first main turn that showed info rows folds them
+  // (the desktop's fold: the terminal never reads it); a subagent's end is not the person's turn.
   on('turn.complete', async ($, e, next) => {
     if (await isRefreshNeeded($)) inBackground(refresh($))
+    const visible = e.agentId === undefined ? await visibleRows($, 'desktop') : null
+    if (visible?.canFold && !visible.hasFolded && visible.band.some(isInfo)) await fold($, visible.sessionId, false)
     return next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const [below, current, hidden, prompted, busyRow, reviewing, sessionId] = await Promise.all([
-      next(e),
-      read($, notices),
-      read($, dismissed),
-      read($, promptedSession),
-      read($, busy),
-      read($, isReviewing),
-      $.session.id(),
-    ])
-    if (e.props.hasSurvey || current?.sessionId !== sessionId) return below
+    const [below, visible] = await Promise.all([next(e), visibleRows($, e.surface)])
+    if (e.props.hasSurvey || visible === null || visible.band.length === 0) return below
 
-    const phase = prompted === sessionId ? 'working' : 'start'
-    const rows = (current.rows as HiveNotice[])
-      .filter(notice => !hidden.includes(notice.id) && (notice.when === undefined || notice.when === phase))
-      .map(notice => {
-        if (busyRow?.row === notice.id) return { ...notice, busy: busyRow.label }
-        if (reviewing && notice.actions?.some(action => action.id === 'review')) {
-          return { ...notice, busy: 'review page open, stop it in /tasks' }
-        }
-        return notice
-      })
-    if (rows.length === 0) return below
+    const { band: rows, sessionId } = visible
 
     const onAction = async (notice: Notice, action: NoticeAction) => {
       if (action.kind === 'copy' && action.command) {
@@ -201,7 +244,9 @@ export const register: Register = (on, options) => {
         return
       }
       if (action.id === 'keep-private') {
-        await runForRow($, notice.id, 'keeping private…', ['upload', 'exclude', sessionId])
+        // Done, the row folds back on the desktop: its label then says the new state.
+        const isKept = await runForRow($, notice.id, 'keeping private…', ['upload', 'exclude', sessionId])
+        if (isKept && visible.canFold) await fold($, sessionId, false)
         return
       }
       if (action.id === 'snooze') {
@@ -228,11 +273,21 @@ export const register: Register = (on, options) => {
     const onDismiss = (notice: Notice) => update($, dismissed, list => [...list, notice.id])
 
     const ui = $.ui.resolve(e)
-    const drawn = noticeRows(ui, PLUGIN, rows, { onAction, onDismiss })
+    const onHide = visible.canFold ? () => fold($, sessionId, false) : undefined
+    return noticeBand(ui, e.surface, PLUGIN, rows, { onAction, onDismiss, onHide }, below)
+  })
 
+  // The desktop's footer: this session's folded info rows as a label while the person works.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    if (e.surface !== 'desktop') return next(e)
+    const [below, visible] = await Promise.all([next(e), visibleRows($, e.surface)])
+    if (!visible?.footer.length) return below
+
+    const ui = $.ui.resolve(e)
+    const label = noticeLabel(ui, PLUGIN, visible.footer, () => fold($, visible.sessionId, true))
     return (
-      <ui.Box flexDirection="column">
-        {drawn}
+      <ui.Box flexDirection="row" alignItems="center" columnGap={1}>
+        {label}
         {below}
       </ui.Box>
     )

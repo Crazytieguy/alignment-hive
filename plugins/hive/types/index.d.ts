@@ -6,6 +6,10 @@ export type HiveNotices = { sessionId: string; rows: unknown[]; isSessionKnown: 
 // A row whose button's command is running, and what the row says meanwhile.
 export type HiveBusy = { row: string; label: string }
 
+// The session whose info rows folded into the desktop's footer label after its first turn, and
+// whether the person has opened them in the band again.
+export type HiveFolded = { sessionId: string; isOpen: boolean }
+
 declare module 'claude-code' {
   interface PluginState {
     hive: {
@@ -14,6 +18,7 @@ declare module 'claude-code' {
       promptedSession: string | null
       busy: HiveBusy | null
       isReviewing: boolean
+      folded: HiveFolded | null
     }
   }
 }

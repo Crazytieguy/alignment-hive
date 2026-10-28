@@ -4,7 +4,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { noticeRows } from './notice-band'
+import { noticeBand } from './notice-band'
 import type { Notice, NoticeAction } from './notice-band'
 
 const PLUGIN = 'model-router'
@@ -196,13 +196,6 @@ export const register: Register = on => {
     }
 
     const ui = $.ui.resolve(e)
-    const drawn = noticeRows(ui, PLUGIN, rows, { onAction, onDismiss })
-
-    return (
-      <ui.Box flexDirection="column">
-        {drawn}
-        {below}
-      </ui.Box>
-    )
+    return noticeBand(ui, e.surface, PLUGIN, rows, { onAction, onDismiss }, below)
   })
 }

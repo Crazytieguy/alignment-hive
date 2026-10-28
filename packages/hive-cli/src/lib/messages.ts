@@ -522,11 +522,22 @@ export const hive = {
         ? `1 session pending upload to alignment-hive · uploads in ${timeStr}`
         : `${count} sessions pending upload to alignment-hive · next in ${timeStr}`,
     review: 'Review sessions',
-    // The review window restarts on any change to the session, not only the person's messages.
-    thisSessionPending: 'this session uploads to alignment-hive after 24h idle',
-    thisSessionReady: 'this session is ready to upload to alignment-hive',
-    thisSession: (state: 'excluded' | 'uploaded' | 'partial', hadPriorUpload: boolean): string =>
-      `this session: ${state === 'partial' ? 'partly uploaded' : state}${state === 'excluded' && hadPriorUpload ? ' (an earlier copy stays shared)' : ''}`,
+    // This session's row, and `short`, its state in a few words for the desktop's footer label
+    // (`hive: <short>`). The review window restarts on any change to the session, not only the
+    // person's messages; "kept private" is the Keep private button's own word.
+    thisSession: (
+      state: 'pending' | 'ready' | 'excluded' | 'uploaded' | 'partial',
+      hadPriorUpload: boolean,
+    ): { text: string; short: string } => {
+      if (state === 'pending') return { text: 'this session uploads to alignment-hive after 24h idle', short: 'uploads after 24h idle' };
+      if (state === 'ready') return { text: 'this session is ready to upload to alignment-hive', short: 'ready to upload' };
+      const word = state === 'excluded' ? 'kept private' : state === 'partial' ? 'partly uploaded' : 'uploaded';
+      const isCopyShared = state === 'excluded' && hadPriorUpload;
+      return {
+        text: `this session: ${word}${isCopyShared ? ' (an earlier copy stays shared)' : ''}`,
+        short: `${word}${isCopyShared ? ', earlier copy shared' : ''}`,
+      };
+    },
     keepPrivate: 'Keep private',
     usage: 'Usage: hive notices <session-id> [--session-only]',
     takesOne: 'notices takes one full session id',
