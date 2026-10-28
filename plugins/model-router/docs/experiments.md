@@ -2366,3 +2366,45 @@ and reads of the minified 2.1.308 source.
   request, but sees no request body (system prompt, tool schemas, cache
   marks), so it cannot forward one faithfully.
 - `modelSettings` has no per-model endpoint.
+
+## Refusal fallback on routed models (2026-10-27, Claude Code 2.1.312, CLIProxyAPI 8.0.34)
+
+2.1.312's changelog: "Changed automatic model switches after a flagged
+message to also cover model names Claude Code doesn't recognize". This
+supersedes the 2026-07-28 note (fallback gated on the `refusal_fallback`
+capability) and the 2026-10-07 "Binary only, not measured" bullet.
+
+Method: nested `claude -p --model gpt-6.1-sol` (scratch config dir, the
+user's login) against a fake upstream that answers GPT requests with
+`stop_reason: "refusal"`, with and without `stop_details`, Claude requests
+normally. 2.1.309 vs 2.1.312, flag on and off. Plus reads of the 2.1.312
+source and CLIProxyAPI's translators.
+
+| arm | 2.1.309 | 2.1.312 |
+|---|---|---|
+| refusal, no `stop_details` | retry once, then API error | same; the retry carries `fallbacks: "default"` |
+| refusal, `stop_details.category: "cyber"` | retry once, then API error | retry once, then switches the session to `claude-opus-4-8` |
+| same, flag `0` (no `cch=` on the wire) | not run | switches too; the retry carries no `fallbacks` field |
+| same, `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1` | | API error, no `fallbacks` field |
+
+- Routing is by category: an unrecognized model gets the default table
+  (`bio` and `frontier_llm` → `claude-opus-5`, `cyber` →
+  `claude-opus-4-8`). A refusal without a category is "unmapped" and
+  switches nothing unless `CLAUDE_CODE_REFUSAL_FALLBACK_CATCH_ALL` is set.
+- No CLIProxyAPI route carries a category (Claude routes pass Anthropic's
+  through, but those are recognized models, unchanged by 2.1.312).
+  CLIProxyAPI's Codex translator turns
+  `incomplete_details.reason: content_filter` into `stop_reason: "refusal"`
+  with no `stop_details`; the OpenAI-compatible translator maps
+  `content_filter` to `end_turn`; nothing in CLIProxyAPI writes
+  `stop_details`. So a routed refusal ends the turn with "API Error:
+  gpt-6.1-sol's safeguards flagged this message (…anthropic.com/legal/aup)
+  … change your model", attributing an OpenAI filter to Anthropic's policy,
+  and never switches providers.
+- The retry's `fallbacks: "default"` comes with the
+  `server-side-fallback-2026-07-01` and `fallback-credit-2026-06-01` betas.
+  Live through the router, `gpt-6-luna` answered normally with all three.
+
+Decision: no change. `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK` would also turn
+the fallback off for Claude sessions, and the switch needs a category no
+route sends. Retest if CLIProxyAPI starts writing `stop_details`.
