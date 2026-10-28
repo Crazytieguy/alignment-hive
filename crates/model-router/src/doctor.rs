@@ -483,6 +483,54 @@ fn auth_check(dirs: &Dirs, name: &'static str, prefix: &str, missing: &str) -> C
     }
 }
 
+/// Whether the managed auth dir holds a Codex login, failing also once every
+/// login's access token is past its `expired` time. `CLIProxyAPI` refreshes a
+/// token days before it expires (and within a minute of waking from sleep),
+/// so an expired one means refreshing has stopped, and every GPT call then
+/// fails with `503 auth_unavailable` (#108). Files whose expiry can't be read
+/// count as present.
+fn codex_auth_check(dirs: &Dirs, now: chrono::DateTime<chrono::Utc>) -> Check {
+    let files = crate::state::auth_files(&dirs.auth_dir(), CODEX_AUTH_PREFIX).unwrap_or_default();
+    let check = |ok: bool, detail: String| Check {
+        warn: false,
+        name: "codex-auth",
+        ok,
+        detail,
+    };
+    let Some(first) = files.first() else {
+        return check(
+            false,
+            "no Codex login found; run `model-router login`".to_string(),
+        );
+    };
+    let present = check(true, format!("login present: {}", first.display()));
+    let expiries: Vec<Option<chrono::DateTime<chrono::FixedOffset>>> = files
+        .iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(path).ok()?;
+            let login: serde_json::Value = serde_json::from_str(&text).ok()?;
+            chrono::DateTime::parse_from_rfc3339(login.get("expired")?.as_str()?).ok()
+        })
+        .collect();
+    if expiries
+        .iter()
+        .any(|expiry| expiry.is_none_or(|at| at > now))
+    {
+        return present;
+    }
+    match expiries.into_iter().flatten().max() {
+        Some(latest) => check(
+            false,
+            format!(
+                "Codex login expired {} and CLIProxyAPI has not refreshed it; run `model-router \
+                 login`",
+                latest.to_rfc3339()
+            ),
+        ),
+        None => present,
+    }
+}
+
 fn upstream_checks(
     dirs: &Dirs,
     config: &Config,
@@ -507,12 +555,7 @@ fn upstream_checks(
             });
 
             checks.push(match config.gpt.auth {
-                GptAuth::Subscription => auth_check(
-                    dirs,
-                    "codex-auth",
-                    CODEX_AUTH_PREFIX,
-                    "no Codex login found; run `model-router login`",
-                ),
+                GptAuth::Subscription => codex_auth_check(dirs, chrono::Utc::now()),
                 GptAuth::ApiKey => {
                     let (ok, detail) = match config.gpt.api_key {
                         Some(_) => (
@@ -1284,6 +1327,48 @@ mod tests {
         let muse = names(&muse_enabled());
         assert!(muse.contains(&"muse-auth"), "{muse:?}");
         assert!(!muse.contains(&"grok-auth"), "{muse:?}");
+    }
+
+    #[test]
+    fn codex_auth_fails_once_every_login_has_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-22T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        let write = |name: &str, body: &str| {
+            std::fs::write(dirs.auth_dir().join(name), body).unwrap();
+        };
+        assert!(!codex_auth_check(&dirs, now).ok, "no login at all");
+
+        // The #108 shape: refreshing stopped and the access token lapsed.
+        write(
+            "codex-a-x@example.com-plus.json",
+            r#"{"type":"codex","expired":"2026-09-20T16:22:00-07:00"}"#,
+        );
+        let check = codex_auth_check(&dirs, now);
+        assert!(!check.ok);
+        assert!(
+            check.detail.contains("2026-09-20T16:22:00-07:00")
+                && check.detail.contains("model-router login"),
+            "{}",
+            check.detail
+        );
+
+        // Logging in again saves a second file beside the stale one.
+        write(
+            "codex-b-x@example.com-prolite.json",
+            r#"{"type":"codex","expired":"2026-10-01T00:00:00Z"}"#,
+        );
+        assert!(codex_auth_check(&dirs, now).ok);
+
+        // An expiry that can't be read is not taken as expired.
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        std::fs::write(dirs.auth_dir().join("codex-c.json"), b"{}").unwrap();
+        assert!(codex_auth_check(&dirs, now).ok);
     }
 
     #[test]
