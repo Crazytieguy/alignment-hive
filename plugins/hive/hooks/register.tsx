@@ -7,7 +7,7 @@ import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 import { cli, hive } from './cli'
 import { noticeBand, noticeLabel } from './notice-band'
 import type { Notice, NoticeAction } from './notice-band'
-import { submitWithRecall } from './recall'
+import { drawRecalled, onPromptStored, submitWithRecall } from './recall'
 import type { HiveBusy, HiveFolded, HiveNotices } from '../types'
 
 // `when`: which phase of the session shows the row (packages/hive-cli/src/commands/notices.ts).
@@ -197,6 +197,12 @@ export const register: Register = (on, options) => {
     if (prompted !== sessionId) await update($, promptedSession, () => sessionId)
     return options.recall === true ? submitWithRecall($, e, next, String(options.recallModel ?? 'auto')) : next(e)
   })
+
+  // What recall gave a prompt shows under it (recall.tsx); the prompt's stored row names it.
+  if (options.recall === true) {
+    on('session.append', { door: ['prompt', 'delivery'] }, onPromptStored)
+    on('ui.render', { component: 'UserMessage' }, drawRecalled)
+  }
 
   // The CLI discovers a session once it holds an assistant reply: the first reply row stored in
   // the main conversation of a session it does not know yet is the moment to ask again, once per

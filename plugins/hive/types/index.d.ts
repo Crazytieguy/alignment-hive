@@ -10,9 +10,19 @@ export type HiveBusy = { row: string; label: string }
 // whether the person has opened them in the band again.
 export type HiveFolded = { sessionId: string; isOpen: boolean }
 
+// What automatic recall gave one prompt, by the prompt's transcript row: the entries Claude read
+// with it and how far back recall read, or that it found none or did not finish.
+export type HiveRecalled =
+  | { entries: Array<{ loc: string; label: string; text: string; date: string; context: string }>; from: string }
+  | 'none'
+  | 'failed'
+  | null
+
 declare module 'claude-code' {
   interface PluginState {
     hive: {
+      recalled: StateFamily<HiveRecalled>
+      isRecallOpen: StateFamily<boolean>
       notices: HiveNotices | null
       dismissed: string[]
       promptedSession: string | null
