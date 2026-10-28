@@ -79,7 +79,7 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 - **Codebase exploration**: `precis` — Gives Claude a summary of your codebase at the start of each session
 - **Cross-model review** (both need a ChatGPT subscription; offer as one choice):
   - `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code; the stable alternative
-  - `model-router@alignment-hive` — Recommended, experimental. GPT models as regular Claude Code subagents (parallel, in workflows), plus optional Grok and open-weights models. Remote Control doesn't work while it's installed; if you use it, pick Codex
+  - `model-router@alignment-hive` — Recommended, experimental. GPT models as regular Claude Code subagents (parallel, in workflows), plus optional Grok and open-weights models
 - **Session debriefs**: `debrief@alignment-hive` — In beta. `/debrief:debrief` turns a finished session into a page of what was done, how it was checked and what needs your call; needs the hive CLI
 - **Reply TL;DRs**: `tldr@alignment-hive` — Long replies collapse to a one-sentence TL;DR, [ more ] expands one; /tldr turns it off — **Always recommend**
 
