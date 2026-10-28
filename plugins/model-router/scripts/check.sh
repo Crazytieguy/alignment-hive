@@ -107,7 +107,7 @@ if [ -n "$HEALTH" ]; then
   }
   # The /model picker lacks a shipped GPT route or lists a retired one.
   if needed models; then
-    # "GPT-6.1 Sol" or "GPT-6 Astra, GPT-6.1 Sol and GPT-6 Luna".
+    # "GPT-6.1 Terra" or "GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna".
     LABELS=$(printf '%s' "$OUT" | sed -n 's/.*"labels":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g; s/\(.*\), /\1 and /')
     if [ -n "$LABELS" ]; then
       add_row new-model "$LABELS can be added to /model" add-models "Add to /model"

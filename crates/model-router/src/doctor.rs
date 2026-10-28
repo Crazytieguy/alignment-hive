@@ -981,8 +981,9 @@ mod tests {
     }
 
     /// The Codex slugs every default config routes to.
-    const GPT_MODELS: [&str; 7] = [
+    const GPT_MODELS: [&str; 8] = [
         "gpt-6.1-sol",
+        "gpt-6.1-terra",
         "gpt-6-astra",
         "gpt-6-sol",
         "gpt-6-luna",
@@ -1051,6 +1052,7 @@ mod tests {
         // exactly as broken as a vanished Grok one.
         let body = models_body(&[
             "gpt-6.1-sol",
+            "gpt-6.1-terra",
             "gpt-6-astra",
             "gpt-6-sol",
             "gpt-6-luna",
@@ -1096,7 +1098,7 @@ mod tests {
             "{}",
             check.detail
         );
-        assert!(!check.detail.contains("terra"), "{}", check.detail);
+        assert!(!check.detail.contains("gpt-5.6-terra"), "{}", check.detail);
         assert!(check.detail.contains("config-template"), "{}", check.detail);
     }
 
@@ -1112,7 +1114,9 @@ mod tests {
         let check = shipped_agent_routes_check(&config(&source));
         assert!(!check.ok);
         assert!(
-            check.detail.contains("lacks gpt-6.1-sol, gpt-6-luna,"),
+            check
+                .detail
+                .contains("lacks gpt-6.1-sol, gpt-6.1-terra, gpt-6-luna,"),
             "{}",
             check.detail
         );
@@ -1132,7 +1136,30 @@ mod tests {
         let check = shipped_agent_routes_check(&config(&source));
         assert!(!check.ok);
         assert!(
-            check.detail.contains("lacks gpt-6.1-sol, which"),
+            check
+                .detail
+                .contains("lacks gpt-6.1-sol, gpt-6.1-terra, which"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn a_models_list_written_before_gpt_6_1_terra_is_named_with_the_fix() {
+        // A 0.1.23-era list: every built-in GPT route but GPT-6.1 Terra.
+        let source = models_toml(&[
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ]);
+        let check = shipped_agent_routes_check(&config(&source));
+        assert!(!check.ok);
+        assert!(
+            check.detail.contains("lacks gpt-6.1-terra, which"),
             "{}",
             check.detail
         );
@@ -1140,7 +1167,13 @@ mod tests {
 
     #[test]
     fn a_custom_list_that_keeps_the_shipped_routes_passes() {
-        let source = models_toml(&["mine", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]);
+        let source = models_toml(&[
+            "mine",
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-luna",
+        ]);
         let check = shipped_agent_routes_check(&config(&source));
         assert!(check.ok, "{}", check.detail);
     }

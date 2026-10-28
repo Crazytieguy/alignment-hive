@@ -1115,13 +1115,15 @@ mod tests {
         ));
         assert_eq!(
             dirs.models(CURRENT, false),
-            json!({"needed": true, "canApply": true, "adds": ["gpt-6.1-sol", "gpt-6-luna"],
-                   "labels": ["GPT-6.1 Sol", "GPT-6 Luna"]})
+            json!({"needed": true, "canApply": true,
+                   "adds": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"],
+                   "labels": ["GPT-6.1 Sol", "GPT-6.1 Terra", "GPT-6 Luna"]})
         );
         assert_eq!(
             dirs.models(CURRENT, true),
-            json!({"applied": true, "added": ["gpt-6.1-sol", "gpt-6-luna"],
-                   "windows": {"gpt-6.1-sol": 475_000, "gpt-6-luna": 258_400}})
+            json!({"applied": true, "added": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"],
+                   "windows": {"gpt-6.1-sol": 475_000, "gpt-6.1-terra": 475_000,
+                               "gpt-6-luna": 258_400}})
         );
         let expected = format!(
             r#"{{
@@ -1145,6 +1147,10 @@ mod tests {
         "label": "GPT-6.1 Sol"
       }},
       {{
+        "model": "gpt-6.1-terra",
+        "label": "GPT-6.1 Terra"
+      }},
+      {{
         "model": "gpt-6-luna",
         "label": "GPT-6 Luna"
       }}
@@ -1153,6 +1159,9 @@ mod tests {
   "alpha": true,
   "modelSettings": {{
     "gpt-6.1-sol": {{
+      "autoCompactWindow": 475000
+    }},
+    "gpt-6.1-terra": {{
       "autoCompactWindow": 475000
     }},
     "gpt-6-luna": {{
@@ -1176,13 +1185,14 @@ mod tests {
         ));
         assert_eq!(
             dirs.models(CURRENT, true)["windows"],
-            json!({"gpt-6.1-sol": 475_000})
+            json!({"gpt-6.1-sol": 475_000, "gpt-6.1-terra": 475_000})
         );
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
         assert_eq!(
             written["modelSettings"],
             json!({"gpt-6-luna": {"autoCompactWindow": 500_000},
-                   "gpt-6.1-sol": {"x": 1, "autoCompactWindow": 475_000}})
+                   "gpt-6.1-sol": {"x": 1, "autoCompactWindow": 475_000},
+                   "gpt-6.1-terra": {"autoCompactWindow": 475_000}})
         );
     }
 
@@ -1194,8 +1204,9 @@ mod tests {
         ));
         assert_eq!(
             dirs.models(CURRENT, true),
-            json!({"applied": true, "added": ["gpt-6.1-sol", "gpt-6-luna"],
-                   "windows": {"gpt-6.1-sol": 475_000, "gpt-6-luna": 258_400}})
+            json!({"applied": true, "added": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"],
+                   "windows": {"gpt-6.1-sol": 475_000, "gpt-6.1-terra": 475_000,
+                               "gpt-6-luna": 258_400}})
         );
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
         assert_eq!(written["env"], json!({BASE_URL: URL, "KEEP": "1"}));
@@ -1205,7 +1216,10 @@ mod tests {
             .iter()
             .map(|row| row["model"].as_str().unwrap())
             .collect();
-        assert_eq!(rows, ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]);
+        assert_eq!(
+            rows,
+            ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"]
+        );
     }
 
     #[test]
@@ -1217,7 +1231,7 @@ mod tests {
         dirs.models(CURRENT, true);
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
         assert_eq!(
-            written["modelPicker"]["options"][3],
+            written["modelPicker"]["options"][4],
             json!({"model": "grok-4.7", "label": "Grok"})
         );
     }
@@ -1230,7 +1244,7 @@ mod tests {
         dirs.user(&format!(r#"{{"env":{{"{BASE_URL}":"{URL}"}}}}"#));
         assert_eq!(
             dirs.models(CURRENT, false)["adds"],
-            json!(["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"])
+            json!(["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"])
         );
     }
 
@@ -1470,7 +1484,7 @@ mod tests {
         assert_eq!(written["theme"], "dark");
         assert_eq!(
             written["modelPicker"]["options"].as_array().unwrap().len(),
-            3
+            4
         );
     }
 
@@ -1546,9 +1560,10 @@ mod tests {
             });
             assert_eq!(
                 first.join().unwrap(),
-                json!({"applied": true, "added": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"],
+                json!({"applied": true,
+                       "added": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"],
                        "windows": {"gpt-6-astra": 258_400, "gpt-6.1-sol": 475_000,
-                                   "gpt-6-luna": 258_400}})
+                                   "gpt-6.1-terra": 475_000, "gpt-6-luna": 258_400}})
             );
             // The lock held the bypass until the first had committed.
             let (report, waited) = second.join().unwrap();
@@ -1628,8 +1643,9 @@ mod tests {
     }
 
     /// Every built-in GPT route, in route order.
-    const GPT_ROUTES: [&str; 7] = [
+    const GPT_ROUTES: [&str; 8] = [
         "gpt-6.1-sol",
+        "gpt-6.1-terra",
         "gpt-6-astra",
         "gpt-6-sol",
         "gpt-6-luna",
@@ -1650,6 +1666,18 @@ mod tests {
             .map(|id| format!(r#""{id}":{{"autoCompactWindow":{}}}"#, window(id)))
             .collect();
         format!("{{{}}}", entries.join(","))
+    }
+
+    /// `modelSettings` as setup wrote it before Codex raised GPT-6.1 Sol's
+    /// default: Sol at the former one, every other route at its own.
+    fn entries_before_sol_raise() -> String {
+        entries_at(|id| {
+            if id == "gpt-6.1-sol" {
+                258_400
+            } else {
+                crate::config::codex_default_window(id)
+            }
+        })
     }
 
     fn windows_to(
@@ -1806,7 +1834,7 @@ mod tests {
     #[test]
     fn an_entry_at_a_former_codex_default_moves_to_the_current_one() {
         let dirs = Dirs::new();
-        let entries = entries_at(|_| 258_400);
+        let entries = entries_before_sol_raise();
         dirs.user(&format!(
             r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000"}},"modelSettings":{entries}}}"#
         ));
@@ -1844,7 +1872,7 @@ mod tests {
             if id == "gpt-6.1-sol" {
                 300_000
             } else {
-                258_400
+                crate::config::codex_default_window(id)
             }
         });
         dirs.user(&format!(
@@ -1869,7 +1897,7 @@ mod tests {
         assert_eq!(report["updates"], json!([]), "{report}");
         assert_eq!(report["needed"], false, "{report}");
 
-        let entries = entries_at(|_| 258_400);
+        let entries = entries_before_sol_raise();
         dirs.user(&format!(
             r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000",
                 "CLAUDE_CODE_AUTO_COMPACT_WINDOW":"258400"}},"modelSettings":{entries}}}"#
@@ -1884,7 +1912,7 @@ mod tests {
     fn a_missing_and_an_outdated_entry_are_set_together() {
         let dirs = Dirs::new();
         let entries =
-            entries_at(|_| 258_400).replace(r#""gpt-6-luna":{"autoCompactWindow":258400},"#, "");
+            entries_before_sol_raise().replace(r#""gpt-6-luna":{"autoCompactWindow":258400},"#, "");
         dirs.user(&format!(
             r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000"}},"modelSettings":{entries}}}"#
         ));

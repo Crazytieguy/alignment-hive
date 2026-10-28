@@ -2408,3 +2408,32 @@ source and CLIProxyAPI's translators.
 Decision: no change. `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK` would also turn
 the fallback off for Claude sessions, and the switch needs a category no
 route sends. Retest if CLIProxyAPI starts writing `stop_details`.
+
+## GPT-6.1 Terra (2026-10-27, Claude Code 2.1.312, CLIProxyAPI 8.0.34, router 0.1.30)
+
+OpenAI released `gpt-6.1-terra` on 2026-10-26. No pin change: CLIProxyAPI's
+remote catalog (`router-for-me/models` 85c37137, 2026-10-26) added it, and
+the live 8.0.34 child listed it with no restart. `codex debug models` (live
+catalog, Codex 0.163.0) gives it `context_window` 500000, `max_context_window`
+872000 and the 95% multiplier, as for gpt-6.1-sol, so it compacts at 475000
+like Sol; `--bundled` doesn't list it. Efforts low through ultra in Codex's
+catalog; low through max in CLIProxyAPI's.
+
+Sandbox: worktree debug binary on 8897 in external mode against a private
+8.0.34 child on 8398 (`request-log: true`, a copy of the Codex login, both
+deleted after), private XDG dirs. Live router and child PIDs, health version
+and plist mtime identical before and after. Evidence is the child's
+provider-bound request log.
+
+| check | result |
+|---|---|
+| smoke | answers as `gpt-6.1-terra`; says it is OpenAI's GPT-6.1 Terra; gpt-6.1-sol unchanged |
+| effort (with `thinking: adaptive`) | upstream `reasoning.effort` = requested for low, medium, high, xhigh, max; no `service_tier` sent, the response reports `default` |
+| streaming, tool use | SSE well-formed; two-turn tool round trip correct |
+| image input | a base64 PNG reaches it (a pure-blue square read as "Navy") |
+| WebSearch | Codex `/alpha/search` answered in about 1s with 37 results |
+| window | ~600K tokens accepted; ~1.09M → upstream "Your input exceeds the context window of this model", translated to `prompt is too long: 1090088 tokens > 828400 maximum` |
+| Claude Code, main loop | `claude -p --model gpt-6.1-terra` (scratch config dir, auto mode) fixed a failing test in 5 turns; every request 200 |
+| Claude Code, subagent | Haiku delegated the same task to an `--agents` definition with `model: gpt-6.1-terra`; fixed and verified |
+| `/compact` | the compaction request went out with `tool_choice: none` (200); the next turn recalled the fix |
+| doctor | `routed-models` and `shipped-agent-routes gpt-6-astra, gpt-6.1-sol, gpt-6.1-terra, gpt-6-luna` ok; `context-windows` names Terra's missing compaction window in the existing user settings, which `settings windows` and `settings models` (dry run: `adds ["gpt-6.1-terra"]`) both offer to fix |

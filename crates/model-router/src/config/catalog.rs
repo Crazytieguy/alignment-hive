@@ -23,11 +23,14 @@ pub(crate) const CODEX_DEFAULT_CONTEXT_WINDOW: u64 = 258_400;
 /// The built-in GPT models whose Codex default differs from
 /// [`CODEX_DEFAULT_CONTEXT_WINDOW`], with the defaults they had before: an
 /// entry still at one of those was set to Codex's default rather than
-/// chosen, so `settings windows` moves it. GPT-6.1 Sol: 500K at 95%, from
-/// Codex's live catalog (2026-10-13, Codex 0.162.1; the catalog bundled in
-/// the binary still says 272K).
-const CODEX_DEFAULT_WINDOW_CHANGES: [(&str, u64, &[u64]); 1] =
-    [("gpt-6.1-sol", 475_000, &[CODEX_DEFAULT_CONTEXT_WINDOW])];
+/// chosen, so `settings windows` moves it. Both are 500K at 95%, from
+/// Codex's live catalog: GPT-6.1 Sol since 2026-10-13 (Codex 0.162.1; the
+/// catalog bundled in the binary still says 272K), GPT-6.1 Terra since its
+/// release (2026-10-26, Codex 0.163.0).
+const CODEX_DEFAULT_WINDOW_CHANGES: [(&str, u64, &[u64]); 2] = [
+    ("gpt-6.1-sol", 475_000, &[CODEX_DEFAULT_CONTEXT_WINDOW]),
+    ("gpt-6.1-terra", 475_000, &[]),
+];
 
 /// Codex's default window for a built-in GPT upstream model.
 #[must_use]
@@ -50,8 +53,9 @@ fn codex_window_change(upstream_model: &str) -> Option<(&'static str, u64, &'sta
 
 /// The Codex-native upstream model IDs behind the built-in routes, with
 /// their display names.
-const CODEX_NATIVE_MODELS: [(&str, &str); 7] = [
+const CODEX_NATIVE_MODELS: [(&str, &str); 8] = [
     ("gpt-6.1-sol", "GPT-6.1 Sol"),
+    ("gpt-6.1-terra", "GPT-6.1 Terra"),
     ("gpt-6-astra", "GPT-6 Astra"),
     ("gpt-6-sol", "GPT-6 Sol"),
     ("gpt-6-luna", "GPT-6 Luna"),
@@ -65,7 +69,8 @@ const CODEX_NATIVE_MODELS: [(&str, &str); 7] = [
 /// above), and the plugin's shipped agents name them in their `model:` line
 /// (keep in step with `plugins/model-router/agents/`). The other built-in GPT
 /// routes are retired: still served, off the picker.
-pub(crate) const SHIPPED_GPT_ROUTES: [&str; 3] = ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"];
+pub(crate) const SHIPPED_GPT_ROUTES: [&str; 4] =
+    ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"];
 
 /// [`SHIPPED_GPT_ROUTES`] with their picker labels.
 pub(crate) fn shipped_picker_rows() -> impl Iterator<Item = (&'static str, &'static str)> {
