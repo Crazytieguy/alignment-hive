@@ -37,8 +37,10 @@ What "literal" looks like differs by model. OpenAI describes GPT-6 Astra
 as stopping to ask when an answer could change the result and handing
 back a first implementation for review; users confirm the early stops,
 and also report it over-engineering or going past the ask on long runs.
-Sol and Luna share its training methods; how their temperament compares
-is less documented. GPT-5.6, by contrast, tended to over-persist
+Sol, Luna and Terra share its training methods; how their temperament
+compares is less documented, though Terra's system card reports it
+routing around restrictions more often than Astra or 6.1 Sol. GPT-5.6, by
+contrast, tended to over-persist
 — working around constraints to finish rather than escalating. The same
 prompt hygiene serves every one of them: state the desired outcome, the
 constraints, what counts as done, and whether being blocked should be
@@ -52,8 +54,9 @@ The larger Claude models are much harder to prompt-inject than GPT
 models: on the Gray Swan indirect-injection benchmark Opus 5.5 and Fable
 5.1 tie near 1% attack success over 15 attempts, Sonnet 5.5 sits at
 3.4%, Haiku 5.5 at 7.1%, GPT-6 Astra at 8.5% (down from 27% for
-GPT-5.6), and OpenAI reports Sol and Luna improved over GPT-5.6 without
-publishing a comparable number. A Claude session that a safety
+GPT-5.6), and OpenAI reports Sol and Luna improved over GPT-5.6, and
+Terra similar to Astra and 6.1 Sol, without publishing comparable
+numbers. A Claude session that a safety
 classifier drops to Opus 4.8 loses much of that robustness. Claude Code's
 auto mode adds its own classifier pass over tool calls for whichever
 model is running, cutting the risk below these numbers for all of them.
@@ -120,6 +123,15 @@ tokens, and wall-clock time grows from minutes to over an hour.
   than a measurement; OpenAI and Artificial Analysis both place it just
   behind Astra overall. Define what done looks like. Effort: medium or
   high by default, but the full range is usable.
+- **gpt-6.1-terra** — OpenAI positions it as a fast, cheaper model for
+  computer use, visual reasoning and clear, natural writing, and points to
+  Sol or Astra for in-depth research and complex coding. Half of Sol's
+  token price ($1/$5). Early independent scores put it a step behind Sol
+  on coding and agentic work, and some early users report it ending on a
+  progress report where Sol finished, so say what counts as done; the
+  picture is still thin. Effort: medium by default, as OpenAI suggests.
+  Artificial Analysis finds Sol at a lower effort beating Terra at max for
+  less, so for harder work switch to Sol rather than raising Terra's effort.
 - **gpt-6-luna** — high-volume work that doesn't need frontier
   intelligence: reading piles of documents, extraction, triage,
   mechanical transforms. A twentieth of Sol's token price. Effort: high,
@@ -219,8 +231,9 @@ is no strengths/weaknesses guidance for them yet.
 ## Mechanics
 
 The Agent tool's `model` parameter only accepts Claude models. For GPT,
-use the shipped agents — `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` — or
-Workflow's `agent(prompt, {model: 'gpt-6-luna', effort: 'medium'})`. The
+use the shipped agents — `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`,
+`gpt-6-luna` — or Workflow's
+`agent(prompt, {model: 'gpt-6-luna', effort: 'medium'})`. The
 Grok and Muse families have per-user agents that setup creates, named for
 the route: a `grok-4.7` or `muse-wonder-1.0` agent, and
 `{model: 'muse-wonder-1.0', effort: 'medium'}` in Workflow, work the same

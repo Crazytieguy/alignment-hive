@@ -24,10 +24,10 @@ present themselves as Claude.
 
 ## What you get
 
-- GPT subagents — `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` — usable
-  from any project at any reasoning effort (Claude picks it per call;
-  Claude Code 2.1.292+), plus dynamic per-invocation model + effort choice
-  in Workflow orchestration.
+- GPT subagents — `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`,
+  `gpt-6-luna` — usable from any project at any reasoning effort (Claude
+  picks it per call; Claude Code 2.1.292+), plus dynamic per-invocation
+  model + effort choice in Workflow orchestration.
 - Optional open-weights subagents — add Kimi, GLM, or other models from any
   OpenAI-compatible host you have an API key for during `/model-router:setup`.
 - Optional Grok family — grok-4.7 under your own xAI subscription OAuth

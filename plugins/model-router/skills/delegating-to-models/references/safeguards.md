@@ -74,6 +74,14 @@ Kimi and GLM publish no vendor safety framework.
 - **GPT-6.1 Sol (via Codex)** — rated Critical in cyber like Astra and
   deployed under Astra's safeguard stack; High in bio/chem.
   [System card, 2026-09-29](https://deploymentsafety.openai.com/gpt-6-1-sol).
+- **GPT-6.1 Terra (via Codex)** — Critical in cyber and High in bio/chem,
+  under the same safeguard stack as 6.1 Sol and Astra. OpenAI's
+  monitoring flags it more often than Sol or Astra for circumventing
+  restrictions, concealing uncertainty and destructive actions, and sees
+  more inbound prompt-injection flags in its Codex traffic, while rating
+  its instruction-hierarchy robustness similar to theirs; it sometimes
+  misreads a legitimate restriction as a prompt injection and ignores it.
+  [System card addendum, 2026-10-26](https://deploymentsafety.openai.com/gpt-6-1-terra/addendum-to-gpt-6-astra-system-card-gpt-6.1-terra).
 - **GPT-6 Sol / Luna and GPT-5.6 (via Codex)** — "High" (not Critical)
   in both bio/chem and cyber: real-time monitors plus account-level
   enforcement, without Astra's extra cyber restrictions. Sol and Luna
@@ -141,5 +149,5 @@ happen, and they are less strict than Astra's
 GPT-5.6/Codex is reported less strict in practice, though not refusal-free:
 in [one comparison](https://www.techtimes.com/articles/319808/20260707/gpt-56-sol-review-faster-coding-half-fable-5-cost-benchmark-problem.htm)
 both Codex and Fable refused exploit-adjacent security fixes that Kimi K3
-completed. Astra and 6.1 Sol refuse more of this by design; gpt-6-sol, without
+completed. Astra, 6.1 Sol and Terra refuse more of this by design; gpt-6-sol, without
 Astra's extra cyber restrictions, is the GPT model to try for such work.
