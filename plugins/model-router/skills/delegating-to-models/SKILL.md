@@ -15,8 +15,9 @@ rather than following rules mechanically.
 Token price and token *usage* are different axes; per-task cost is their
 product, and the models below differ on both. Under subscriptions the
 billing pool matters more than list price: GPT delegation bills the
-separate Codex subscription and preserves Claude usage entirely, at
-comparable value per dollar. The Codex allowance roughly
+separate Codex subscription and preserves Claude usage entirely. Per
+dollar, OpenAI's Pro plans are more generous and Plus is about
+comparable. The Codex allowance roughly
 tracks token price, so it stretches much further on the smaller GPT
 models. An install on an OpenAI API key pays per token instead, so volume
 costs money directly. Within the Claude family, Fable use is
