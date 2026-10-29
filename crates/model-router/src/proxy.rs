@@ -1017,6 +1017,7 @@ async fn forward(
     if let Some(request_capture) = &mut capture {
         request_capture.headers = redact_headers(&outgoing_headers);
     }
+    let started = std::time::Instant::now();
     match state
         .client
         .request(method.clone(), url)
@@ -1027,7 +1028,13 @@ async fn forward(
     {
         Ok(response) => upstream_response(state, response, capture, policies, tap).await,
         Err(error) => {
-            tracing::warn!(%error, "upstream request failed");
+            // reqwest's own message names only the URL; whether the
+            // connection was refused, reset or timed out is in its sources.
+            tracing::warn!(
+                error = format!("{:#}", anyhow::Error::from(error)),
+                elapsed_ms = started.elapsed().as_millis(),
+                "upstream request failed"
+            );
             local_error_response(
                 state,
                 StatusCode::BAD_GATEWAY,

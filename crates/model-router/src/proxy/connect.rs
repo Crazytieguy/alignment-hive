@@ -189,7 +189,11 @@ pub(super) async fn forward(state: &AppState, request: axum::extract::Request) -
             forwarded
         }
         Err(error) => {
-            tracing::debug!(uri = %parts.uri, %error, "forwarding a plain-HTTP request failed");
+            tracing::debug!(
+                uri = %parts.uri,
+                error = format!("{:#}", anyhow::Error::from(error)),
+                "forwarding a plain-HTTP request failed"
+            );
             plain(StatusCode::BAD_GATEWAY, "upstream request failed")
         }
     }
