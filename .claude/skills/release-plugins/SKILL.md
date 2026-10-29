@@ -61,6 +61,13 @@ bump commit. Nothing else is tagged by hand.
   hive-cli back, release the old code under a higher version: the hive plugin
   never moves `hive` on the PATH to an older CLI.
 
+## After the push
+
+Once the push's runs succeed (for model-router or remote-kernels, that
+includes *Plugin archives*, since the update downloads their zips), run
+`bash .claude/skills/release-plugins/scripts/update-local.sh`. It installs the
+release on this machine now instead of at the next auto-update pass.
+
 ## Binary-shipping plugins (model-router, remote-kernels)
 
 These are also published as `archive` marketplace entries: one zip per
