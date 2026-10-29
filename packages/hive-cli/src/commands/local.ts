@@ -161,7 +161,9 @@ export async function scopeOf(env: LocalEnv, args: Args): Promise<Scope> {
     throw new LocalError(localErrors.notADirectory(path));
   const transcripts = await env.project(path);
   const dirs = transcripts.dirs.filter((dir) => existsSync(dir));
-  if (!dirs.length) throw new LocalError(localErrors.noProject(path, project === undefined));
+  // The current project before its first session is stored has no sessions; another --project names the wrong dir.
+  if (!dirs.length && project !== undefined) throw new LocalError(localErrors.noProject(path));
+  if (!dirs.length) note(localNotes.noTranscripts(path));
   const label = transcripts.root ? localNotes.projectLabel(transcripts.root) : localNotes.folderLabel(path);
   return { dirs, belongs: transcripts.belongs, label, all };
 }

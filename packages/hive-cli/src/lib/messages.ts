@@ -338,8 +338,8 @@ export const localErrors = {
     `bad time "${value}" for ${flag}: use 2h, 7d, or a local date such as 2026-09-12`,
   badCutoff: (value: string): string => `HIVE_LOCAL_CUTOFF is not a time: "${value}"`,
   scopeConflict: '--project and --all-projects cannot be used together',
-  noProject: (path: string, current: boolean): string =>
-    `no Claude Code transcripts for project ${path}${current ? ' (the current project)' : ''}; use --project DIR or --all-projects`,
+  noProject: (path: string): string =>
+    `no Claude Code transcripts for project ${path}; use --project DIR or --all-projects`,
   sessionsTakesNoSession: (arg: string): string => `sessions takes no SESSION ("${arg}"); use outline or show`,
   needsSession: (verb: string): string => `${verb} needs a SESSION`,
   noCurrentSession: 'current names the session this runs in, from CLAUDE_CODE_SESSION_ID, which is not set here',
@@ -359,6 +359,8 @@ export const localErrors = {
 
 /** Notes and counts on stderr. */
 export const localNotes = {
+  noTranscripts: (path: string): string =>
+    `no Claude Code transcripts yet for project ${path} (the current project); use --project DIR or --all-projects`,
   ruleCount: (rule: string, n: number): string => `${rule} ${n}`,
   malformed: (loc: string, lines: Array<number>): string =>
     `${loc}: ${lines.length} malformed line${lines.length > 1 ? 's' : ''} skipped (line ${lines.slice(0, 5).join(', ')}${lines.length > 5 ? ', ...' : ''})`,

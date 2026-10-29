@@ -7,7 +7,7 @@ import { readRecords } from '@alignment-hive/session-data';
 import { local, localCore, localEnv, parseArgs } from '../commands/local';
 import { toClaudeProjectDirName } from '../lib/config';
 import { clipAround, clipFirstLine, clipStart, localTime } from '../lib/local-rows';
-import { localHelp, localUsage } from '../lib/messages';
+import { localErrors, localHelp, localNotes, localUsage } from '../lib/messages';
 import { stdout } from '../lib/stdout';
 import { recordsAsOf } from '../lib/as-of';
 import type { LocalEnv } from '../commands/local';
@@ -353,6 +353,16 @@ describe('sessions', () => {
     out.length = 0;
     await hl('sessions', '--all-projects', '--since', '2026-09-20T10:14:00Z');
     expect(rows()).toEqual([]);
+  });
+
+  test('the current project before its first session is stored lists none; another --project is an error', async () => {
+    const none: LocalEnv = { root, project: () => Promise.resolve({ dirs: [join(root, '-p-none')], belongs: () => true }) };
+    expect(await localCore(none, ['sessions', '--brief'])).toBe(0);
+    expect(rows()).toEqual([]);
+    expect(err).toEqual([localNotes.noTranscripts(process.cwd()), '0 sessions']);
+    err.length = 0;
+    expect(await localCore(none, ['sessions', '--project', root])).toBe(2);
+    expect(err).toEqual([localErrors.noProject(root)]);
   });
 
   test('--brief: the same sessions in the same order, with loc, end and branch only', async () => {
