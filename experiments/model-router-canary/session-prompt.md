@@ -1,0 +1,8 @@
+This session was started automatically by a scheduled run of the model-router canary (`experiments/model-router-canary/run.sh`), not by a person typing. The run's report is {{REPORT}}; `report.json` beside it holds every check, and the run directory keeps the sandbox routers' logs. The canary's README explains the checks.
+
+Act on what the report flags:
+
+- **Live checks failed:** the installed model-router no longer works end to end, most often because Claude Code or a provider changed. Find the cause from the live router's logs (the report gives the path) and by rerunning `bun experiments/model-router-canary/canary.ts live`, rule out a passing provider outage, and fix model-router. Leave the running router service and the user's Claude Code settings as they are; if the fix needs either changed, say what to change.
+- **A candidate CLIProxyAPI passed:** re-pin to it, as commit `6f54e43f` did: `UPSTREAM_VERSION` and the four sha256 values in `crates/model-router/src/acquire.rs`, checked against the release's `checksums.txt`. Review the tag diff for what the checks can't see (Codex login and refresh, the config keys the router writes, request translation), and add the canary's evidence to `experiments/model-router.md`. If the report has bench warnings, rerun the tasks the candidate lost (`canary.ts bench --version <v> --tasks <a,b>`) before deciding. This re-pin replaces any earlier canary re-pin that hasn't landed.
+- **A candidate failed:** find the regression (the checks that failed on the candidate only). Then work around it in model-router so the re-pin can go ahead, or report it upstream and keep the current pin, or both.
+- **The canary itself failed, or left sandboxes behind:** fix the canary.
