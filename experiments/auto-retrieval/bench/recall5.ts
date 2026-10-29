@@ -25,6 +25,10 @@ const VARIANTS: Record<string, Variant> = {
   // for every model), and Sonnet at 800k.
   'recall8-sol': { model: 'gpt-6.1-sol' },
   'recall8-sonnet': { model: 'claude-sonnet-5-5' },
+  // Round 9: round 8 on the corrected history budget (an entry counts once, at the size it prints; retrieval reports'
+  // quotes parse), which earlier rounds overcounted.
+  'recall9-sol': { model: 'gpt-6.1-sol' },
+  'recall9-sonnet': { model: 'claude-sonnet-5-5' },
 };
 const SETTINGS = join(BENCH, 'settings.json');
 
