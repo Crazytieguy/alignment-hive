@@ -84,9 +84,25 @@ if [ ! -x "$BINARY" ]; then
   echo "Installed hive-cli v${VERSION}" >&2
 fi
 
+# Whether version $1 is older than $2, both X.Y.Z; false when either isn't.
+older() {
+  [[ "$1" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  local a=$((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
+  [[ "$2" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  local b=$((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
+  (( a < b ))
+}
+
 # Every start, not only after a download: the symlink must track this plugin's cli-version,
-# not whichever version was downloaded last.
-mkdir -p "$HOME/.local/bin"
-ln -sf "$BINARY" "$HOME/.local/bin/hive"
+# not whichever version was downloaded last. It never moves back to an older version, though,
+# as a session still running an older plugin would have it: the retrieval and debrief skills
+# run the `hive` on the PATH, and older CLIs can number a transcript's entries differently.
+# So a release that pins an older CLI to roll back leaves the PATH on the newer one.
+LINKED=$(readlink "$HOME/.local/bin/hive" 2>/dev/null || true)
+if ! { [ -x "$LINKED" ] && [[ "$LINKED" == "$CACHE_BASE"/v*/hive ]] && [[ "$LINKED" =~ /v([^/]+)/hive$ ]] &&
+  older "$VERSION" "${BASH_REMATCH[1]}"; }; then
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$BINARY" "$HOME/.local/bin/hive"
+fi
 
 exec "$BINARY" "$@"

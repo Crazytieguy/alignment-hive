@@ -57,7 +57,9 @@ bump commit. Nothing else is tagged by hand.
   archives*, which rebuilds the per-platform zips.
 - *Release hive-cli* runs on hive-cli source changes and, only when
   `packages/hive-cli/package.json` has a new version, attaches compiled
-  binaries to a `hive-cli-vX.Y.Z` GitHub release (it isn't on npm).
+  binaries to a `hive-cli-vX.Y.Z` GitHub release (it isn't on npm). To roll
+  hive-cli back, release the old code under a higher version: the hive plugin
+  never moves `hive` on the PATH to an older CLI.
 
 ## Binary-shipping plugins (model-router, remote-kernels)
 
