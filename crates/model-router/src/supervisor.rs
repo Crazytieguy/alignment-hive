@@ -341,8 +341,14 @@ pub fn prepare_managed_state(
     Ok(ManagedPaths {
         upstream_config: dirs.upstream_config_file(),
         auth_dir: dirs.auth_dir(),
-        log_file: dirs.log_dir().join("cliproxyapi.log"),
+        log_file: child_log_path(dirs),
     })
+}
+
+/// The managed `CLIProxyAPI` child's log file.
+#[must_use]
+pub fn child_log_path(dirs: &Dirs) -> PathBuf {
+    dirs.log_dir().join("cliproxyapi.log")
 }
 
 /// [`crate::muse::sync_relay`], logged.

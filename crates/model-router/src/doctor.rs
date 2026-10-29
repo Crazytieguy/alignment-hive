@@ -230,6 +230,7 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         checks.push(routed_models_check(
             config,
             catalog.as_ref().map(Vec::as_slice).map_err(Clone::clone),
+            &cliproxy_log(dirs, config),
         ));
     }
 
@@ -796,7 +797,7 @@ fn shipped_agent_routes_check(config: &Config) -> Check {
     }
 }
 
-fn routed_models_check(config: &Config, body: Result<&[u8], String>) -> Check {
+fn routed_models_check(config: &Config, body: Result<&[u8], String>, log: &str) -> Check {
     // Several routes can share one upstream ID; report each ID once, grouped
     // by family.
     let mut wanted: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -839,28 +840,68 @@ fn routed_models_check(config: &Config, body: Result<&[u8], String>) -> Check {
         };
     };
     let served: BTreeSet<&str> = served.iter().map(|entry| entry.id.as_str()).collect();
-    let missing = wanted
-        .into_iter()
-        .filter_map(|(family, models)| {
-            let absent = models
-                .into_iter()
-                .filter(|model| !served.contains(model))
-                .collect::<Vec<_>>();
-            (!absent.is_empty()).then(|| format!("{family}: {}", absent.join(", ")))
-        })
-        .collect::<Vec<_>>();
+    // CLIProxyAPI leaves a family's models out of its catalog while that
+    // family's login cools down after an upstream error (measured with an
+    // exhausted Grok Build balance: a 402, then every Grok ID gone), so a
+    // whole family missing points at the login first. They stayed gone past
+    // the 30-minute cooldown until the next request to one of them.
+    let mut partial = Vec::new();
+    let mut whole = Vec::new();
+    for (family, models) in wanted {
+        let absent = models
+            .iter()
+            .copied()
+            .filter(|model| !served.contains(model))
+            .collect::<Vec<_>>();
+        if absent.is_empty() {
+            continue;
+        }
+        if absent.len() == models.len() {
+            whole.push(format!("{family} ({})", absent.join(", ")));
+        } else {
+            partial.push(format!("{family} ({})", absent.join(", ")));
+        }
+    }
+    let mut problems = Vec::new();
+    if !partial.is_empty() {
+        problems.push(format!(
+            "missing from the upstream catalog: {}",
+            partial.join(", ")
+        ));
+    }
+    if !whole.is_empty() {
+        problems.push(format!(
+            "every routed model missing for {}: CLIProxyAPI drops a family's models while its \
+             login cools down after an upstream error, such as an exhausted balance; the \
+             `upstream execution failed` line in {log} names it. After the fix and the \
+             cooldown they stay missing until a request to one of them brings them back",
+            whole.join(", ")
+        ));
+    }
     Check {
         warn: false,
         name: "routed-models",
-        ok: missing.is_empty(),
-        detail: if missing.is_empty() {
+        ok: problems.is_empty(),
+        detail: if problems.is_empty() {
             "every routed model is served".to_string()
         } else {
-            format!(
-                "no longer served by the upstream catalog — {}",
-                missing.join("; ")
-            )
+            problems.join(". ")
         },
+    }
+}
+
+/// Where the `CLIProxyAPI` that serves the catalog logs, for pointing at its
+/// upstream errors.
+fn cliproxy_log(dirs: &Dirs, config: &Config) -> String {
+    match config
+        .upstreams
+        .get(crate::config::CLIPROXY_UPSTREAM)
+        .map(|upstream| &upstream.mode)
+    {
+        Some(UpstreamMode::External) => "the external CLIProxyAPI's log".to_string(),
+        _ => crate::supervisor::child_log_path(dirs)
+            .display()
+            .to_string(),
     }
 }
 
@@ -1052,37 +1093,68 @@ mod tests {
     #[test]
     fn present_when_every_routed_model_is_served() {
         let body = body_with(&["grok-4.7", "grok-4.6", "grok-4.5", "grok-imagine-image"]);
-        let check = routed_models_check(&grok_enabled(), Ok(&body));
+        let check = routed_models_check(&grok_enabled(), Ok(&body), "cliproxyapi.log");
         assert!(check.ok, "{}", check.detail);
     }
 
     #[test]
     fn missing_upstream_id_is_named_and_grouped_by_family() {
-        // Codex slugs present, the Grok one gone.
-        let body = models_body(&GPT_MODELS);
-        let check = routed_models_check(&grok_enabled(), Ok(&body));
+        // Codex slugs present, one Grok one gone.
+        let body = body_with(&["grok-4.7", "grok-4.6"]);
+        let check = routed_models_check(&grok_enabled(), Ok(&body), "cliproxyapi.log");
         assert!(!check.ok);
         assert!(
-            check.detail.contains("grok: grok-4.5, grok-4.6, grok-4.7"),
+            check
+                .detail
+                .contains("missing from the upstream catalog: grok (grok-4.5)"),
             "{}",
             check.detail
         );
-        // The served Codex slugs are not named.
+        // The served slugs are not named.
+        assert!(!check.detail.contains("grok-4.6"), "{}", check.detail);
         assert!(!check.detail.contains("gpt-5.6"), "{}", check.detail);
+    }
+
+    #[test]
+    fn a_whole_family_missing_points_at_its_login_not_a_rename() {
+        // What an exhausted Grok Build balance looks like: CLIProxyAPI cools
+        // the xAI login and drops every Grok ID from its catalog.
+        let body = models_body(&GPT_MODELS);
+        let check = routed_models_check(&grok_enabled(), Ok(&body), "/logs/cliproxyapi.log");
+        assert!(!check.ok);
+        assert!(
+            check
+                .detail
+                .contains("every routed model missing for grok (grok-4.5, grok-4.6, grok-4.7):"),
+            "{}",
+            check.detail
+        );
+        assert!(
+            check
+                .detail
+                .contains("`upstream execution failed` line in /logs/cliproxyapi.log"),
+            "{}",
+            check.detail
+        );
+        assert!(
+            !check.detail.contains("missing from the upstream catalog"),
+            "{}",
+            check.detail
+        );
     }
 
     #[test]
     fn every_muse_route_served_passes_and_a_missing_one_is_named() {
         let body = body_with(&["muse-wonder-1.0", "muse-wonder-full-1.0", "muse-spark-1.3"]);
-        let check = routed_models_check(&muse_enabled(), Ok(&body));
+        let check = routed_models_check(&muse_enabled(), Ok(&body), "cliproxyapi.log");
         assert!(check.ok, "{}", check.detail);
 
         // A plan without Wonder Full, should the catalog leave it out.
         let body = body_with(&["muse-wonder-1.0"]);
-        let check = routed_models_check(&muse_enabled(), Ok(&body));
+        let check = routed_models_check(&muse_enabled(), Ok(&body), "cliproxyapi.log");
         assert!(!check.ok);
         assert!(
-            check.detail.contains("muse: muse-wonder-full-1.0"),
+            check.detail.contains("muse (muse-wonder-full-1.0)"),
             "{}",
             check.detail
         );
@@ -1102,10 +1174,10 @@ mod tests {
             "gpt-5.6-sol",
             "gpt-5.6-terra",
         ]);
-        let check = routed_models_check(&config(""), Ok(&body));
+        let check = routed_models_check(&config(""), Ok(&body), "cliproxyapi.log");
         assert!(!check.ok);
         assert!(
-            check.detail.contains("gpt: gpt-5.6-luna"),
+            check.detail.contains("gpt (gpt-5.6-luna)"),
             "{}",
             check.detail
         );
@@ -1230,7 +1302,7 @@ mod tests {
              [[openai-providers.models]]\nname = \"vendor/m\"\nrouting-id = \"kimi\"\ndisplay-name = \"K\"\n",
         );
         let body = models_body(&GPT_MODELS);
-        let check = routed_models_check(&config, Ok(&body));
+        let check = routed_models_check(&config, Ok(&body), "cliproxyapi.log");
         assert!(check.ok, "{}", check.detail);
     }
 
@@ -1242,7 +1314,7 @@ mod tests {
              [[models]]\nrouting-id = \"b\"\nupstream-model = \"gpt-test\"\ndisplay-name = \"B\"\n",
         );
         let body = models_body(&[]);
-        let check = routed_models_check(&config, Ok(&body));
+        let check = routed_models_check(&config, Ok(&body), "cliproxyapi.log");
         assert!(!check.ok);
         assert_eq!(
             check.detail.matches("gpt-test").count(),
@@ -1259,7 +1331,7 @@ mod tests {
             br#"{"object":"list"}"#.as_slice(),
             br#"{"data":{"id":"grok-4.5"}}"#.as_slice(),
         ] {
-            let check = routed_models_check(&grok_enabled(), Ok(body));
+            let check = routed_models_check(&grok_enabled(), Ok(body), "cliproxyapi.log");
             assert!(!check.ok);
             assert!(
                 check.detail.contains("not a model list"),
@@ -1271,11 +1343,15 @@ mod tests {
 
     #[test]
     fn unreachable_child_is_distinct_from_a_missing_model() {
-        let check = routed_models_check(&grok_enabled(), Err("connection refused".to_string()));
+        let check = routed_models_check(
+            &grok_enabled(),
+            Err("connection refused".to_string()),
+            "cliproxyapi.log",
+        );
         assert!(!check.ok);
         assert!(check.detail.contains("could not read"), "{}", check.detail);
         assert!(
-            !check.detail.contains("no longer served"),
+            !check.detail.contains("missing"),
             "a down child must not read as a renamed model: {}",
             check.detail
         );

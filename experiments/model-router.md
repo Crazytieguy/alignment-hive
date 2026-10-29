@@ -2437,3 +2437,34 @@ provider-bound request log.
 | Claude Code, subagent | Haiku delegated the same task to an `--agents` definition with `model: gpt-6.1-terra`; fixed and verified |
 | `/compact` | the compaction request went out with `tool_choice: none` (200); the next turn recalled the fix |
 | doctor | `routed-models` and `shipped-agent-routes gpt-6-astra, gpt-6.1-sol, gpt-6.1-terra, gpt-6-luna` ok; `context-windows` names Terra's missing compaction window in the existing user settings, which `settings windows` and `settings models` (dry run: `adds ["gpt-6.1-terra"]`) both offer to fix |
+
+## Exhausted Grok Build balance (2026-10-29, Claude Code 2.1.312, CLIProxyAPI 8.0.34, router 0.1.32)
+
+The live xAI login ran out of Grok Build usage between the 00:17 PDT canary
+tick (every Grok route answered) and 09:12 PDT, the first refusal in the
+live child's log. The 16:32 PDT tick saw it as failing live checks:
+
+| request | result |
+|---|---|
+| non-streaming | 402 `{"error":"Grok Build usage balance exhausted"}`, ~100–300 ms, passed through as is |
+| streaming, right after | 503 `auth_unavailable: no auth available (providers=xai, model=grok-4.6(low); last upstream error: Grok Build usage balance exhausted)`, no upstream call |
+| child `/v1/models` before the 402s | all three Grok IDs listed |
+| child `/v1/models` after | no Grok ID at all; the Codex ones unchanged |
+
+So the child hides a family's models while that family's login cools down
+(402 cools for 30 min on the Meta mock; each retry refuses again), and
+doctor's `routed-models` read that as the Grok IDs being "no longer served
+by the upstream catalog", next to an ok `grok-auth`. Doctor now reports a
+whole family missing at once as its login being unavailable and points at
+the `upstream execution failed` line in the child's log; a partial dropout
+is still reported as missing from the catalog. Both errors Claude Code sees already name the cause, so
+the router passes them through unchanged.
+
+Recovery, after the xAI plan was upgraded: the 402 cooldown
+(30 min in `conductor_cooldown.go`) had ended at 17:03, yet at 17:14 the
+child's catalog still had no Grok ID. One `grok-4.7` request through the
+router at 17:16 answered normally and put all three Grok IDs back in the
+catalog; the next canary run passed every Grok check. So the catalog lags
+the cooldown until a request touches the login, and the canary, which skips
+reach probes for models the catalog leaves out, cannot see the recovery on
+its own.
