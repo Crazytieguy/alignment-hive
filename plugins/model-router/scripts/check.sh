@@ -106,7 +106,13 @@ if [ -n "$HEALTH" ]; then
       "$ROWS" "$1" "$2" "${5:-$PLUGIN_VERSION}" "$ACTIONS")
   }
   # The /model picker lacks a shipped GPT route or lists a retired one.
+  # Adding a route sets its window too, so while this row shows (it is not
+  # dismissed, hooks/register.tsx says in NEW_MODEL_DISMISSED), the windows
+  # row below leaves its routes out: ADDS, comma-separated.
+  ADDS=""
   if needed models; then
+    [ "${NEW_MODEL_DISMISSED:-}" = "$PLUGIN_VERSION" ] ||
+      ADDS=$(printf '%s' "$OUT" | sed -n 's/.*"adds":\[\([^]]*\)\].*/\1/p' | tr -d '"')
     # "GPT-6.1 Terra" or "GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna".
     LABELS=$(printf '%s' "$OUT" | sed -n 's/.*"labels":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g; s/\(.*\), /\1 and /')
     if [ -n "$LABELS" ]; then
@@ -120,7 +126,14 @@ if [ -n "$HEALTH" ]; then
   # compaction window, or one still at a Codex default that has since moved
   # (`updates`).
   if needed windows; then
-    ROUTES=$(printf '%s' "$OUT" | sed -n 's/.*"routes":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g')
+    ALL_ROUTES=$(printf '%s' "$OUT" | sed -n 's/.*"routes":\[\([^]]*\)\].*/\1/p' | tr -d '"')
+    ROUTES=""
+    for ROUTE in $(printf '%s' "$ALL_ROUTES" | tr ',' ' '); do
+      case ",$ADDS," in
+        *",$ROUTE,"*) ;;
+        *) ROUTES="${ROUTES:+$ROUTES, }$ROUTE" ;;
+      esac
+    done
     UPDATES=$(printf '%s' "$OUT" | sed -n 's/.*"updates":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g')
     if printf '%s' "$OUT" | grep -q '"legacy":true'; then
       add_row windows "context windows are still set the old way" windows "Migrate"
@@ -132,7 +145,7 @@ if [ -n "$HEALTH" ]; then
       # Its own row, dismissed until the routes change rather than until the
       # next version: someone keeping the old window chose it.
       add_row windows-update "Codex raised the default context window of $UPDATES" windows "Update" "updates:$UPDATES"
-    else
+    elif [ -z "$ALL_ROUTES" ]; then
       add_row windows "context windows need setup" windows "Set"
     fi
   fi

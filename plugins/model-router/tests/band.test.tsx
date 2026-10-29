@@ -48,6 +48,7 @@ async function startWithSettings($: Engine, on: On, rows: unknown[], settings: u
   const settingsCalls: string[][] = []
   const commands: string[] = []
   mock.env(on, { HOME: '/home/me' })
+  mock.store(on, {})
   on('classic.SessionStart', async () => ({}))
   on('process.run', async (_$, e) => {
     const isSettings = e.argv[2] === 'settings'
@@ -283,6 +284,7 @@ describe('model-router settings buttons', () => {
 describe('model-router check', () => {
   test('runs, awaited, at startup and again at /clear, not at a resume', async ($, on) => {
     let runs = 0
+    mock.store(on, {})
     on('classic.SessionStart', async () => ({}))
     on('process.run', async () => {
       runs++
@@ -334,6 +336,7 @@ describe('model-router band', () => {
   test('Try again says it is restarting, runs the check again, and a recovered router clears the row', async ($, on) => {
     let runs = 0
     const gate: { release?: () => void } = {}
+    mock.store(on, {})
     on('classic.SessionStart', async () => ({}))
     on('process.run', async () => {
       runs++
@@ -353,6 +356,60 @@ describe('model-router band', () => {
     await pressed
     expect(runs).toBe(2)
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    await ui.unmount()
+  })
+})
+
+describe('model-router rows that overlap', () => {
+  const newModel = { id: 'new-model', severity: 'action', text: 'GPT-6.1 Terra can be added to /model', version: '0.1.43', actions: [addAction] }
+  const windowsRow = {
+    id: 'windows',
+    severity: 'action',
+    text: 'no context window set for gpt-6.1-terra',
+    version: '0.1.43',
+    actions: [{ id: 'windows', label: 'Set', kind: 'plugin' }],
+  }
+
+  /** A session whose check prints what `rows` returns for its env; each check's env is kept. */
+  async function startChecking($: Engine, on: On, rows: (env: Record<string, string>, edited: boolean) => unknown[]) {
+    const checks: Record<string, string>[] = []
+    let edited = false
+    mock.store(on, {})
+    on('classic.SessionStart', async () => ({}))
+    on('process.run', async (_$, e) => {
+      const isSettings = e.argv[2] === 'settings'
+      if (isSettings) edited = true
+      else checks.push(e.init?.env ?? {})
+      const stdout = JSON.stringify(
+        isSettings ? { applied: true, added: ['gpt-6.1-terra'], windows: { 'gpt-6.1-terra': 475000 } } : { notices: rows(e.init?.env ?? {}, edited) },
+      )
+      return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    on('ui.toast', async () => ({ value: undefined }) as never)
+    on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
+    await $.classic.SessionStart({ source: 'startup', cwd: '/proj' })
+    return checks
+  }
+
+  test('an edit checks the rows again, so a row the edit did the work of goes', async ($, on) => {
+    const checks = await startChecking($, on, (_env, edited) => (edited ? [] : [newModel, windowsRow]))
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await ui.find({ key: 'model-router:windows:windows' })).toBeDefined()
+    await ui.press({ key: 'model-router:new-model:add-models' })
+    expect(checks).toHaveLength(2)
+    expect(await ui.find({ key: 'model-router:windows:windows' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('dismissing the new-model row tells the next check, which gives its routes to the windows row', async ($, on) => {
+    const checks = await startChecking($, on, env => (env.NEW_MODEL_DISMISSED === '0.1.43' ? [newModel, windowsRow] : [newModel]))
+    expect(checks[0]?.NEW_MODEL_DISMISSED).toBe('')
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await ui.find({ key: 'model-router:windows:windows' })).toBeUndefined()
+    await ui.press({ key: 'model-router:new-model:dismiss' })
+    expect(checks.map(env => env.NEW_MODEL_DISMISSED)).toEqual(['', '0.1.43'])
+    expect(await ui.find({ key: 'model-router:new-model:add-models' })).toBeUndefined()
+    expect(await ui.find({ key: 'model-router:windows:windows' })).toBeDefined()
     await ui.unmount()
   })
 })

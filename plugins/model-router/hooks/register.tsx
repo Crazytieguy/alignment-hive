@@ -20,12 +20,18 @@ let projectDir = ''
 /**
  * Runs the plugin's check and keeps its rows; none when it fails. The check reads the wiring
  * (ANTHROPIC_BASE_URL, or HTTPS_PROXY) from the environment Claude Code passes on, settings'
- * `env` included, and restarts a stopped router.
+ * `env` included, and restarts a stopped router. It is told the version the new-model row is
+ * dismissed for: while that row shows, the windows row leaves out the routes it adds.
  */
 async function check($: EngineInterface): Promise<void> {
   try {
+    const newModelDismissed = await $.store.get('dismissed:new-model')
     const { exitCode, stdout } = await $.process.run(['bash', `${$.plugin.root}/scripts/check.sh`], {
-      env: { CLAUDE_PLUGIN_ROOT: $.plugin.root, CLAUDE_PROJECT_DIR: projectDir },
+      env: {
+        CLAUDE_PLUGIN_ROOT: $.plugin.root,
+        CLAUDE_PROJECT_DIR: projectDir,
+        NEW_MODEL_DISMISSED: typeof newModelDismissed === 'string' ? newModelDismissed : '',
+      },
     })
     const found = exitCode === 0 && stdout.trim() ? (JSON.parse(stdout) as { notices: Notice[] }).notices : []
     await update($, notices, () => found)
@@ -174,6 +180,8 @@ export const register: Register = on => {
         return
       }
       // The settings edits take effect at the next start: the row's work is done this session.
+      // One edit can do another row's work (adding a route to /model sets its window), so the
+      // rows are checked again after it.
       if (action.id === 'add-models' || action.id === 'windows' || action.id === 'bypass') {
         const operation = action.id === 'add-models' ? 'models' : action.id
         const said = await editSettings($, operation).catch(
@@ -181,6 +189,7 @@ export const register: Register = on => {
         )
         await dismiss(notice)
         $.ui.toast(said)
+        if (operation !== 'bypass') await check($)
         return
       }
       // Running setup (or Customize) dismisses the row for this session; the next session's
@@ -193,6 +202,8 @@ export const register: Register = on => {
     const onDismiss = async (notice: Notice) => {
       await dismiss(notice)
       if (notice.version !== undefined) await $.store.set(`dismissed:${notice.id}`, notice.version)
+      // The windows row takes back the routes the new-model row would have added.
+      if (notice.id === 'new-model') await check($)
     }
 
     const ui = $.ui.resolve(e)
