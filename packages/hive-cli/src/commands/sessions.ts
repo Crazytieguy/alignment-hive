@@ -52,11 +52,16 @@ export function sessionsByActivity(refs: Array<TranscriptRef>): Array<Facts> {
  */
 const humanOf = (f: SessionPresence) => (f.hasAssistant ? undefined : firstHumanMessage(f.ref, f.size));
 
-/** `hive local sessions`: sessions by last activity, newest first, each read from its file's ends (session-facts.ts). */
+/**
+ * `hive local sessions`: sessions by last activity, newest first, each read from its file's ends (session-facts.ts).
+ * With --brief, rows of loc, end and branch: no title or first message, and a start is read only to order sessions
+ * that ended together or to place one in a time window (a fork's can lie megabytes into its file).
+ */
 export async function run(env: LocalEnv, args: Args): Promise<number> {
   if (args.positional.length) throw new LocalError(localErrors.sessionsTakesNoSession(args.positional[0]), true);
   const limit = numberFlag(args, '-n', 20);
   const clip = clipToFirstLine(numberFlag(args, '--clip', 150));
+  const brief = args.flags.get('--brief') === true;
   const scope = await scopeOf(env, args);
   const w = timeWindow(args);
   const windowed = w.since !== undefined || w.until !== undefined;
@@ -78,17 +83,19 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
       if (p.timed && !humanOf(p)?.empty) counted++;
       continue;
     }
-    const f = factsAsOf(sessionFacts(ref));
-    if (f.start === undefined && f.end === undefined) continue;
+    const f = factsAsOf(sessionFacts(ref, brief));
+    // `end` first, so a brief start (read on use) is read only when there is no end.
+    if (f.end === undefined && f.start === undefined) continue;
     // A session is in the window when one of its entries is. Its first or last entry decides unless
     // it spans the whole window, when it is read to look for an entry inside.
     const active =
-      spanInWindow(f, w) &&
-      (inWindow(f.start, w) ||
-        inWindow(f.end, w) ||
-        (f.asOf
-          ? f.asOf.entries.some((e) => inWindow(e.time ? Date.parse(e.time) : undefined, w))
-          : someEntry(f.ref, (e) => inWindow(e.time ? Date.parse(e.time) : undefined, w))));
+      !windowed ||
+      (spanInWindow(f, w) &&
+        (inWindow(f.start, w) ||
+          inWindow(f.end, w) ||
+          (f.asOf
+            ? f.asOf.entries.some((e) => inWindow(e.time ? Date.parse(e.time) : undefined, w))
+            : someEntry(f.ref, (e) => inWindow(e.time ? Date.parse(e.time) : undefined, w)))));
     if (!active) continue;
     const human = humanOf(f);
     if (human?.empty) continue;
@@ -120,15 +127,17 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
   for (const { f, human } of listed.slice(0, limit)) {
     const row: Record<string, unknown> = { loc: print.transcript(f.ref) };
     if (scope.all) row.project = projectOf(f.ref.path);
-    const start = localTime(f.start);
+    const start = brief ? undefined : localTime(f.start);
     const end = localTime(f.end);
     if (start) row.start = start;
     if (end) row.end = end;
     if (f.branch) row.branch = f.branch;
-    const title = f.asOf ? undefined : sessionTitle(f.ref);
-    if (title) row.title = clip('title', title);
-    const first = f.asOf ? f.asOf.entries.find(isHumanMessage) : (human ?? firstHumanMessage(f.ref, f.size)).entry;
-    if (first?.kind === 'user') row.first = clip('first', first.text);
+    if (!brief) {
+      const title = f.asOf ? undefined : sessionTitle(f.ref);
+      if (title) row.title = clip('title', title);
+      const first = f.asOf ? f.asOf.entries.find(isHumanMessage) : (human ?? firstHumanMessage(f.ref, f.size)).entry;
+      if (first?.kind === 'user') row.first = clip('first', first.text);
+    }
     emit(row);
   }
   const total = listed.length + counted;

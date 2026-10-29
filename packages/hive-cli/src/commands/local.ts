@@ -87,8 +87,8 @@ export const warn = (text: string): void => stderrRow({ warning: text });
 
 const SCOPE = ['--project', '--since', '--until', '--clip'];
 const SPECS: Record<string, FlagSpec> = {
-  sessions: { bool: ['--all-projects'], value: ['-n', ...SCOPE] },
-  outline: { bool: ['--all-entries', '--replies'], value: ['--clip'] },
+  sessions: { bool: ['--all-projects', '--brief'], value: ['-n', ...SCOPE] },
+  outline: { bool: ['--all-entries', '--replies', '--no-agents'], value: ['--clip'] },
   show: { bool: ['--all-entries'], value: ['--clip'] },
   grep: {
     bool: ['-i', '-F', '-E', '-c', '-l', '--agents', '--all-entries', '--all-projects'],

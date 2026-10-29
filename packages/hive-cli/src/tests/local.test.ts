@@ -355,6 +355,19 @@ describe('sessions', () => {
     expect(rows()).toEqual([]);
   });
 
+  test('--brief: the same sessions in the same order, with loc, end and branch only', async () => {
+    const brief = (row: Record<string, unknown>) =>
+      JSON.parse(JSON.stringify({ loc: row.loc, project: row.project, end: row.end, branch: row.branch }));
+    for (const args of [[], ['-n', '1', '--until', '2026-09-19'], ['--all-projects'], ['--all-projects', '--until', '2026-09-18']]) {
+      out.length = 0;
+      await hl('sessions', ...args);
+      const full = rows().map(brief);
+      out.length = 0;
+      await hl('sessions', ...args, '--brief');
+      expect(rows()).toEqual(full);
+    }
+  });
+
   test('each file last written just after its last entry: the newest are read, the rest only counted', async () => {
     const written: Array<[string, string]> = [
       [join(project(), `${A}.jsonl`), '2026-09-20T10:59:00Z'],
@@ -490,6 +503,10 @@ describe('show and outline', () => {
       [`${A.slice(0, 8)}:10`, undefined],
       [`${A.slice(0, 8)}:11`, 'compact-summary'],
     ]);
+    // --no-agents: the call that started an agent is left out.
+    out.length = 0;
+    await hl('outline', A.slice(0, 8), '--no-agents');
+    expect(rows().map((x) => x.loc)).toEqual([`${A.slice(0, 8)}:1`, `${A.slice(0, 8)}:10`]);
   });
 });
 
@@ -887,6 +904,11 @@ describe('recall', () => {
       [`${s}:6`, undefined, 'Agent', true, 'Async agent launched'],
       [`${s}:8`, 'recall', undefined, true, undefined],
     ]);
+    // --no-agents keeps them all: retrieval is found in the transcript itself, not in agent files.
+    const all = rows();
+    out.length = 0;
+    await hl('outline', s, '--no-agents');
+    expect(rows()).toEqual(all);
     // --replies adds the assistant's replies; several sessions print in turn.
     out.length = 0;
     await hl('outline', s, A.slice(0, 8), '--replies', '--clip', '0');

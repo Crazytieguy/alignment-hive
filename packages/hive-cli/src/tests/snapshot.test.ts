@@ -31,7 +31,8 @@ test('remembered reads once per key within a snapshot and every time outside one
   let reads = 0;
   const read = () => ++reads;
   expect([remembered('k', read), remembered('k', read)]).toEqual([1, 2]);
-  await snapshot(async () => {
-    expect([remembered('k', read), remembered('k', read), remembered('other', read)]).toEqual([3, 3, 4]);
-  });
+  const inside = await snapshot(() =>
+    Promise.resolve([remembered('k', read), remembered('k', read), remembered('other', read)]),
+  );
+  expect(inside).toEqual([3, 3, 4]);
 });

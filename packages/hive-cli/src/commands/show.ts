@@ -27,8 +27,8 @@ interface Loaded {
 /**
  * show SESSION [RANGE...]: entries, each field clipped; no RANGE = the whole session. Several
  * ranges, and SESSION:N of other transcripts, print in the order given; an entry prints once.
- * outline SESSION...: the same, restricted to the outline (with --replies, the assistant's replies too) and clipped
- * to first lines.
+ * outline SESSION...: the same, restricted to the outline (with --replies, the assistant's replies too; with
+ * --no-agents, no calls that started or messaged agents but retrieval's) and clipped to first lines.
  * Hidden entries are counted on stderr per transcript, or printed with --all-entries.
  */
 async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'): Promise<number> {
@@ -40,14 +40,18 @@ async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'):
   const clip = verb === 'show' ? clipEach(n) : clipToFirstLine(n);
   const all = args.flags.get('--all-entries') === true;
   const replies = args.flags.get('--replies') === true;
+  // Agent transcripts are not looked up, except an agent's siblings, which its own loc is abbreviated among; none
+  // is linked to an entry.
+  const agentless = args.flags.get('--no-agents') === true;
   const print = await printer(env.root);
   const transcripts = new Map<string, Loaded>();
   const load = async (locator: Locator) => {
     const ref = await resolveTranscript(locator, env.root);
     let t = transcripts.get(ref.path);
     if (!t) {
-      const agents = await sessionAgents(env.root, ref.session);
+      const agents = agentless && ref.agentId === undefined ? [] : await sessionAgents(env.root, ref.session);
       const loaded = loadTranscript(ref, await readBytes(ref), agents, print);
+      if (agentless) loaded.ctx.agents.clear();
       t = { ref, agents, loaded, printed: new Set(), hidden: [] };
       transcripts.set(ref.path, t);
     }

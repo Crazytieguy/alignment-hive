@@ -293,7 +293,8 @@ Output: JSON Lines on stdout, one entry per line. Keys that don't apply are left
   sessions rows: loc, start and end (times of its first and last entries; a fork starts at its own first
   entry, not the context it copied), branch, title (Claude Code's session title, if any), first (the first
   human message, or slash command if none, clipped to its first line), and project with --all-projects.
-  Sessions overlap in time. A session with no human message and no reply is not listed.
+  --brief leaves out start, title and first, faster. Sessions overlap in time. A session with no human message
+  and no reply is not listed.
   jq selects rows: hive local show S | jq -c 'select(.tool=="Write")' lists a session's Write calls, and
   hive local show S | jq -r '.agents[]?' lists its agent transcripts.
 
@@ -306,7 +307,8 @@ Hidden unless --all-entries: empty thinking, routine system entries (timings, ho
   settings (/model, /effort), slash command output, ! shell markup, the summary (and the /compact it replays)
   written after a compaction, and subagent records that older Claude Code versions wrote inline. Nothing else
   is hidden: tool calls and assistant replies always print. stderr says how many were hidden.
-outline: --replies adds the assistant's replies; several SESSIONs print one after another.
+outline: --replies adds the assistant's replies; --no-agents leaves out calls that started or messaged agents
+  (recall stays), faster; several SESSIONs print one after another.
 Clipping: sessions and outline show first lines; show clips each field to 1000 chars; grep shows 200 chars
   around the match and the first line of other fields. Cuts are marked [+N chars]. A tool input in show or
   outline keeps its leading items up to about 3 times the clip; [+N items] counts the rest. --clip N sets
