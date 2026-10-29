@@ -14,7 +14,7 @@ Information from past sessions that bears on the caller's topic, whether or not 
 
 ## Contract
 
-Quote verbatim; do not interpret or summarize. Label each quote `[user]`, `[assistant]`, `[thinking]`, or `[tool]` with its `loc` and date. One short context line per quote is fine (what was being worked on, what the quote answers); the quote itself stays exact. When an ask has no hit, say so under Gaps.
+Quote verbatim; do not interpret or summarize. Each quote is one entry: label it `[user]`, `[assistant]`, `[thinking]`, or `[tool]`, and end it with exactly `(<loc>, <date>)` of that entry; for an artifact comment, that is the entry that read it. One short context line per quote is fine, above it (what was being worked on, what the quote answers); the quote itself stays exact. When an ask has no hit, say so under Gaps.
 
 ## Scope
 
