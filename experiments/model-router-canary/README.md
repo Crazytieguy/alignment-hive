@@ -9,7 +9,7 @@ It runs on macOS (launchd, and the keychain login the nested `claude` runs share
 launchd starts `run.sh` every hour. Most hours it checks two versions and the release list and stops there; a release list that can't be fetched for a day is a finding of its own. It runs:
 
 - **The live checks** once a day, and as soon as Claude Code or the router changes version, so a Claude Code update that breaks routing is caught the hour it lands. Once a week they add the context-overflow probes, requests of about 1.2M tokens.
-- **A candidate** when the newest CLIProxyAPI release above the pin is at least 4 days old and hasn't been evaluated. Upstream ships about nine releases a week and fixes most regressions it ships within three days, never by pulling the release; a release that is replaced before it ages is never evaluated. An inconclusive candidate is retried six hours later, up to three times.
+- **A candidate** when the newest CLIProxyAPI release above the pin is at least 4 days old and hasn't been evaluated. Upstream ships about nine releases a week and fixes most regressions it ships within three days, never by pulling the release. Once a newer release has aged, older ones are passed over. An inconclusive candidate is retried six hours later, up to three times.
 
 When a run finds something, `run.sh` starts a background Claude Code session (`claude --bg --name model-router-canary`) in this repository, in auto mode, with the report and `session-prompt.md`. The session fixes a live regression, re-pins to a passing candidate (or works around a failing one, or reports it upstream), or fixes the canary. The same finding starts at most one session a day; a quiet run starts none and spends no Claude quota.
 

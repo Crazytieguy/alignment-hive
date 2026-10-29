@@ -15,7 +15,7 @@ export const LIVE_EVERY_HOURS = 24;
 export const FULL_EVERY_DAYS = 7;
 /**
  * A release must be this old before it is a candidate. Upstream fixed every regression found in 90 days of releases
- * within about three days (never by pulling the release), and a release replaced before it ages is never evaluated.
+ * within about three days (never by pulling the release), so by then the notes of the releases after it show any fix.
  */
 export const MIN_AGE_DAYS = 4;
 /** An inconclusive or skipped candidate is tried again after this long, up to MAX_TRIES runs that got to test it. */
@@ -64,7 +64,7 @@ export function liveDue(
 
 /**
  * The release to evaluate now, if any: the newest one above the pin that is at least MIN_AGE_DAYS old. Older releases
- * are never evaluated once a newer one has aged, so a release that is replaced quickly is skipped. A settled one is
+ * are never evaluated once a newer one has aged (a release still waiting for its retry is dropped then). A settled one is
  * not evaluated again; an unsettled one is retried once RETRY_AFTER_HOURS have passed.
  */
 export function nextCandidate(
