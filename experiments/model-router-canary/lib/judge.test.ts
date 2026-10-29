@@ -32,6 +32,7 @@ test('the prompt carries the notes of every release after the pin up to the cand
   const p = judgePrompt({
     pinned: '8.0.34',
     candidate: '8.0.36',
+    patch: true,
     releases: [
       { version: '8.0.37', publishedAt: '2026-10-20T00:00:00Z', notes: 'too new' },
       { version: '8.0.36', publishedAt: '2026-10-19T00:00:00Z', notes: 'fix codex stream' },
@@ -49,12 +50,19 @@ test('the prompt carries the notes of every release after the pin up to the cand
   expect(p).not.toContain('PINNED-NOTES');
   expect(p).toContain('codex_executor.go +12 -3');
   expect(p).toContain('pass candidate/candidate tool-replay: ok');
+  expect(p).not.toContain('not a patch release');
+});
+
+test('a minor release is told the bench runs unless it waits', () => {
+  const p = judgePrompt({ pinned: '8.0.34', candidate: '8.1.0', patch: false, releases: [], files: [], checks: [] });
+  expect(p).toContain('8.1.0 is not a patch release of 8.0.34, so the bench runs unless you answer "wait".');
 });
 
 test('a release list that stops short of the pin says so', () => {
   const p = judgePrompt({
     pinned: '8.0.10',
     candidate: '8.0.12',
+    patch: true,
     releases: [{ version: '8.0.12', publishedAt: '2026-10-19T00:00:00Z', notes: 'x' }],
     files: [],
     checks: [],
@@ -63,7 +71,8 @@ test('a release list that stops short of the pin says so', () => {
 });
 
 test('the decision comes from the structured output only', () => {
-  expect(parseJudge(JSON.stringify({ result: 'x', structured_output: { decision: 'bench', reason: 'executor changed' } }))).toEqual({ decision: 'bench', reason: 'executor changed' });
+  expect(parseJudge(JSON.stringify({ result: 'x', structured_output: { decision: 'bench', reason: 'executor changed', fixedIn: '' } }))).toEqual({ decision: 'bench', reason: 'executor changed', fixedIn: '' });
+  expect(parseJudge(JSON.stringify({ structured_output: { decision: 'wait', reason: 'restores commentary history', fixedIn: ' v8.0.44' } }))).toEqual({ decision: 'wait', reason: 'restores commentary history', fixedIn: '8.0.44' });
   expect(parseJudge(JSON.stringify({ result: '{"decision":"repin"}' }))).toBeUndefined();
   expect(parseJudge(JSON.stringify({ structured_output: { decision: 'ship', reason: '' } }))).toBeUndefined();
   expect(parseJudge('not json')).toBeUndefined();

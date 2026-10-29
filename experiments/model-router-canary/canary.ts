@@ -16,15 +16,16 @@ import { TASKS, compareArms, dockerReady, runBench } from './lib/bench';
 import { claudeVersion, runCells } from './lib/cells';
 import { DATA, DOWNLOADS, LIVE, LIVE_AUTH_DIR, REPO, RUNS, SANDBOXES, cachedCpaBinary, portFree, readJson, routerBinary, run, sleep, stamp, writeJsonAtomic } from './lib/env';
 import { changedGoFiles, judgePrompt, judgeRelease } from './lib/judge';
+import type { JudgeDecision } from './lib/judge';
 import { discoverModels, liveTarget, parseMiniToml, routerHealth, runProbes } from './lib/probes';
 import type { ModelSet } from './lib/probes';
 import { Recorder, appendHistory, readHistory, renderMarkdown } from './lib/report';
 import type { CandidateVerdict, Check, RunReport } from './lib/report';
 import { credentialPostcheck, credentialPrecheck, livePorts, startSandbox, sweepSandboxes } from './lib/sandbox';
 import type { Sandbox } from './lib/sandbox';
-import { MAX_TRIES, MIN_AGE_DAYS, isPatch, liveDue, newFindings, nextCandidate } from './lib/schedule';
+import { MAX_TRIES, MIN_AGE_DAYS, SUPERSEDED_LIMIT, isPatch, liveDue, newFindings, nextCandidate, supersededStreak } from './lib/schedule';
 import type { CandidateEntry, CandidateState, Finding, SessionLog } from './lib/schedule';
-import { auditSource, downloadCpa, downloadSource, listReleases, pickCandidate, pinnedVersion } from './lib/upstream';
+import { auditSource, compareVersions, downloadCpa, downloadSource, listReleases, pickCandidate, pinnedVersion } from './lib/upstream';
 import type { Release } from './lib/upstream';
 
 /** A precheck skip that should clear by itself (the expiry window) raises attention only after this long. */
@@ -241,23 +242,28 @@ async function stopAll(sandboxes: Array<Sandbox>, rec: Recorder, dir: string): P
   }
 }
 
-/** Whether the bench should run: always for a minor or major release, and for a patch release when Claude says so. */
-async function benchNeeded(o: { pinned: string; version: string; releases: Array<Release>; rec: Recorder; dir: string }): Promise<boolean> {
-  if (!isPatch(o.pinned, o.version)) {
-    o.rec.add({ tier: 'candidate', target: 'canary', name: 'bench-judge', status: 'pass', detail: `bench: ${o.version} is not a patch release of ${o.pinned}` });
-    return true;
-  }
+/**
+ * What follows the checks, as Claude decides: the re-pin, the bench first, or waiting for a newer release that fixes
+ * something this one broke. A minor or major release gets the bench unless it waits; no answer means the bench.
+ */
+async function nextStep(o: { pinned: string; version: string; releases: Array<Release>; rec: Recorder; dir: string }): Promise<JudgeDecision> {
+  const patch = isPatch(o.pinned, o.version);
   try {
     const files = changedGoFiles(await downloadSource(o.pinned), await downloadSource(o.version));
     const checks = o.rec.checks.filter((c) => c.tier !== 'live');
-    const prompt = judgePrompt({ pinned: o.pinned, candidate: o.version, releases: o.releases, files, checks });
+    const prompt = judgePrompt({ pinned: o.pinned, candidate: o.version, patch, releases: o.releases, files, checks });
     writeFileSync(join(o.dir, 'judge-prompt.md'), prompt);
     const d = await judgeRelease(prompt, join(o.dir, 'judge'));
-    o.rec.add({ tier: 'candidate', target: 'canary', name: 'bench-judge', status: 'pass', detail: `${d.decision}: ${d.reason}` });
-    return d.decision === 'bench';
+    // A wait must name a listed release after the candidate; anything else would skip a passing candidate for nothing.
+    const fixKnown = o.releases.some((r) => r.version === d.fixedIn && compareVersions(r.version, o.version) > 0);
+    const decision = (d.decision === 'wait' && !fixKnown) || (!patch && d.decision === 'repin') ? 'bench' : d.decision;
+    const label = decision === 'wait' ? `wait for ${d.fixedIn}` : d.decision === 'wait' ? `bench (a wait for "${d.fixedIn}", which is no later release)` : decision;
+    o.rec.add({ tier: 'candidate', target: 'canary', name: 'judge', status: 'pass', detail: `${label}: ${d.reason}` });
+    return { decision, reason: d.reason, fixedIn: decision === 'wait' ? d.fixedIn : '' };
   } catch (e) {
-    o.rec.add({ tier: 'candidate', target: 'canary', name: 'bench-judge', status: 'warn', detail: `no judgement, so the bench runs: ${(e instanceof Error ? e.message : String(e)).slice(0, 200)}` });
-    return true;
+    const detail = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+    o.rec.add({ tier: 'candidate', target: 'canary', name: 'judge', status: 'warn', detail: `no judgement, so the bench runs: ${detail}` });
+    return { decision: 'bench', reason: detail, fixedIn: '' };
   }
 }
 
@@ -308,6 +314,8 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
   const sandboxes: Array<Sandbox> = [];
   // Set when the bench was needed but couldn't give an answer; the verdict then stays open.
   let benchShort: string | undefined;
+  // Set when Claude found a later release that fixes something this one broke.
+  let waitFor: JudgeDecision | undefined;
   try {
     sandboxes.push(...(await startBoth(rec, routerVersion, { pinned: pinnedBinary, candidate: cpaBinary }, pre.files)));
     const targets = sandboxes.map((s) => s.target);
@@ -324,8 +332,9 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
       }
       // The bench only adds to a candidate that passed everything else.
       if (opts.bench !== 'never' && verdictOf(rec, seen?.regressions ?? []).verdict === 'pass') {
-        const needed = opts.bench === 'always' || (await benchNeeded({ pinned, version, releases: opts.releases, rec, dir: report.dir }));
-        if (needed) benchShort = await benchTier(report, rec, sandboxes, pm.primary, {});
+        const next = opts.bench === 'always' ? undefined : await nextStep({ pinned, version, releases: opts.releases, rec, dir: report.dir });
+        if (next?.decision === 'wait') waitFor = next;
+        else if (!next || next.decision === 'bench') benchShort = await benchTier(report, rec, sandboxes, pm.primary, {});
       }
     }
   } catch (e) {
@@ -337,6 +346,7 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
     await stopAll(sandboxes, rec, report.dir);
   }
   const v = verdictOf(rec, seen?.regressions ?? []);
+  if (v.verdict === 'pass' && waitFor) return settle('superseded', `${waitFor.fixedIn} fixes it: ${waitFor.reason}`, { regressions: v.regressions, waitFor: waitFor.fixedIn });
   if (v.verdict === 'pass' && benchShort) return settle('inconclusive', `the bench was needed but ${benchShort}`, { regressions: v.regressions });
   settle(v.verdict, v.reason, { regressions: v.regressions });
 }
@@ -506,9 +516,15 @@ function findingsOf(report: RunReport, rec: Recorder): Array<Finding> {
   if (sweep) out.push({ key: 'sweep', text: `a previous run left sandboxes behind: ${sweep.detail}` });
   const cand = report.candidate;
   if (cand) {
-    const entry = readJson<CandidateState>(CANDIDATES, {})[cand.version];
+    const state = readJson<CandidateState>(CANDIDATES, {});
+    const entry = state[cand.version];
     const text = `candidate CLIProxyAPI ${cand.version}: ${cand.verdict} (${cand.reason})`;
     if (cand.verdict === 'pass' || cand.verdict === 'fail') out.push({ key: `candidate:${cand.version}:${cand.verdict}`, text });
+    // A superseded candidate needs nothing while the release that fixes it ages, unless the waits keep coming.
+    if (cand.verdict === 'superseded') {
+      const streak = supersededStreak(state, report.versions.pinnedCpa ?? '');
+      if (streak >= SUPERSEDED_LIMIT) out.push({ key: 'superseded-streak', text: `${text}; the last ${streak} candidates all waited for a later fix, so the pin has stopped moving` });
+    }
     // An inconclusive candidate is retried on later ticks; only giving up on it needs a look.
     if (cand.verdict === 'inconclusive' && (entry?.tries ?? 0) >= MAX_TRIES) out.push({ key: `candidate:${cand.version}:inconclusive`, text: `${text}; gave up after ${MAX_TRIES} tries` });
     if (cand.verdict === 'skipped') {

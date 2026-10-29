@@ -32,7 +32,8 @@ export type RouterTarget = {
   gatewaySecretFile: string;
 };
 
-export type CandidateVerdict = 'pass' | 'fail' | 'inconclusive' | 'skipped';
+/** superseded: passed, but a later release fixes something it changed, so the canary waits for that one to age. */
+export type CandidateVerdict = 'pass' | 'fail' | 'superseded' | 'inconclusive' | 'skipped';
 
 export type RunReport = {
   startedAt: string;

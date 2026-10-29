@@ -3,7 +3,7 @@
 // history, the candidate state and the release list, so the decisions are unit-tested.
 import type { HistoryRow } from './report';
 import type { CandidateVerdict } from './report';
-import { pickCandidate } from './upstream';
+import { compareVersions, pickCandidate } from './upstream';
 import type { Release } from './upstream';
 
 const HOUR = 3_600_000;
@@ -21,6 +21,8 @@ export const MIN_AGE_DAYS = 4;
 /** An inconclusive or skipped candidate is tried again after this long, up to MAX_TRIES runs that got to test it. */
 export const RETRY_AFTER_HOURS = 6;
 export const MAX_TRIES = 3;
+/** This many superseded candidates in a row means the pin has stopped following upstream, which a session should hear about. */
+export const SUPERSEDED_LIMIT = 3;
 /** The same finding starts at most one Claude session in this window. */
 export const REPEAT_AFTER_HOURS = 24;
 
@@ -33,12 +35,14 @@ export type CandidateEntry = {
   /** Candidate-only failures of the last try, so a repeat settles 'fail'. */
   regressions?: Array<string>;
   firstSkippedAt?: string;
+  /** For a superseded candidate: the release that fixes it. */
+  waitFor?: string;
   transientSkip?: boolean;
 };
 export type CandidateState = Record<string, CandidateEntry>;
 
 export const settled = (e: CandidateEntry | undefined): boolean =>
-  !!e && (e.verdict === 'pass' || e.verdict === 'fail' || e.tries >= MAX_TRIES);
+  !!e && (e.verdict === 'pass' || e.verdict === 'fail' || e.verdict === 'superseded' || e.tries >= MAX_TRIES);
 
 /** Whether the live tier is due, and with the overflow probes. */
 export function liveDue(
@@ -76,12 +80,31 @@ export function nextCandidate(
 ): { version?: string; why: string } {
   const aged = pickCandidate(releases, pinned, minAgeDays, now);
   if (!aged) return { why: `no release newer than ${pinned} is at least ${minAgeDays} days old` };
+  // A wait names the release that fixes a candidate; the releases before it carry the same break and are passed over.
+  const fix = Object.values(state)
+    .map((e) => (e.verdict === 'superseded' ? e.waitFor : undefined))
+    .filter((v): v is string => !!v && compareVersions(v, pinned) > 0)
+    .sort(compareVersions)
+    .at(-1);
+  if (fix && compareVersions(aged.version, fix) < 0) return { why: `waiting for ${fix}, which fixes a superseded candidate, to be ${minAgeDays} days old` };
   const seen = state[aged.version];
   if (settled(seen)) return { why: `${aged.version} already evaluated: ${seen!.verdict} (${seen!.at.slice(0, 16)})` };
   if (seen && now - Date.parse(seen.at) < RETRY_AFTER_HOURS * HOUR) {
     return { why: `${aged.version} was ${seen.verdict} at ${seen.at.slice(0, 16)}; retrying after ${RETRY_AFTER_HOURS}h` };
   }
   return { version: aged.version, why: seen ? `retrying ${aged.version} (${seen.verdict})` : `${aged.version} is new` };
+}
+
+/**
+ * How many decided candidates above the pin, newest first, were superseded in a row (inconclusive and skipped ones aside).
+ * The releases before a wait's fix are never evaluated, so each step is a separate regression upstream fixed later.
+ */
+export function supersededStreak(state: CandidateState, pinned: string): number {
+  const decided = Object.entries(state)
+    .filter(([v, e]) => compareVersions(v, pinned) > 0 && ['pass', 'fail', 'superseded'].includes(e.verdict))
+    .sort(([a], [b]) => compareVersions(b, a));
+  const i = decided.findIndex(([, e]) => e.verdict !== 'superseded');
+  return i === -1 ? decided.length : i;
 }
 
 /** Same major and minor as the pin: upstream ships nearly every change as a patch release. */

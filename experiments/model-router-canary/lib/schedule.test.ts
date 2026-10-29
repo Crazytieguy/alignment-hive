@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { HistoryRow } from './report';
-import { isPatch, liveDue, MAX_TRIES, newFindings, nextCandidate } from './schedule';
+import { isPatch, liveDue, MAX_TRIES, newFindings, nextCandidate, supersededStreak } from './schedule';
 import type { CandidateState } from './schedule';
 
 const NOW = Date.parse('2026-10-28T12:00:00Z');
@@ -58,11 +58,34 @@ test('the newest aged release above the pin is the candidate; older ones are pas
 test('a settled candidate is not evaluated again; an unsettled one waits before its retry', () => {
   expect(nextCandidate(releases, { '8.0.45': entry('pass', 100) }, '8.0.34', NOW).version).toBeUndefined();
   expect(nextCandidate(releases, { '8.0.45': entry('fail', 100) }, '8.0.34', NOW).version).toBeUndefined();
+  // A superseded candidate waits for the release that fixes it to age, passing over the ones in between.
+  const waits = { '8.0.44': { ...entry('superseded', 100), waitFor: '8.0.46' } };
+  expect(nextCandidate(releases, waits, '8.0.34', NOW).version).toBeUndefined();
+  expect(nextCandidate(releases, waits, '8.0.34', NOW).why).toContain('waiting for 8.0.46');
+  expect(nextCandidate(releases, waits, '8.0.34', NOW, 0).version).toBe('8.0.46');
+  // A fix at or below the pin no longer holds anything back.
+  expect(nextCandidate(releases, waits, '8.0.46', NOW, 0).version).toBeUndefined();
+  expect(nextCandidate(releases, { '8.0.30': { ...entry('superseded', 100), waitFor: '8.0.44' } }, '8.0.44', NOW).version).toBe('8.0.45');
   expect(nextCandidate(releases, { '8.0.45': entry('inconclusive', 2) }, '8.0.34', NOW).version).toBeUndefined();
   expect(nextCandidate(releases, { '8.0.45': entry('inconclusive', 7) }, '8.0.34', NOW).version).toBe('8.0.45');
   expect(nextCandidate(releases, { '8.0.45': entry('inconclusive', 7, MAX_TRIES) }, '8.0.34', NOW).version).toBeUndefined();
   // Skips don't use up tries, so a login about to expire just waits.
   expect(nextCandidate(releases, { '8.0.45': entry('skipped', 7, 0) }, '8.0.34', NOW).version).toBe('8.0.45');
+});
+
+test('superseded candidates in a row are counted from the newest decided one', () => {
+  expect(supersededStreak({}, '8.0.34')).toBe(0);
+  const state = {
+    '8.0.33': entry('superseded', 300),
+    '8.0.40': entry('pass', 200),
+    '8.0.42': entry('superseded', 100),
+    '8.0.44': entry('inconclusive', 50),
+    '8.0.45': entry('superseded', 10),
+  };
+  expect(supersededStreak(state, '8.0.34')).toBe(2);
+  expect(supersededStreak(state, '8.0.40')).toBe(2);
+  expect(supersededStreak(state, '8.0.41')).toBe(2);
+  expect(supersededStreak({ ...state, '8.0.40': entry('superseded', 200) }, '8.0.34')).toBe(3);
 });
 
 test('patch releases share major and minor with the pin', () => {
