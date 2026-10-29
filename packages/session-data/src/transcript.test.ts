@@ -27,7 +27,10 @@ const asst = (content: unknown, extra: object = {}) => ({
 const REM = '<system-reminder>\nnote\n</system-reminder>';
 
 describe('numbering', () => {
+  // Stored reports cite these numbers, so they hold across CLI versions (numbersFor): never change an expectation here.
   test('which records get numbers, and how many', () => {
+    const recall = '[hive recall] Entries from this project.'
+    const context = (content: Array<string>) => ({ type: 'attachment', uuid: u(), attachment: { type: 'hook_additional_context', content } })
     const rs = [
       user('typed'), // 1
       user([{ type: 'tool_result', tool_use_id: 't0', content: 'x' }]), // none
@@ -50,6 +53,8 @@ describe('numbering', () => {
       { type: 'system', uuid: u(), subtype: 'turn_duration' }, // 8
       { type: 'fork-context-ref', parentSessionId: 'p', parentLastUuid: 'x' }, // 9
       { type: 'continued-in', continuedInSessionId: 'c' }, // 10
+      context(['another hook said this', recall]), // 11: recall's report
+      context(['another hook said this']), // none
       { type: 'summary', summary: 'legacy', leafUuid: 'x' }, // none
       { type: 'ai-title', aiTitle: 'T' }, // none
       { type: 'progress', uuid: u() }, // none
@@ -70,8 +75,9 @@ describe('numbering', () => {
       [8, 'system', uuid(11)],
       [9, 'fork-context-ref', undefined],
       [10, 'continued-in', undefined],
+      [11, 'user', uuid(14)],
     ]);
-    expect(t.entries.map((e) => e.block)).toEqual([undefined, undefined, 0, 1, 2, ...Array(5).fill(undefined)]);
+    expect(t.entries.map((e) => e.block)).toEqual([undefined, undefined, 0, 1, 2, ...Array(6).fill(undefined)]);
     expect(t.entries[5]).toMatchObject({ kind: 'other', type: 'fallback' });
   });
 

@@ -110,7 +110,12 @@ function recallContext(r: RawRecord): string | undefined {
   return a.content.find((c): c is string => typeof c === 'string' && isRecallText(c));
 }
 
-/** How many entry numbers a record takes. */
+/**
+ * How many entry numbers a record takes. Reports stored in transcripts (recall's, the retrieval agent's, debrief
+ * pages) cite entries by these numbers, so a change to which records take one, or how many, renumbers the entries
+ * after them in existing transcripts and misplaces those citations (0.2.9 began numbering recall's reports, so 0.2.8
+ * numbers everything after one differently). Don't change it.
+ */
 export function numbersFor(r: RawRecord): number {
   switch (r.type) {
     case 'user':
