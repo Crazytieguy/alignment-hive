@@ -10,7 +10,7 @@ import { createInterface } from 'node:readline';
 import { canExclude, isInConsentWindow } from '@alignment-hive/session-data';
 import { z } from 'zod';
 import { mapBatched } from './batch';
-import { getClaudeProjectDir, getMainWorktreePath, readStateFile, statePaths } from './config';
+import { getClaudeProjectDir, getMainWorktreePath, listWorktreePaths, readStateFile, statePaths } from './config';
 import { extractCwdFromFile } from './transcript-discovery';
 import { findRawSessions, findSessionRefs, scanSubagentDir, toDiscoveredSession } from './session-io';
 import type { ConsentWindow, SessionStatus } from '@alignment-hive/session-data';
@@ -76,12 +76,17 @@ export function makeProjectSessionFilter(projectCwd: string): (filePath: string)
   return (filePath) => belongs(extractCwdFromFile(filePath));
 }
 
-/** makeProjectSessionFilter for an already-read session cwd; git is asked once per distinct cwd. */
+/**
+ * makeProjectSessionFilter for an already-read session cwd; git is asked once per distinct cwd
+ * that is not one of the project's own worktrees.
+ */
 function makeProjectCwdFilter(projectCwd: string): (sessionCwd: string | null) => boolean {
-  const projectMain = getMainWorktreePath(projectCwd) ?? projectCwd;
+  const worktrees = listWorktreePaths(projectCwd);
+  const projectMain = worktrees[0] ?? projectCwd;
+  const own = new Set([...worktrees, projectCwd]);
   const mainCache = new Map<string, string | null>();
   return (sessionCwd) => {
-    if (!sessionCwd || sessionCwd === projectMain || sessionCwd === projectCwd) return true;
+    if (!sessionCwd || own.has(sessionCwd)) return true;
     let main = mainCache.get(sessionCwd);
     if (main === undefined) {
       main = getMainWorktreePath(sessionCwd);

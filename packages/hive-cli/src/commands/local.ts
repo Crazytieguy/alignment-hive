@@ -18,6 +18,7 @@ import {
 import { LocatorError, parseLocator, parseRange, projectDirs } from '../lib/locators';
 import { localErrors, localHelp, localNotes, localUsage } from '../lib/messages';
 import { makeProjectSessionFilter } from '../lib/session-state';
+import { snapshot } from '../lib/snapshot';
 import { writeLine } from '../lib/stdout';
 import { cutoffTime } from '../lib/as-of';
 import { parseTimeSpec } from '../lib/time-filter';
@@ -229,7 +230,8 @@ export async function localCore(env: LocalEnv, argv: Array<string>): Promise<num
       writeLine(localHelp);
       return 0;
     }
-    return await (await load()).run(env, args);
+    const { run } = await load();
+    return await snapshot(() => run(env, args));
   } catch (error) {
     if (!(error instanceof LocalError || error instanceof LocatorError || error instanceof ArgsError)) throw error;
     const usage = error instanceof ArgsError || (error instanceof LocalError && error.usage);

@@ -14,6 +14,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { locatorErrors } from './messages';
 import { AGENT_PREFIX, findFlatAgents, isSessionFile, scanSubagentDir } from './session-io';
+import { remembered } from './snapshot';
 import type { Dirent } from 'node:fs';
 import type { Entry } from '@alignment-hive/session-data';
 import type { RawSessionRef } from './session-io';
@@ -197,8 +198,9 @@ export async function printer(root: string): Promise<Printer> {
   };
 }
 
-async function listing(dir: string): Promise<Array<Dirent>> {
-  return readdir(dir, { withFileTypes: true }).catch(() => []);
+/** A directory's entries, once per snapshot (see snapshot.ts); none for a directory that cannot be read. */
+function listing(dir: string): Promise<ReadonlyArray<Dirent>> {
+  return remembered(`dir:${dir}`, () => readdir(dir, { withFileTypes: true }).catch(() => []));
 }
 
 /** Every project's transcript dir under the root (~/.claude/projects). */

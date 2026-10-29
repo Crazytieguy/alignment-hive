@@ -224,7 +224,7 @@ export function buildTranscriptScanData(root: string = claudeProjectsRoot()): Tr
  * buildTranscriptScanData (see Strategy 3 on nested repos); `hive local` drops another repo's
  * sessions with makeProjectSessionFilter.
  */
-export function projectScanData(root: string, main: string, worktrees: Array<string>): TranscriptScanData {
+export function projectScanData(root: string, main: string, worktrees: ReadonlyArray<string>): TranscriptScanData {
   const prefixes = worktrees.map(claudeProjectDirPrefix);
   const cwdMap = scanCwds(root, (name) => prefixes.some((p) => name.startsWith(p)));
   const under = (cwd: string) => worktrees.some((w) => cwd === w || cwd.startsWith(`${w}/`));

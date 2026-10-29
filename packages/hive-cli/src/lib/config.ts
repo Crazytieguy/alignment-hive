@@ -10,6 +10,7 @@ import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { findGroupForIdentifiers } from '@alignment-hive/session-data';
+import { remembered } from './snapshot';
 
 export function getAuthFile(): string {
   const env = process.env.ALIGNMENT_HIVE_AUTH_FILE;
@@ -195,7 +196,11 @@ export function isProjectSharingEnabled<
 }
 
 /** Worktree paths from `git worktree list`, main worktree first; [] outside a repo. */
-export function listWorktreePaths(cwd: string): Array<string> {
+export function listWorktreePaths(cwd: string): ReadonlyArray<string> {
+  return remembered(`worktrees:${cwd}`, () => readWorktreePaths(cwd));
+}
+
+function readWorktreePaths(cwd: string): Array<string> {
   try {
     const output = execSync('git worktree list --porcelain', {
       cwd,
