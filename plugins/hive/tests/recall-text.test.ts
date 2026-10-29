@@ -101,6 +101,53 @@ test('history: an entry takes the budget at the size it prints, where a later re
   expect(text.length).toBeLessThanOrEqual(100_000)
 })
 
+test('history: a quote whose loc names an entry in the window, but not the entry it is from, is left out', () => {
+  const quote = (loc: string, text: string) => `> [user] ${text} (${loc}, 2026-10-01)`
+  const report: Row = {
+    loc: 'bbbb0002:1', time: at(1), kind: 'user', origin: 'recall', recall: true,
+    text: [
+      '[hive recall] Entries.',
+      // From their entries, as the retrieval agent writes them: in quotation marks, cut short, with an apostrophe,
+      // nested quotation marks, case and a list's formatting changed; an artifact comment over two paragraphs.
+      quote('aaaa0001:1', '"Don\'t use tabs ... spaces only"'),
+      quote('aaaa0001:6', '"i\'d add that \'max\' is never recommended. Also first item, second item"'),
+      quote('aaaa0001:7', 'First paragraph. Second paragraph.'),
+      // As recall writes it: clipped, with pasted text collapsed.
+      quote('aaaa0001:2', `see ${'L'.repeat(300)} [pasted, +700 chars] please [+3 chars]`),
+      // Another entry's text, as a CLI numbering differently would cite it.
+      quote('aaaa0001:3', 'Don’t use tabs'),
+      // Two entries joined, citing one.
+      quote('aaaa0001:4', '"spaces only" / "ship it"'),
+      // Entries the window doesn't print: one not read, and a call that started an agent.
+      quote('cccc0003:9', 'from an older session'),
+      quote('aaaa0001:5', 'review the PR for races'),
+    ].join('\n\n'),
+  }
+  const rows = [
+    user('aaaa0001:1', 3, 'Don’t use tabs, use spaces only'),
+    user('aaaa0001:2', 2.9, `see <pasted_content id="1">${'L'.repeat(1000)}</pasted_content id="1"> please ok`),
+    user('aaaa0001:3', 2.8, 'and ship it'),
+    user('aaaa0001:4', 2.7, 'spaces only'),
+    { loc: 'aaaa0001:5', time: at(2.6), kind: 'tool', tool: 'Agent' },
+    user('aaaa0001:6', 2.5, 'I\'d add that "max" is never recommended.\n\n- Also first item\n- second item'),
+    { loc: 'aaaa0001:7', time: at(2.4), kind: 'tool', tool: 'ArtifactComments', result: 'Thread t1\n  [the user (owner) — 2026-10-01]\n      0a1b2c3d| First paragraph.\n      0a1b2c3d|\n      0a1b2c3d| Second paragraph.' },
+  ]
+  const h = history([{ loc: 'aaaa0001', rows }, { loc: 'bbbb0002', rows: [report] }], NOW, 100_000)
+  const text = h.closed.join('') + h.open
+  for (const n of [1, 2, 6, 7]) expect(text).toContain(`aaaa0001:${n} again`)
+  for (const n of [3, 4]) expect(text).not.toContain(`aaaa0001:${n} again`)
+  expect(text).toContain('[aaaa0001:3] user: and ship it')
+  expect(text).toContain('cccc0003:9 (2026-10-01) user: from an older session')
+  expect(text).toContain('aaaa0001:5 (2026-10-01) user: review the PR for races')
+  // Once newer entries push those out of the window, the report's quotes print as written: what an older chunk prints
+  // doesn't depend on which sessions happened to be read.
+  const filler = { loc: 'dddd0004', rows: many('dddd0004', 150, 1000).map(r => ({ ...r, time: at(1.5 + Number(r.loc.split(':')[1]) / 1000) })) }
+  const later = history([{ loc: 'aaaa0001', rows }, filler, { loc: 'bbbb0002', rows: [report] }], NOW, 100_000)
+  const laterText = later.closed.join('') + later.open
+  expect(laterText).not.toContain('[aaaa0001:')
+  expect(laterText).toContain('aaaa0001:3 (2026-10-01) user: Don’t use tabs')
+})
+
 test('promptBlocks: one block per closed chunk; the last marked for the cache, or each of them for GPT', () => {
   const h = history([{ loc: 'aaaa0001', rows: many('aaaa0001', 400, 1000) }], NOW, 100_000)
   const marked = (blocks: ReturnType<typeof promptBlocks>) => blocks.map(b => b.cache === true)

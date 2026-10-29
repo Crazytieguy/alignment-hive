@@ -63,6 +63,20 @@ export function quotesIn(report: string): Array<Quote> {
   return out
 }
 
+/** Text as quoted and as recorded alike, whatever formatting, quotation marks or case a quote changed. */
+const plain = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+// Where a quote leaves text out: clip's and collapsePasted's markers, ellipses, and quotation marks around its parts.
+const ELIDED = /\[\+\d+ chars\]|\[pasted, \+\d+ chars\]|\[\s*(?:\.\.\.|…)\s*\]|\.\.\.|…|["“”]/
+// ArtifactComments starts each line of a comment with an id.
+const COMMENT_LINE = /^[ \t]*[0-9a-f]{8}\| ?/gm
+
+/** Whether a quote is from the entry: each part of it, between where it leaves text out, is in the entry. */
+function isQuoteOf(quote: string, entry: string): boolean {
+  const texts = [entry, collapsePasted(entry), entry.replace(COMMENT_LINE, '')].map(plain)
+  const parts = quote.split(ELIDED).map(plain).filter(Boolean)
+  return parts.length > 0 && parts.every(p => texts.some(t => t.includes(p)))
+}
+
 /** A row's label and text in the history, or undefined for a row it leaves out. */
 function shown(r: Row, n: number): { label: string; text: string } | undefined {
   const s = label(r)
@@ -170,6 +184,15 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
   }
   const closedKept = units.slice(from, Math.max(from, chunks.length))
   const openKept = units.slice(Math.max(from, chunks.length)).flat()
+  // A quote whose loc names an entry in the window is checked against it, and left out when it isn't from it (the
+  // retrieval agent's slip, or a CLI that numbered entries differently): it would print under that entry's loc, or
+  // hide the entry. Only the window's entries, so a check changes only when its entry's chunk leaves the window, which
+  // changes the prompt's cached prefix anyway.
+  const inWindow = new Map(units.slice(from).flat().map(it => [it.row.loc, it.row] as const))
+  const isPlaced = (q: Quote) => {
+    const row = inWindow.get(q.loc)
+    return !row || isQuoteOf(q.text, (row.kind === 'tool' ? row.result : row.text) ?? '')
+  }
 
   const seen = new Map<string, Seen>()
   const compactedAt = Math.max(0, ...items.filter(it => it.session === current && it.label === 'compaction').map(it => entryNumber(it.row.loc)))
@@ -179,9 +202,10 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
     for (const it of chunk) {
       let line: string
       if (it.label === 'recall') {
-        if (!it.quotes.length) continue
-        if (it.session === current && entryNumber(it.row.loc) > compactedAt) for (const q of it.quotes) recalledHere.add(q.loc)
-        line = `[${it.row.loc}] recall:\n${it.quotes
+        const quotes = it.quotes.filter(isPlaced)
+        if (!quotes.length) continue
+        if (it.session === current && entryNumber(it.row.loc) > compactedAt) for (const q of quotes) recalledHere.add(q.loc)
+        line = `[${it.row.loc}] recall:\n${quotes
           .map(q => {
             if (seen.has(q.loc)) return `  ${q.loc} again`
             const text = clip(q.text, n)
@@ -277,7 +301,10 @@ export function citations(reply: string): Array<{ loc: string; context: string }
   return [...out.values()]
 }
 
-/** The prefix that marks a recall report in a transcript (packages/session-data reads it). */
+/**
+ * The prefix that marks a recall report in a transcript. packages/session-data numbers a report as an entry only when
+ * it starts with this, so a change here would have CLI versions number the entries after a report differently.
+ */
 export const PREFIX = '[hive recall]'
 
 /** A cited entry as the reader saw it, with the reader's context for it ('' when none). */
