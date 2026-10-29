@@ -6,9 +6,36 @@ import { LineCounter, isAlias, isNode, isScalar, parseDocument, visit } from 'ya
 import { z } from 'zod';
 import { review as msg } from '../lib/messages';
 import { findSecrets } from './redact';
+import type { StateBlock } from 'markdown-it';
 import type { SecretFound } from './redact';
 
 export const markdown = new MarkdownIt({ html: true, linkify: false });
+/**
+ * A ref's YAML indents block scalars, so a fence quoted in one (an issue body holding ```json) sits deeper than
+ * the ref's own fence and must not close it: only a fence line no deeper than the opening does. So a closer indented
+ * past its opening runs the ref on to a later fence, and the lines it takes fail as YAML. With no closer at all,
+ * the standard fence rule takes the ref.
+ */
+markdown.block.ruler.before('fence', 'ref_fence', (state: StateBlock, startLine: number, endLine: number, silent: boolean) => {
+  const indent = state.sCount[startLine];
+  const text = (line: number) => state.src.slice(state.bMarks[line] + state.tShift[line], state.eMarks[line]);
+  const markup = indent - state.blkIndent < 4 ? /^(`{3,}|~{3,})[ \t]*ref[ \t]*$/.exec(text(startLine))?.[1] : undefined;
+  if (!markup) return false;
+  let close = startLine + 1;
+  for (; close < endLine; close++) {
+    if (text(close) && state.sCount[close] < state.blkIndent) return false;
+    if (state.sCount[close] <= indent && text(close).startsWith(markup) && /^(`+|~+)[ \t]*$/.test(text(close))) break;
+  }
+  if (close === endLine) return false;
+  if (silent) return true;
+  state.line = close + 1;
+  const token = state.push('fence', 'code', 0);
+  token.info = text(startLine).slice(markup.length);
+  token.content = state.getLines(startLine + 1, close, indent, true);
+  token.markup = markup;
+  token.map = [startLine, state.line];
+  return true;
+});
 const slug = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const itemIdSchema = slug;
 const oneLine = z.string().trim().min(1).refine((s) => !/[\r\n]/.test(s));

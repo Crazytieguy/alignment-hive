@@ -36,6 +36,17 @@ describe('debrief parser', () => {
     expect(parsed.items.map((i) => i.metadata.id)).toEqual(['behavior', 'next']);
     expect(parsed.items[0].body).toContain('## Not an item');
   });
+  test('a fence quoted in a ref block scalar stays inside the ref; only a fence no deeper than its opening closes it', () => {
+    const after = 'Title: An issue\n\n```json\n{"a": 1}\n```\n\nMore text.\n```\nlast\n```\n';
+    const quoted = `diff: Issue (draft)\nbefore: ""\nafter: |\n${after.replace(/^(?=.)/gm, '  ')}`;
+    const next = '\n## Another\n```yaml\nid: next\nsection: checked\nlede: Another effect\n```';
+    const parsed = parseReview(withRef(quoted) + next);
+    expect(parsed.items.map((i) => i.metadata.id)).toEqual(['behavior', 'next']);
+    expect(parsed.items[0].refs[0].ref).toMatchObject({ diff: 'Issue (draft)', before: '', after });
+    const listed = parseReview(document(`${item}- A point:\n\n  \`\`\`ref\n${quoted.replace(/^(?=.)/gm, '  ')}\n  \`\`\`${next}`));
+    expect(listed.items[0].refs[0].ref).toMatchObject({ after });
+    expect(() => parseReview(document(`${item}\`\`\`ref\ngit: true\n  \`\`\`${next}`))).toThrow('behavior, line 18');
+  });
   test('ref kinds, locator lists, summaries and multi-range focus', () => {
     const parsed = parseReview(withRef('diff: src/test.ts\ntitle: the check\nfocus: L2-L4, L9\nold-focus: L1\nlabels: [{line: 3, where: Login prompt}]'));
     expect(parsed.items[0].refs[0].line).toBe(REF_LINE);
