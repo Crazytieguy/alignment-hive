@@ -69,6 +69,38 @@ test('history: an entry earlier recall quoted prints once, with its own date; it
   expect(['dddd0004:1', 'dddd0004:4', 'cccc0003:4', 'aaaa0001:2'].map(h.isNew)).toEqual([true, false, false, true])
 })
 
+test('history: a report takes the budget only for what it adds, so reports of entries in the window leave it full', () => {
+  const rows = many('aaaa0001', 300, 1000)
+  // After every fifth entry, a report quoting the five before it in full (what recall hands the main agent).
+  const reports = Array.from({ length: 60 }, (_, k): Row => ({
+    loc: `bbbb0002:${k + 1}`, time: at((300 - 5 * k - 5) / 10 - 0.01), kind: 'user', origin: 'recall', recall: true,
+    text: `[hive recall] Entries.\n\n${rows.slice(5 * k, 5 * k + 5).map(r => `> [user] ${r.text} (${r.loc}, 2026-10-20)`).join('\n\n')}`,
+  }))
+  // A launch receipt quotes nothing and prints nothing.
+  const receipt: Row = { loc: 'cccc0003:1', time: at(0.05), kind: 'tool', tool: 'Agent', recall: true, result: 'r'.repeat(20_000) }
+  const sessions = [{ loc: 'aaaa0001', rows }, { loc: 'bbbb0002', rows: reports }, { loc: 'cccc0003', rows: [receipt] }]
+  const h = history(sessions, NOW, 100_000)
+  const text = h.closed.join('') + h.open
+  // Counting each report whole would leave about half.
+  expect(text.length).toBeGreaterThan(65_000)
+  expect(text.length).toBeLessThanOrEqual(100_000)
+  expect(text).toContain('[aaaa0001:300]')
+  expect(text).toContain('aaaa0001:295 again')
+  expect(text).not.toContain('rrrr')
+})
+
+test('history: an entry takes the budget at the size it prints, where a later report quotes only an excerpt', () => {
+  const rows = many('aaaa0001', 100, 6000)
+  const excerpts = Array.from({ length: 20 }, (_, k): Row => ({
+    loc: `bbbb0002:${k + 1}`, time: at((96 - 5 * k) / 10 - 0.01), kind: 'tool', tool: 'Agent', recall: true,
+    result: rows.slice(5 * k, 5 * k + 5).map(r => `> [user] ${r.text!.slice(0, 100)} (${r.loc}, 2026-10-20)`).join('\n\n'),
+  }))
+  const h = history([{ loc: 'aaaa0001', rows }, { loc: 'bbbb0002', rows: excerpts }], NOW, 100_000)
+  const text = h.closed.join('') + h.open
+  expect(text).toContain('aaaa0001:100 again')
+  expect(text.length).toBeLessThanOrEqual(100_000)
+})
+
 test('sessionsFor reads newest sessions in batches until older ones cannot reach the window', async () => {
   const listed = Array.from({ length: 60 }, (_, i) => ({ loc: `s${String(i).padStart(7, '0')}`, end: at(i) }))
   const read: Array<number> = []
@@ -83,12 +115,31 @@ test('sessionsFor reads newest sessions in batches until older ones cannot reach
   // Long replies count as the history clips them, so they don't end the reading early.
   const long = async (locs: Array<string>) => locs.map(loc => ({ ...user(`${loc}:1`, Number(loc.slice(1)), ''), kind: 'assistant', text: 'y'.repeat(30_000) }))
   expect(await sessionsFor(listed.slice(0, 40), long, 600_000)).toHaveLength(40)
+  // Nor do reports, which mostly quote what the history prints anyway.
+  const reported = async (locs: Array<string>) => locs.map(loc => ({ ...user(`${loc}:1`, Number(loc.slice(1)), 'z'.repeat(30_000)), origin: 'recall', recall: true }))
+  expect(await sessionsFor(listed.slice(0, 40), reported, 600_000)).toHaveLength(40)
 })
 
-test('quotesIn reads the recall and retrieval agent formats', () => {
-  expect(quotesIn('## Findings\n\nctx\n> [user] a\n> b (aaaa0001:3, 2026-09-01)\n\n> [assistant] c (bbbb0002/agent-x1:9, 2026-09-02)')).toEqual([
-    { kind: 'user', text: 'a\nb', loc: 'aaaa0001:3', date: '2026-09-01' },
+test('quotesIn reads the recall and retrieval agent formats, and a report handed back indented', () => {
+  const report = '## Findings\n\nctx\n> [user] a\n>   b (aaaa0001:3, 2026-09-01)\n\n> [assistant] c (bbbb0002/agent-x1:9, 2026-09-02)'
+  const quotes = [
+    { kind: 'user', text: 'a\n  b', loc: 'aaaa0001:3', date: '2026-09-01' },
     { kind: 'assistant', text: 'c', loc: 'bbbb0002/agent-x1:9', date: '2026-09-02' },
+  ]
+  expect(quotesIn(report)).toEqual(quotes)
+  const handedBack = `<agent-message from="a1">\n[Subagent hand-back] The report follows:\n${report.replace(/^/gm, '  ')}\n</agent-message>`
+  expect(quotesIn(handedBack)).toEqual(quotes)
+  // The retrieval agent's closing parentheses as it writes them: no date, or the loc among other words. A quote with
+  // no loc (an artifact comment's id) is not one.
+  const varied = [
+    '> [tool] "3. Plan, then plan review." (a4aee255:100)',
+    '> [user] a separate section (c014, bbc0a27d:349 area, 2026-09-15)',
+    '> [user] tests and lint pass (c034, 2026-09-15)',
+    '> [user] longer prefix (abcdef012:5, 2026-09-15)',
+  ].join('\n\n')
+  expect(quotesIn(varied)).toEqual([
+    { kind: 'tool', text: '"3. Plan, then plan review."', loc: 'a4aee255:100', date: '' },
+    { kind: 'user', text: 'a separate section', loc: 'bbc0a27d:349', date: '2026-09-15' },
   ])
 })
 

@@ -143,7 +143,7 @@ export async function drawRecalled($: EngineInterface, e: UserMessage, next: (e:
         {found.entries.map(entry => (
           <Box key={entry.loc} flexDirection="column">
             <Text dimColor>
-              {WHO[entry.label] ?? entry.label} · {entry.date} · {entry.loc.split(':')[0]}
+              {[WHO[entry.label] ?? entry.label, entry.date, entry.loc.split(':')[0]].filter(Boolean).join(' · ')}
               {entry.context ? ` · ${entry.context}` : ''}
             </Text>
             <Markdown text={entry.text} />
