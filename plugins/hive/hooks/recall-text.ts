@@ -250,12 +250,15 @@ The main agent gets each entry's text. Leave the context empty for most entries:
 
 /**
  * The prompt: one block per closed chunk, so a call after a chunk closed still finds the previous call's cached
- * prefix at a block boundary, the last of them marked for the cache; then the open chunk and the new prompt.
+ * prefix at a block boundary; then the open chunk and the new prompt. Claude finds an earlier boundary on its own,
+ * so only the last closed block is marked for the cache; GPT caches only where a message ends, which model-router
+ * makes at each mark, so with `isEveryChunk` every closed block is marked.
  */
-export function promptBlocks(h: History, session: string, prompt: string): Array<{ text: string; cache?: true }> {
+export function promptBlocks(h: History, session: string, prompt: string, isEveryChunk = false): Array<{ text: string; cache?: true }> {
   const texts = [...h.closed, `${h.open}</history>\n\nThe current session is ${session}. The user just sent this prompt in it:\n\n<new_prompt>\n${prompt}\n</new_prompt>`]
   texts[0] = `<history>\n${texts[0]}`
-  return texts.map((text, i) => (i === texts.length - 2 ? { text, cache: true as const } : { text }))
+  const last = texts.length - 2
+  return texts.map((text, i) => (i === last || (isEveryChunk && i < last) ? { text, cache: true as const } : { text }))
 }
 
 // A cited line: `- <loc> | <context>`, as models write it: the loc maybe in brackets or backticks.

@@ -101,6 +101,15 @@ test('history: an entry takes the budget at the size it prints, where a later re
   expect(text.length).toBeLessThanOrEqual(100_000)
 })
 
+test('promptBlocks: one block per closed chunk; the last marked for the cache, or each of them for GPT', () => {
+  const h = history([{ loc: 'aaaa0001', rows: many('aaaa0001', 400, 1000) }], NOW, 100_000)
+  const marked = (blocks: ReturnType<typeof promptBlocks>) => blocks.map(b => b.cache === true)
+  const closed = h.closed.map(() => true)
+  expect(h.closed.length).toBeGreaterThan(2)
+  expect(marked(promptBlocks(h, 'abcd1234', 'hi'))).toEqual([...closed.map((_, i) => i === closed.length - 1), false])
+  expect(marked(promptBlocks(h, 'abcd1234', 'hi', true))).toEqual([...closed, false])
+})
+
 test('sessionsFor reads newest sessions in batches until older ones cannot reach the window', async () => {
   const listed = Array.from({ length: 60 }, (_, i) => ({ loc: `s${String(i).padStart(7, '0')}`, end: at(i) }))
   const read: Array<number> = []

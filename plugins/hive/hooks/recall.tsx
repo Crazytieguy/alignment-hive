@@ -58,7 +58,10 @@ async function recall($: EngineInterface, choice: string, prompt: string, deadli
     const left = Math.ceil(deadline - now)
     if (left < 1000) return FAILURE
     const r = await $.model
-      .complete({ model, system: INSTRUCTIONS, prompt: promptBlocks(h, session, prompt), effort: 'low', maxTokens: 4000, timeoutMs: left }, { signal })
+      .complete(
+        { model, system: INSTRUCTIONS, prompt: promptBlocks(h, session, prompt, model.startsWith('gpt-')), effort: 'low', maxTokens: 4000, timeoutMs: left },
+        { signal },
+      )
       .catch(() => undefined)
     if (r?.isAnswered) {
       const found = entries(r.text, h)
