@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { citations, collapsePasted, history, promptBlocks, quotesIn, report, sessionsFor } from '../hooks/recall-text'
+import { FAILED, citations, collapsePasted, history, promptBlocks, quotesIn, recalledIn, recalledOf, report, reportOf, sessionsFor } from '../hooks/recall-text'
 import type { Row } from '../hooks/recall-text'
 
 const HOUR = 3_600_000
@@ -171,4 +171,35 @@ test('report: each entry as the reader saw it, with context only where given, an
   expect(report('- ffff0000:1 |', h)).toBeUndefined()
   expect(report('none', h)).toBeUndefined()
   expect(promptBlocks(h, 'abcd1234', 'hi').map(b => b.text).join('')).toContain('<new_prompt>\nhi\n</new_prompt>')
+})
+
+test('recalledOf reads a report back as reportOf wrote it, and FAILED as failed', () => {
+  const found = [
+    { loc: 'aaaa0001:3', label: 'user', text: 'Use tabs.\n\n> quoted line\n- a list (with parens)', date: '2026-10-19', context: '' },
+    { loc: 'bbbb0002/agent-a1b2:7', label: 'user answer', text: 'Yes, ship it', date: '2026-10-20', context: 'which branch to ship' },
+    // An earlier retrieval report's quote can come without a date.
+    { loc: 'cccc0003:12', label: 'assistant', text: 'Landed as abc123.', date: '', context: '' },
+  ]
+  expect(recalledOf(reportOf(found, '2026-10-17'))).toEqual({ entries: found, from: '2026-10-17' })
+  expect(recalledOf(FAILED)).toBe('failed')
+  expect(recalledOf('[hive recall] something else')).toBeUndefined()
+})
+
+test('recalledIn: each automatic report goes to the prompt nearest before it', () => {
+  const one = reportOf([{ loc: 'aaaa0001:3', label: 'user', text: 'Use tabs.', date: '2026-10-19', context: '' }], '2026-10-17')
+  const rows: Array<Row> = [
+    { loc: 'cccc0003:1', uuid: 'p1', kind: 'user', text: 'Format the file.' },
+    { loc: 'cccc0003:2', uuid: 'r1', kind: 'user', origin: 'recall', recall: true, text: one },
+    { loc: 'cccc0003:3', uuid: 'a1', kind: 'assistant', text: 'Done.' },
+    { loc: 'cccc0003:4', uuid: 'p2', kind: 'user', text: 'And the other one.' },
+    { loc: 'cccc0003:5', uuid: 'm1', kind: 'user', origin: 'peer', text: 'a message from another session' },
+    { loc: 'cccc0003:6', uuid: 'r2', kind: 'user', origin: 'recall', recall: true, text: FAILED },
+    { loc: 'cccc0003:7', uuid: 'p3', kind: 'user', text: 'Look it up.' },
+    // A retrieval agent's report handed back: recall, but not automatic recall's.
+    { loc: 'cccc0003:8', uuid: 'r3', kind: 'user', origin: 'recall', recall: true, text: 'Found 2 sessions about tabs.' },
+  ]
+  expect(recalledIn(rows)).toEqual([
+    ['p1', { entries: [{ loc: 'aaaa0001:3', label: 'user', text: 'Use tabs.', date: '2026-10-19', context: '' }], from: '2026-10-17' }],
+    ['p2', 'failed'],
+  ])
 })

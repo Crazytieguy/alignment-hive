@@ -1,6 +1,8 @@
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
+import { reportOf } from '../hooks/recall-text'
+
 const NOW = Date.parse('2026-10-20T15:30:00Z')
 const SESSION = 'abcd1234-0000-4000-8000-000000000000'
 const ENTRY = { loc: 'feed0001:7', time: '2026-10-19T09:00:00Z', kind: 'user', text: 'Always use tabs in this repo, never spaces.' }
@@ -16,7 +18,8 @@ function world(on: On, { isSolMissing = false } = {}) {
   const asked: Array<string> = []
   const contexts: Array<ReadonlyArray<string>> = []
   const timeouts: Array<number | undefined> = []
-  const state = { hold: false, isCliSlow: false, isCliFailing: false, isProjectNew: false, isSessionGone: false, recalledBefore: false, reply: REPLY, isDropped: false }
+  // `transcript`: this session's rows as `hive local outline SESSION --uuids` reads them; `readBacks` counts those reads.
+  const state = { hold: false, isCliSlow: false, isCliFailing: false, isProjectNew: false, isSessionGone: false, recalledBefore: false, reply: REPLY, isDropped: false, transcript: [] as Array<unknown>, readBacks: 0 }
   const clock = mock.clock(on, { now: NOW })
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('session.id', async () => ({ value: SESSION }))
@@ -31,6 +34,10 @@ function world(on: On, { isSolMissing = false } = {}) {
     if (args[1] === 'sessions')
       return [{ loc: 'abcd1234', end: '2026-10-20T15:29:00Z' }, ...(state.isSessionGone ? [{ loc: 'dead0001', end: '2026-10-19T12:00:00Z' }] : []), { loc: 'feed0001', end: '2026-10-19T09:00:00Z' }]
     if (args[1] !== 'outline' || isFailing(args)) return []
+    if (args.includes('--uuids')) {
+      state.readBacks++
+      return state.transcript
+    }
     const report = { loc: 'abcd1234:2', time: '2026-10-20T15:29:30Z', kind: 'user', origin: 'recall', recall: true, text: '[hive recall] Entries.\n\n> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)' }
     return [
       ...(args.includes('feed0001') ? [ENTRY] : []),
@@ -271,5 +278,40 @@ describe('what recall gave a prompt', () => {
     expect(await ui.find({ type: 'Text', text: /hive recall/ })).toBeUndefined()
     expect(await ui.find({ key: 'hive:recall' })).toBeUndefined()
     await ui.unmount()
+  })
+
+  test('a resumed session: earlier prompts show what recall gave them, read back once from the transcript', { options: { recall: true } }, async ($, on) => {
+    const { clock, state } = world(on)
+    await start($)
+    // This process recalled nothing for p1; the transcript, written by another, says otherwise.
+    state.reply = 'none'
+    await $.prompt.submit(typed('Format the file.'))
+    await stored($, 'Format the file.', 'p1')
+    const found = [{ loc: 'feed0001:7', label: 'user', text: 'Always use tabs in this repo, never spaces.', date: '2026-10-19', context: '' }]
+    const report = (uuid: string) => ({ loc: 'abcd1234:9', uuid, kind: 'user', origin: 'recall', recall: true, text: reportOf(found, '2026-10-17') })
+    state.transcript = [
+      { loc: 'abcd1234:1', uuid: 'old1', kind: 'user', text: 'Format the file.' },
+      report('r1'),
+      { loc: 'abcd1234:3', uuid: 'old2', kind: 'user', text: 'Something else.' },
+      { loc: 'abcd1234:4', uuid: 'p1', kind: 'user', text: 'Format the file.' },
+      report('r2'),
+    ]
+
+    const ui = await $.ui.mount(row('terminal', 'old1'))
+    expect(await ui.find({ type: 'Text', text: LINE })).toBeUndefined()
+    await clock.advance(1)
+    expect((await ui.find({ type: 'Text', text: LINE }))?.text).toBe('hive recalled 1 memory (ctrl+o to expand)')
+    await ui.unmount()
+
+    // A row the transcript has nothing for reads it no more.
+    const other = await $.ui.mount(row('terminal', 'old2', { isExpanded: true }))
+    await clock.advance(1)
+    expect(await other.find({ type: 'Text', text: /hive recall/ })).toBeUndefined()
+    await other.unmount()
+    expect(state.readBacks).toBe(1)
+
+    const own = await $.ui.mount(row('terminal', 'p1', { isExpanded: true }))
+    expect(await own.find({ type: 'Text', text: /hive recall found nothing relevant/ })).toBeDefined()
+    await own.unmount()
   })
 })

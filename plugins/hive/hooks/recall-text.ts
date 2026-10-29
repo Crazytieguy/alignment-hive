@@ -1,9 +1,12 @@
 // Automatic recall's texts, with no engine or Node imports: the history one model call reads, its instructions, and
 // the report the main agent receives. The benchmark in experiments/auto-retrieval runs these same functions.
+import type { HiveRecalled } from '../types'
 
 /** One row of `hive local outline --replies --clip 0`. */
 export type Row = {
   loc: string
+  /** With `--uuids`: the entry's id in the transcript file. */
+  uuid?: string
   time?: string
   kind: string
   text?: string
@@ -308,3 +311,44 @@ export function report(reply: string, h: History): string | undefined {
 
 /** What the main agent reads when recall ran out of time or failed. */
 export const FAILED = `${PREFIX} Automatic recall did not finish, so no entries from past sessions came with this prompt. Spawn the hive:retrieval agent, with your planned activities, when past sessions could help the work.`
+
+/** What recall gave a prompt, read back from its report. */
+export type Recalled = Exclude<HiveRecalled, null | 'none'>
+
+const READ_SINCE = /^Recall read only this project's messages and replies since (.*?); /
+
+/** reportOf and FAILED read back; undefined for any other text. */
+export function recalledOf(report: string): Recalled | undefined {
+  if (report === FAILED) return 'failed'
+  const [head, ...parts] = report.split('\n\n')
+  const since = READ_SINCE.exec(parts.pop() ?? '')
+  if (!head?.startsWith(`${PREFIX} Entries`) || !since || !parts.length) return undefined
+  const found: Array<Entry> = []
+  for (const part of parts) {
+    const quotes = quotesIn(part)
+    if (quotes.length !== 1) return undefined
+    const { loc, kind, text, date } = quotes[0]!
+    found.push({ loc, label: kind, text, date, context: /^Context: (.*)\n/.exec(part)?.[1] ?? '' })
+  }
+  return { entries: found, from: since[1]! }
+}
+
+/**
+ * What automatic recall gave each prompt of one session, by the prompt's uuid, from `hive local outline SESSION --uuids`:
+ * a report belongs to the prompt nearest before it. A retrieval agent's report handed back is recall too, but not
+ * automatic recall's.
+ */
+export function recalledIn(rows: ReadonlyArray<Row>): Array<[string, Recalled]> {
+  const out: Array<[string, Recalled]> = []
+  let prompt: string | undefined
+  for (const r of rows) {
+    if (r.kind !== 'user') continue
+    if (!r.origin) prompt = r.uuid
+    else if (prompt && r.recall && r.text) {
+      const recalled = recalledOf(r.text)
+      if (recalled) out.push([prompt, recalled])
+      prompt = undefined
+    }
+  }
+  return out
+}

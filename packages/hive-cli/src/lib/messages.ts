@@ -308,7 +308,8 @@ Hidden unless --all-entries: empty thinking, routine system entries (timings, ho
   written after a compaction, and subagent records that older Claude Code versions wrote inline. Nothing else
   is hidden: tool calls and assistant replies always print. stderr says how many were hidden.
 outline: --replies adds the assistant's replies; --no-agents leaves out calls that started or messaged agents
-  (recall stays), faster; several SESSIONs print one after another.
+  (recall stays), faster; --uuids adds uuid, the id of the entry's record in the transcript file; several
+  SESSIONs print one after another.
 Clipping: sessions and outline show first lines; show clips each field to 1000 chars; grep shows 200 chars
   around the match and the first line of other fields. Cuts are marked [+N chars]. A tool input in show or
   outline keeps its leading items up to about 3 times the clip; [+N items] counts the rest. --clip N sets

@@ -28,7 +28,8 @@ interface Loaded {
  * show SESSION [RANGE...]: entries, each field clipped; no RANGE = the whole session. Several
  * ranges, and SESSION:N of other transcripts, print in the order given; an entry prints once.
  * outline SESSION...: the same, restricted to the outline (with --replies, the assistant's replies too; with
- * --no-agents, no calls that started or messaged agents but retrieval's) and clipped to first lines.
+ * --no-agents, no calls that started or messaged agents but retrieval's) and clipped to first lines; with --uuids,
+ * each row names its record's uuid.
  * Hidden entries are counted on stderr per transcript, or printed with --all-entries.
  */
 async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'): Promise<number> {
@@ -43,6 +44,7 @@ async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'):
   // Agent transcripts are not looked up, except an agent's siblings, which its own loc is abbreviated among; none
   // is linked to an entry.
   const agentless = args.flags.get('--no-agents') === true;
+  const uuids = args.flags.get('--uuids') === true;
   const print = await printer(env.root);
   const transcripts = new Map<string, Loaded>();
   const load = async (locator: Locator) => {
@@ -87,6 +89,7 @@ async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'):
         // A retrieval agent's result is its report when it ran in the foreground.
         if (verb === 'outline' && STARTS_AGENTS.includes(e.tool) && !isRecall(e)) delete row.result;
       }
+      if (uuids && e.uuid) row.uuid = e.uuid;
       emit(row);
     }
   }

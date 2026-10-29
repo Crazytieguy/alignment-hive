@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
@@ -927,6 +927,11 @@ describe('recall', () => {
       'Running the tests.',
       'The needle is in "quotes".',
     ]);
+    // --uuids: each row names its record, so the hive plugin finds the prompt row a report came with.
+    out.length = 0;
+    await hl('outline', s, '--uuids');
+    const records = (await readFile(join(project(), `${S}.jsonl`), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    expect(rows().slice(0, 3).map((x) => x.uuid)).toEqual(records.slice(0, 3).map((r) => r.uuid));
     out.length = 0;
     await hl('sessions', '-n', '100');
     expect(rows().find((x) => x.loc === s)).toMatchObject({ first: 'Format the file.' });

@@ -2,7 +2,7 @@ import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Hook, RenderElement, RenderInput } from 'claude-code'
 
 import { CliFailed, hiveRows } from './cli'
-import { FAILED, INSTRUCTIONS, budgetFor, entries, history, promptBlocks, reportOf, sessionsFor } from './recall-text'
+import { FAILED, INSTRUCTIONS, budgetFor, entries, history, promptBlocks, recalledIn, reportOf, sessionsFor } from './recall-text'
 import type { Listed, Row } from './recall-text'
 import type { HiveRecalled } from '../types'
 
@@ -26,6 +26,18 @@ const isRecallOpen = atom({ plugin: 'hive', key: 'isRecallOpen' } as const, fals
 type Shown = Exclude<HiveRecalled, null>
 // What recall gave prompts not stored yet: the prompt's row (`session.append`) names the row it shows under.
 const unstored: Array<{ prompt: string; shown: Shown }> = []
+// The sessions whose earlier prompts were read back from the transcript in this process (see restore).
+const restored = new Set<string>()
+
+/**
+ * What recall gave this session's prompts before this process held them (a resumed session, a restarted one), read
+ * back from the reports its transcript keeps. What this process recalled stands. Recall that found nothing leaves no
+ * report, so those prompts stay unknown.
+ */
+async function restore($: EngineInterface, sessionId: string) {
+  const rows = (await hiveRows($, ['local', 'outline', sessionId, '--uuids', '--no-agents', '--clip', '0'])) as Array<Row>
+  await Promise.all(recalledIn(rows).map(([requestId, shown]) => update($, memberOf(recalled, { requestId }), was => was ?? shown)))
+}
 
 /** What recall gave a prompt: the report the main agent reads with it (none when nothing was found), and what the person sees. */
 type Outcome = { context?: string; shown: Shown }
@@ -134,6 +146,15 @@ export async function drawRecalled($: EngineInterface, e: UserMessage, next: (e:
   const isTerminal = e.surface === 'terminal'
   const isFull = isTerminal && e.props.isExpanded
   const shown = await read($, memberOf(recalled, e))
+  // A row this process knows nothing of: the session's earlier rows are read back, once (a failed read, an older CLI's
+  // say, is not asked again), and the write draws this row again. A drawing writes no state, so a timer does it.
+  if (shown === null) {
+    const sessionId = await $.session.id()
+    if (!restored.has(sessionId)) {
+      restored.add(sessionId)
+      $.clock.after(0, () => void restore($, sessionId).catch(() => undefined))
+    }
+  }
   const found = typeof shown === 'object' ? shown : null
   if (shown === null || (!found && !isFull)) return next(e)
 
@@ -174,13 +195,14 @@ export async function drawRecalled($: EngineInterface, e: UserMessage, next: (e:
         <Text dimColor>Recall read this project's messages and replies since {found.from}.</Text>
       </Box>
     ) : null
-  // Off the terminal the line sits under the person's message, which it is about, and the entries open full width,
+  // On the terminal a blank line comes before the line, as before the transcript's own folded tool lines (`Read 2
+  // files`). Off the terminal the line sits under the person's message, which it is about, and the entries open full width,
   // framed. The desktop keeps a row under the message for its hover actions, so the line sits below that row (pulled
   // into it, the actions cover it), and a row under the line balances the space above it.
   return (
     <Box flexDirection="column" marginBottom={isTerminal ? 0 : 1}>
       {below}
-      <Box flexDirection="column" alignItems={isTerminal ? 'flex-start' : 'flex-end'} paddingLeft={isTerminal ? 2 : 0}>
+      <Box flexDirection="column" alignItems={isTerminal ? 'flex-start' : 'flex-end'} paddingLeft={isTerminal ? 2 : 0} marginTop={isTerminal ? 1 : 0}>
         {line}
       </Box>
       {body &&
