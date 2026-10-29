@@ -1,6 +1,6 @@
 {
   "name": "hive",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Tooling recommendations and session sharing for alignment researchers",
   "types": "./types/index.d.ts",
   "userConfig": {

@@ -1,6 +1,6 @@
 {
   "name": "@alignment-hive/hive-cli",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "private": true,
   "type": "module",
   "license": "MIT",
