@@ -119,7 +119,8 @@ fn count_serialized_tokens(encoding: &tiktoken_rs::CoreBPE, value: &Value) -> u6
 
 /// Everything the GPT branch rewrites in one request's response: usage
 /// reporting, plus (for routes where it is known-correct) the
-/// context-overflow error translation.
+/// context-overflow error translation, and the auto-mode classifier's
+/// verdicts.
 #[derive(Clone, Debug)]
 pub(crate) struct GptPolicies {
     /// Stands in for the `input_tokens: 0` that `CLIProxyAPI` reports at
@@ -132,6 +133,9 @@ pub(crate) struct GptPolicies {
     /// context for nobody.
     pub(crate) scale: Option<UsageScale>,
     pub(crate) overflow: Option<crate::overflow::OverflowRewrite>,
+    /// What the auto-mode classifier does to the reply; `None` while it is
+    /// off.
+    pub(crate) auto_mode: Option<crate::auto_mode::ReplyMode>,
 }
 
 /// Applies [`GptPolicies`] to a streamed response event by event, holding a
@@ -214,16 +218,7 @@ fn transform_event(event: Vec<u8>, policies: &GptPolicies) -> Vec<u8> {
     let Ok(rewritten_data) = serde_json::to_vec(&data) else {
         return event;
     };
-    let mut rewritten = Vec::with_capacity(
-        event
-            .len()
-            .saturating_sub(data_range.len())
-            .saturating_add(rewritten_data.len()),
-    );
-    rewritten.extend_from_slice(&event[..data_range.start]);
-    rewritten.extend_from_slice(&rewritten_data);
-    rewritten.extend_from_slice(&event[data_range.end..]);
-    rewritten
+    crate::sse::splice_data(&event, &data_range, &rewritten_data)
 }
 
 /// Substitutes the router's estimate for the `input_tokens: 0` that
@@ -281,6 +276,7 @@ mod tests {
                 estimate,
                 scale,
                 overflow: None,
+                auto_mode: None,
             },
         )
     }
@@ -318,6 +314,7 @@ mod tests {
                 crate::overflow::Estimate::Computed(estimate),
                 crate::overflow::OverflowDialect::Codex,
             )),
+            auto_mode: None,
         }
     }
 

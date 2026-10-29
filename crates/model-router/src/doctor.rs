@@ -161,9 +161,25 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         },
     );
 
+    if let Some(config) = &config {
+        let running = match &health {
+            Some(health) => RunningClassifier::Reports(health.auto_mode_settings.as_deref()),
+            None => RunningClassifier::Unreachable,
+        };
+        let catalog = catalog
+            .as_ref()
+            .map(|catalog| catalog.as_deref().map_err(String::as_str));
+        checks.extend(auto_mode_check(config, home.as_deref(), running, catalog));
+    }
     if let Some(address) = router_address {
         match health {
-            Some((status, version, upstream_state, running_declaration)) => {
+            Some(Health {
+                status,
+                version,
+                upstream: upstream_state,
+                declared_window: running_declaration,
+                ..
+            }) => {
                 let ok = status == "ok";
                 checks.push(Check {
                     warn: false,
@@ -934,6 +950,7 @@ fn models_catalog_request(dirs: &Dirs, config: &Config) -> Option<(String, Optio
     if !config
         .effective_models()
         .any(|route| route.family != ModelFamily::OpenAiCompat)
+        && unrouted_classifier_models(config).next().is_none()
     {
         return None;
     }
@@ -993,12 +1010,22 @@ async fn probe_ok(url: &str) -> bool {
         .is_ok_and(|response| response.status().is_success())
 }
 
-/// The health fields doctor reads. The last is the service's startup context
-/// declaration: `None` from a service too old to report it, `Some(None)` when
-/// it resolved none.
-async fn probe_health(
-    address: std::net::SocketAddr,
-) -> Option<(String, String, String, Option<Option<u64>>)> {
+/// The health fields doctor reads from the running service.
+struct Health {
+    status: String,
+    version: String,
+    /// The `cliproxy` upstream's state.
+    upstream: String,
+    /// The service's startup context declaration: `None` from a service too
+    /// old to report it, `Some(None)` when it resolved none.
+    #[allow(clippy::option_option)] // three states, as documented
+    declared_window: Option<Option<u64>>,
+    /// The digest of the auto-mode classifier's settings
+    /// ([`crate::auto_mode::settings_digest`]), `None` while it is off.
+    auto_mode_settings: Option<String>,
+}
+
+async fn probe_health(address: std::net::SocketAddr) -> Option<Health> {
     let client = probe_client()?;
     let body = client
         .get(format!("http://{address}{}", crate::proxy::HEALTH_PATH))
@@ -1009,18 +1036,176 @@ async fn probe_health(
         .await
         .ok()?;
     let value = serde_json::from_slice::<serde_json::Value>(&body).ok()?;
-    Some((
-        value.get("status")?.as_str()?.to_string(),
-        value.get("version")?.as_str()?.to_string(),
-        value
+    Some(Health {
+        status: value.get("status")?.as_str()?.to_string(),
+        version: value.get("version")?.as_str()?.to_string(),
+        upstream: value
             .get("cliproxy-upstream")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown")
             .to_string(),
-        value
+        declared_window: value
             .get("declared-context-window")
             .map(serde_json::Value::as_u64),
-    ))
+        auto_mode_settings: value
+            .get("auto-mode-classifier-settings")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+    })
+}
+
+/// What the running service's health says about the auto-mode classifier.
+#[derive(Clone, Copy)]
+enum RunningClassifier<'a> {
+    Unreachable,
+    /// The digest of the settings it runs with, `None` while off.
+    Reports(Option<&'a str>),
+}
+
+/// The `[auto-mode-classifier]` models that are not routes (the judge's,
+/// then the screen's) while it is on, as `(key, model)`: the routed-models
+/// check does not cover them.
+fn unrouted_classifier_models(config: &Config) -> impl Iterator<Item = (&'static str, &str)> {
+    let section = &config.auto_mode_classifier;
+    [
+        ("model", Some(section.model.as_str())),
+        ("screen-model", section.screen()),
+    ]
+    .into_iter()
+    .filter(|_| section.enabled)
+    .filter_map(|(key, model)| Some((key, model?)))
+    .filter(|(_, model)| config.route(model).is_none())
+}
+
+/// Notes on each classifier model that is not a route, of which doctor can
+/// verify only that `catalog`, the upstream's model list, has it (and says
+/// so when the list is unread); `false` when the list lacks one.
+fn unrouted_model_notes(
+    config: &Config,
+    catalog: Option<Result<&[u8], &str>>,
+    notes: &mut Vec<String>,
+) -> bool {
+    let served = catalog.map(|catalog| {
+        catalog.and_then(|body| {
+            crate::verify::parse_catalog(body)
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(|entry| entry.id)
+                        .collect::<Vec<_>>()
+                })
+                .ok_or("the upstream /v1/models response was not a model list")
+        })
+    });
+    let mut ok = true;
+    for (key, model) in unrouted_classifier_models(config) {
+        // A `-fast` twin ID is listed as its base model.
+        let upstream = crate::auto_mode::stage_route(config, model).upstream_model;
+        match &served {
+            Some(Ok(served)) if served.contains(&upstream) => {
+                notes.push(format!("{model} is not a route; CLIProxyAPI lists it"));
+            }
+            Some(Ok(_)) => {
+                ok = false;
+                notes.push(format!(
+                    "CLIProxyAPI does not list {key} {model:?}, so {}",
+                    if key == "model" {
+                        "every classification would fail"
+                    } else {
+                        "every call would go straight to the judge"
+                    }
+                ));
+            }
+            Some(Err(error)) => notes.push(format!(
+                "{model} is not a route, and whether CLIProxyAPI serves it is unchecked: {error}"
+            )),
+            None => notes.push(format!(
+                "{model} is not a route, and whether CLIProxyAPI serves it is unchecked"
+            )),
+        }
+    }
+    ok
+}
+
+/// `[auto-mode-classifier]`, only while it is on: whether its models can be
+/// served (as far as `catalog`, the upstream's model list, shows for a
+/// model that is not a route), whether a Claude Code binary is installed to
+/// read the default policy from, and whether the running service has
+/// picked the setting up.
+fn auto_mode_check(
+    config: &Config,
+    home: Option<&std::path::Path>,
+    running: RunningClassifier<'_>,
+    catalog: Option<Result<&[u8], &str>>,
+) -> Option<Check> {
+    let section = &config.auto_mode_classifier;
+    if !section.enabled {
+        return None;
+    }
+    let at = |model: &str, effort: Option<&str>| {
+        effort.map_or_else(
+            || model.to_string(),
+            |effort| format!("{model} at {effort} effort"),
+        )
+    };
+    let judge = at(&section.model, section.effort.as_deref());
+    let mut notes = vec![match section.screen() {
+        None => format!(
+            "experimental: tool calls of routed replies are judged on {judge}, spending its quota"
+        ),
+        Some(screen) => format!(
+            "experimental: tool calls of routed replies are screened on {}, and judged on \
+             {judge} unless the screen allows them, spending their quota",
+            at(screen, section.screen_effort.as_deref())
+        ),
+    }];
+    // The default screen is GPT whatever the judge is, so a judge on another
+    // provider is not the first to see each call.
+    if let Some(screen) = section.screen() {
+        let family = |model| crate::auto_mode::stage_route(config, model).family;
+        let (screen_family, judge_family) = (family(screen), family(&section.model));
+        if screen_family != judge_family {
+            notes.push(format!(
+                "calls are screened on {screen} ({}) before reaching {} ({}); \
+                 screen-model = \"\" turns the screen off",
+                screen_family.as_str(),
+                section.model,
+                judge_family.as_str()
+            ));
+        }
+    }
+    let mut ok = true;
+    if config.cliproxy_upstream().mode == UpstreamMode::Stub {
+        ok = false;
+        notes.push("the stub upstream cannot run the classifier".to_string());
+    }
+    ok &= unrouted_model_notes(config, catalog, &mut notes);
+    let newest = home
+        .and_then(|home| crate::auto_mode::newest_installed(&crate::auto_mode::versions_dir(home)));
+    notes.push(newest.map_or_else(
+        || {
+            "no Claude Code under ~/.local/share/claude/versions: replies stay with Claude \
+             Code's own classifier unless `claude` on PATH is the requesting version"
+                .to_string()
+        },
+        |version| format!("default policy read from Claude Code {version} and newer installs"),
+    ));
+    if let RunningClassifier::Reports(running) = running
+        && running != Some(crate::auto_mode::settings_digest(section).as_str())
+    {
+        ok = false;
+        notes.push(
+            "the running service has not picked these settings up; run `model-router service \
+             restart`"
+                .to_string(),
+        );
+    }
+    Some(Check {
+        name: "auto-mode-classifier",
+        ok,
+        warn: true,
+        detail: notes.join("; "),
+    })
 }
 
 impl Report {
@@ -1439,6 +1624,170 @@ mod tests {
         let muse = names(&muse_enabled());
         assert!(muse.contains(&"muse-auth"), "{muse:?}");
         assert!(!muse.contains(&"grok-auth"), "{muse:?}");
+    }
+
+    /// What `/health` reports for a service running with `config`.
+    fn running_settings(config: &Config) -> String {
+        crate::auto_mode::settings_digest(&config.auto_mode_classifier)
+    }
+
+    #[test]
+    fn the_auto_mode_classifier_is_checked_only_when_enabled() {
+        let off = RunningClassifier::Reports(None);
+        assert!(auto_mode_check(&config(""), None, off, None).is_none());
+        let enabled = config("[auto-mode-classifier]\nenabled = true\n");
+        let home = tempfile::tempdir().unwrap();
+        let versions = home.path().join(".local/share/claude/versions");
+        std::fs::create_dir_all(&versions).unwrap();
+        for version in ["2.1.9", "2.1.312", "2.1.40", "notes"] {
+            std::fs::write(versions.join(version), b"").unwrap();
+        }
+        let settings = running_settings(&enabled);
+        let on = RunningClassifier::Reports(Some(&settings));
+        let check = auto_mode_check(&enabled, Some(home.path()), on, None).unwrap();
+        assert!(check.ok && check.warn, "{}", check.detail);
+        assert!(
+            check.detail.contains("Claude Code 2.1.312"),
+            "{}",
+            check.detail
+        );
+        assert!(!check.detail.contains("not a route"), "{}", check.detail);
+        let stale = auto_mode_check(&enabled, Some(home.path()), off, None).unwrap();
+        assert!(
+            !stale.ok && stale.detail.contains("service restart"),
+            "{}",
+            stale.detail
+        );
+        let unreachable =
+            auto_mode_check(&enabled, None, RunningClassifier::Unreachable, None).unwrap();
+        assert!(unreachable.ok, "{}", unreachable.detail);
+        assert!(
+            unreachable.detail.contains("no Claude Code"),
+            "{}",
+            unreachable.detail
+        );
+    }
+
+    /// A screen of another family than the judge's sees every call first,
+    /// which doctor notes without failing.
+    #[test]
+    fn a_screen_on_another_family_than_the_judge_is_noted() {
+        let unreachable = RunningClassifier::Unreachable;
+        let note = "screened on gpt-6-luna (gpt) before reaching muse-wonder-1.0 (muse); \
+                    screen-model = \"\" turns the screen off";
+        let muse = config(
+            "[muse]\nenabled = true\n[auto-mode-classifier]\nenabled = true\n\
+             model = \"muse-wonder-1.0\"\n",
+        );
+        let check = auto_mode_check(&muse, None, unreachable, None).unwrap();
+        assert!(check.ok && check.warn, "{}", check.detail);
+        assert!(check.detail.contains(note), "{}", check.detail);
+        let grok = config(
+            "[grok]\nenabled = true\n[auto-mode-classifier]\nenabled = true\n\
+             screen-model = \"grok-4.7\"\n",
+        );
+        let check = auto_mode_check(&grok, None, unreachable, None).unwrap();
+        assert!(
+            check
+                .detail
+                .contains("screened on grok-4.7 (grok) before reaching gpt-6.1-sol (gpt)"),
+            "{}",
+            check.detail
+        );
+        for same in [
+            "[auto-mode-classifier]\nenabled = true\nscreen-model = \"codex-auto-review\"\n",
+            "[muse]\nenabled = true\n[auto-mode-classifier]\nenabled = true\n\
+             model = \"muse-wonder-1.0\"\nscreen-model = \"\"\n",
+        ] {
+            let check = auto_mode_check(&config(same), None, unreachable, None).unwrap();
+            assert!(
+                !check.detail.contains("before reaching"),
+                "{}",
+                check.detail
+            );
+        }
+    }
+
+    /// A model that is not a route is checked only by the upstream listing
+    /// it, and says so when the list cannot be read; a running service
+    /// without the configured screen, or with another effort, has not
+    /// picked the settings up.
+    #[test]
+    fn auto_mode_models_without_a_route_are_checked_against_the_upstream_list() {
+        let screened = config(
+            "[auto-mode-classifier]\nenabled = true\nscreen-model = \"codex-auto-review\"\n\
+             screen-effort = \"low\"\n",
+        );
+        let settings = running_settings(&screened);
+        let running = RunningClassifier::Reports(Some(&settings));
+        let listed = br#"{"data": [{"id": "gpt-6.1-sol"}, {"id": "codex-auto-review"}]}"#;
+        let check = auto_mode_check(&screened, None, running, Some(Ok(listed))).unwrap();
+        assert!(check.ok, "{}", check.detail);
+        for needle in [
+            "screened on codex-auto-review at low effort, and judged on gpt-6.1-sol",
+            "codex-auto-review is not a route; CLIProxyAPI lists it",
+        ] {
+            assert!(check.detail.contains(needle), "{}", check.detail);
+        }
+
+        let unlisted = br#"{"data": [{"id": "gpt-6.1-sol"}]}"#;
+        let check = auto_mode_check(&screened, None, running, Some(Ok(unlisted))).unwrap();
+        assert!(!check.ok, "{}", check.detail);
+        assert!(
+            check.detail.contains(
+                "does not list screen-model \"codex-auto-review\", so every call would go \
+                 straight to the judge"
+            ),
+            "{}",
+            check.detail
+        );
+        let judged = config("[auto-mode-classifier]\nenabled = true\nmodel = \"x-review\"\n");
+        let judged_settings = running_settings(&judged);
+        let running_judge = RunningClassifier::Reports(Some(&judged_settings));
+        let check = auto_mode_check(&judged, None, running_judge, Some(Ok(unlisted))).unwrap();
+        assert!(!check.ok, "{}", check.detail);
+        assert!(
+            check
+                .detail
+                .contains("does not list model \"x-review\", so every classification would fail"),
+            "{}",
+            check.detail
+        );
+
+        for catalog in [Some(Err("HTTP 503")), Some(Ok(&b"[]"[..])), None] {
+            let check = auto_mode_check(&screened, None, running, catalog).unwrap();
+            assert!(check.ok, "{}", check.detail);
+            assert!(
+                check
+                    .detail
+                    .contains("codex-auto-review is not a route, and whether CLIProxyAPI serves it is unchecked"),
+                "{}",
+                check.detail
+            );
+        }
+
+        for before in [
+            "screen-model = \"\"",
+            "screen-model = \"codex-auto-review\"\nscreen-effort = \"high\"",
+            "screen-model = \"codex-auto-review\"\nscreen-effort = \"low\"\n\
+             service-tier = \"priority\"",
+        ] {
+            let before = config(&format!(
+                "[auto-mode-classifier]\nenabled = true\n{before}\n"
+            ));
+            let settings = running_settings(&before);
+            let running = RunningClassifier::Reports(Some(&settings));
+            let stale = auto_mode_check(&screened, None, running, Some(Ok(listed))).unwrap();
+            assert!(!stale.ok, "{}", stale.detail);
+            assert!(
+                stale.detail.contains(
+                    "the running service has not picked these settings up; run `model-router \
+                     service restart`"
+                ),
+                "{}",
+                stale.detail
+            );
+        }
     }
 
     #[test]

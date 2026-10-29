@@ -29,7 +29,7 @@ pub(crate) use catalog::{
 };
 use catalog::{
     GROK_CONTEXT_WINDOW, GROK_MODELS, MUSE_CONTEXT_WINDOW, MUSE_CONTRIBUTOR_SUFFIX, MUSE_MODELS,
-    built_in_routes, default_models, fast_twins,
+    built_in_routes, default_models, fast_twins, names_claude_model, names_grok_model,
 };
 
 /// The single supported upstream name: the managed/external `CLIProxyAPI`
@@ -264,6 +264,11 @@ pub struct Config {
     #[serde(default)]
     pub web_search: WebSearchConfig,
 
+    /// The experimental router-side auto-mode classifier; see
+    /// [`crate::auto_mode`]. Off by default.
+    #[serde(default)]
+    pub auto_mode_classifier: AutoModeClassifierConfig,
+
     /// The HTTPS-proxy front's CA and credential (the CONNECT handling in
     /// [`crate::proxy`]), loaded by `serve`. `None` while the CA cannot be
     /// loaded: Claude Code's own tunnels are refused then, the rest still
@@ -422,6 +427,107 @@ pub enum WebSearchMode {
     /// Pass GPT, open-weights and Claude `WebSearch` sub-calls through
     /// untouched.
     Off,
+}
+
+/// `[auto-mode-classifier]`: the router judges the tool calls of routed
+/// (non-Claude) replies for Claude Code's auto mode and returns
+/// `safeguard_results`, instead of leaving the session to Claude Code's
+/// billed local classifier. Off by default; with `enabled = false` the
+/// router behaves exactly as it does without the section.
+#[serde_inline_default]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct AutoModeClassifierConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// The judge, whose verdict is final: the routing ID of a configured
+    /// non-Claude route, or a model the `cliproxy` upstream serves directly
+    /// (such as `codex-auto-review`), which is sent as Codex models are.
+    #[serde_inline_default(AUTO_MODE_DEFAULT_MODEL.to_string())]
+    pub model: String,
+
+    /// Reasoning effort for the judge's call.
+    // `Option::from`, not `Some`: pedantic clippy flags a default fn that
+    // always returns `Some` (`unnecessary_wraps`), and the one this
+    // generates takes no `allow`.
+    #[serde_inline_default(Option::from(AUTO_MODE_DEFAULT_EFFORT.to_string()))]
+    pub effort: Option<String>,
+
+    /// The upstream's `service_tier` for the judge's call (`"priority"` on
+    /// Codex: faster, at more usage); unset sends none.
+    pub service_tier: Option<String>,
+
+    /// The screen, named as `model` is: each call is classified on it
+    /// first, its allow is final, and anything else goes on to the judge.
+    /// Empty, the judge classifies every call ([`Self::screen`]).
+    #[serde_inline_default(Option::from(AUTO_MODE_DEFAULT_SCREEN_MODEL.to_string()))]
+    pub screen_model: Option<String>,
+
+    /// Reasoning effort for the screen's call (never the judge's `effort`).
+    #[serde_inline_default(Option::from(AUTO_MODE_DEFAULT_EFFORT.to_string()))]
+    pub screen_effort: Option<String>,
+
+    /// `service_tier` for the screen's call (never the judge's).
+    pub screen_service_tier: Option<String>,
+
+    /// Where Claude Code's default auto-mode policy comes from. Never read
+    /// from TOML: `serve` points it at the installed Claude Code versions,
+    /// tests at a fake.
+    #[serde(skip)]
+    pub defaults: crate::auto_mode::DefaultsSource,
+
+    #[serde(skip)]
+    pub limits: AutoModeLimits,
+}
+
+/// Bounds on judging replies. Public only so tests can shrink these;
+/// production always uses [`Default`].
+#[derive(Clone, Copy, Debug)]
+pub struct AutoModeLimits {
+    /// Each call's classification budget, queueing and both stages
+    /// included, counted from when its input finished streaming.
+    pub reply_budget: std::time::Duration,
+    /// How often a held stream gets an SSE ping (Claude Code's own idle
+    /// timeout is 180 s).
+    pub ping_interval: std::time::Duration,
+    /// Classifier calls in flight at once, across every reply and both
+    /// stages.
+    pub max_concurrent: usize,
+}
+
+impl Default for AutoModeLimits {
+    fn default() -> Self {
+        Self {
+            reply_budget: std::time::Duration::from_secs(90),
+            ping_interval: std::time::Duration::from_secs(10),
+            max_concurrent: 8,
+        }
+    }
+}
+
+/// The classifier model `[auto-mode-classifier]` uses unless told otherwise.
+pub const AUTO_MODE_DEFAULT_MODEL: &str = "gpt-6.1-sol";
+/// The default screen: fast, and on the benchmark it almost never allowed
+/// a call Claude Code's own classifier blocks.
+pub const AUTO_MODE_DEFAULT_SCREEN_MODEL: &str = "gpt-6-luna";
+/// Both stages' default effort.
+pub const AUTO_MODE_DEFAULT_EFFORT: &str = "low";
+
+impl Default for AutoModeClassifierConfig {
+    fn default() -> Self {
+        toml::from_str("").expect("every AutoModeClassifierConfig field must have a serde default")
+    }
+}
+
+impl AutoModeClassifierConfig {
+    /// The screen's model, or `None` when `screen-model` is empty.
+    #[must_use]
+    pub fn screen(&self) -> Option<&str> {
+        self.screen_model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+    }
 }
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
@@ -1115,7 +1221,60 @@ impl Config {
         }
 
         self.validate_gpt_auth(cliproxy)?;
-        self.validate_openai_providers(cliproxy)
+        self.validate_openai_providers(cliproxy)?;
+        self.validate_auto_mode_classifier()
+    }
+
+    /// An enabled classifier's models must each be a served route or a
+    /// model sent as Codex models are, and each effort and service tier one
+    /// `CLIProxyAPI` knows, since a value it rejects fails every call.
+    /// Nothing is checked while it is off, and the screen's settings only
+    /// with a screen.
+    fn validate_auto_mode_classifier(&self) -> anyhow::Result<()> {
+        let section = &self.auto_mode_classifier;
+        if !section.enabled {
+            return Ok(());
+        }
+        self.validate_classifier_model("model", &section.model)?;
+        validate_classifier_effort("effort", section.effort.as_deref())?;
+        validate_classifier_service_tier("service-tier", section.service_tier.as_deref())?;
+        if let Some(model) = section.screen() {
+            self.validate_classifier_model("screen-model", model)?;
+            validate_classifier_effort("screen-effort", section.screen_effort.as_deref())?;
+            validate_classifier_service_tier(
+                "screen-service-tier",
+                section.screen_service_tier.as_deref(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A classifier model that is not a route is sent to the `cliproxy`
+    /// upstream as Codex models are, without any family's guards: so it
+    /// must be one plain model ID, and never `auto` or a Grok or Muse model,
+    /// which only their routes may reach, nor a Claude one (which would
+    /// fail, or spend Claude quota through `CLIProxyAPI`).
+    fn validate_classifier_model(&self, key: &str, model: &str) -> anyhow::Result<()> {
+        if self.route(model).is_some() {
+            return Ok(());
+        }
+        ensure!(
+            !model.is_empty()
+                && !model.contains(|char: char| char.is_whitespace() || "()".contains(char)),
+            "[auto-mode-classifier] {key} {model:?} is neither a routing ID this router serves \
+             nor a model ID (set the effort with its own key)"
+        );
+        ensure!(
+            !names_auto_model(model)
+                && !names_muse_model(model)
+                && !is_muse_contributor_model(model)
+                && !names_grok_model(model)
+                && !names_claude_model(model),
+            "[auto-mode-classifier] {key} {model:?} is not a configured route, and only GPT \
+             models may be named directly; name the route that serves it (for example \
+             \"{AUTO_MODE_DEFAULT_MODEL}\")"
+        );
+        Ok(())
     }
 
     fn validate_gpt_auth(&self, cliproxy: &UpstreamConfig) -> anyhow::Result<()> {
@@ -1304,6 +1463,7 @@ impl Config {
     }
 
     #[must_use]
+    #[allow(clippy::too_many_lines)] // one literal template
     pub fn template() -> String {
         let defaults = Self::default();
         format!(
@@ -1386,6 +1546,34 @@ impl Config {
 
 {grok}
 {muse}
+# Experimental, off by default. In auto mode, once a session has a routed
+# reply with tool calls, Claude Code checks those calls and every later one
+# with Sonnet on your Claude plan. With this on, the router checks routed
+# replies' tool calls itself, on the models below (spending their quota). A
+# call it gets no verdict on is denied; the agent may retry it. On a
+# misconfiguration, or a request it cannot judge faithfully, it stays out
+# and the session falls back to Claude Code's own classifier.
+#[auto-mode-classifier]
+# Default: false
+#enabled = true
+# The judge: a routing ID, or a GPT model CLIProxyAPI serves without one.
+# Default: "{auto_mode_model}"
+#model = "{auto_mode_model}"
+# Default: "{auto_mode_effort}"
+#effort = "medium"
+# "priority" (or "fast") may answer sooner on Codex, at more usage, as does
+# naming a -fast route above.
+# Default: unset
+#service-tier = "priority"
+# The screen classifies each call first. Its allow is final; anything else
+# goes on to the judge. "" turns it off.
+# Default: "{auto_mode_screen}"
+#screen-model = ""
+# Default: "{auto_mode_effort}"
+#screen-effort = "medium"
+# Default: unset
+#screen-service-tier = "priority"
+
 #[capture]
 # Capture is off by default. Captures include prompt and response bodies; keep
 # the file private. Credential and cookie header values are always redacted.
@@ -1408,6 +1596,9 @@ impl Config {
             providers = TEMPLATE_PROVIDERS_SECTION,
             grok = template_grok_section(),
             muse = template_muse_section(),
+            auto_mode_model = AUTO_MODE_DEFAULT_MODEL,
+            auto_mode_screen = AUTO_MODE_DEFAULT_SCREEN_MODEL,
+            auto_mode_effort = AUTO_MODE_DEFAULT_EFFORT,
             capture_file = defaults.capture.file.display(),
             capture_max_response_body_bytes = defaults.capture.max_response_body_bytes,
         )
@@ -1527,6 +1718,38 @@ fn validate_cliproxy_upstream(upstream: &UpstreamConfig) -> anyhow::Result<()> {
                 "[upstreams.{CLIPROXY_UPSTREAM}] api-key must be absent when mode = {mode:?}"
             );
         }
+    }
+    Ok(())
+}
+
+/// The effort levels `CLIProxyAPI` knows (`internal/thinking`): it answers
+/// any other `output_config.effort` with a 400.
+const CLASSIFIER_EFFORTS: [&str; 8] = [
+    "none", "auto", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
+/// An `[auto-mode-classifier]` effort is one of [`CLASSIFIER_EFFORTS`],
+/// which also fit the `model(effort)` grammar Grok routes carry it in.
+fn validate_classifier_effort(key: &str, effort: Option<&str>) -> anyhow::Result<()> {
+    if let Some(effort) = effort {
+        ensure!(
+            CLASSIFIER_EFFORTS.contains(&effort),
+            "[auto-mode-classifier] {key} must be one of {}; found {effort:?}",
+            CLASSIFIER_EFFORTS.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// An `[auto-mode-classifier]` service tier is `"priority"` or `"fast"`,
+/// which `CLIProxyAPI` sends as `"priority"`; it drops any other silently.
+fn validate_classifier_service_tier(key: &str, tier: Option<&str>) -> anyhow::Result<()> {
+    if let Some(tier) = tier {
+        ensure!(
+            ["priority", "fast"].contains(&tier),
+            "[auto-mode-classifier] {key} must be \"priority\" (or \"fast\", the same tier); \
+             found {tier:?}"
+        );
     }
     Ok(())
 }
@@ -2799,5 +3022,138 @@ mod tests {
             assert!(!is_built_in_route(model), "{model}");
             assert!(!is_retired_gpt_route(model), "{model}");
         }
+    }
+
+    #[test]
+    fn the_auto_mode_classifier_is_off_by_default_and_validated_only_when_on() {
+        let defaults = Config::default().auto_mode_classifier;
+        assert!(!defaults.enabled);
+        assert_eq!(defaults.model, AUTO_MODE_DEFAULT_MODEL);
+        assert_eq!(defaults.effort.as_deref(), Some(AUTO_MODE_DEFAULT_EFFORT));
+        assert_eq!(defaults.screen(), Some(AUTO_MODE_DEFAULT_SCREEN_MODEL));
+        assert_eq!(
+            defaults.screen_effort.as_deref(),
+            Some(AUTO_MODE_DEFAULT_EFFORT)
+        );
+
+        // Off, an unknown model is inert.
+        parse_and_prepare("[auto-mode-classifier]\nmodel = \"nope\"");
+        let config = parse_and_prepare(
+            "[auto-mode-classifier]\nenabled = true\nmodel = \"gpt-6-luna\"\neffort = \"medium\"",
+        );
+        assert!(config.auto_mode_classifier.enabled);
+        assert_eq!(
+            config.auto_mode_classifier.effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            config.auto_mode_classifier.screen(),
+            Some(AUTO_MODE_DEFAULT_SCREEN_MODEL)
+        );
+        assert!(toml::from_str::<Config>("[auto-mode-classifier]\nbogus = 1").is_err());
+
+        // A model that is not a route is sent as a GPT one: never one only
+        // another family's route may reach, nor a malformed ID.
+        let config = parse_and_prepare(
+            "[auto-mode-classifier]\nenabled = true\nmodel = \"codex-auto-review\"\n\
+             screen-model = \"gpt-6-luna\"\nscreen-effort = \"low\"\n\
+             screen-service-tier = \"priority\"",
+        );
+        let section = &config.auto_mode_classifier;
+        assert_eq!(section.model, "codex-auto-review");
+        assert_eq!(section.screen_model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(section.screen_effort.as_deref(), Some("low"));
+        assert_eq!(section.screen_service_tier.as_deref(), Some("priority"));
+        for key in ["model", "screen-model"] {
+            for model in [
+                "auto",
+                "muse-spark",
+                "openai/muse-spark-contributor",
+                "x-contributor",
+                "grok-4.7",
+                "claude-sonnet-5",
+                "anthropic/Claude-opus-5-5",
+                "codex-auto-review(low)",
+                "two words",
+                "",
+            ] {
+                if key == "screen-model" && model.is_empty() {
+                    continue;
+                }
+                let error = prepare_error(&format!(
+                    "[auto-mode-classifier]\nenabled = true\n{key} = {model:?}"
+                ));
+                assert!(error.contains(key), "{key} {model}: {error}");
+            }
+        }
+        // A Grok route is named by its routing ID.
+        parse_and_prepare(
+            "[grok]\nenabled = true\n[auto-mode-classifier]\nenabled = true\n\
+             screen-model = \"grok-4.7\"",
+        );
+        // An empty screen-model turns the screen off, and its settings with it.
+        let config = parse_and_prepare(
+            "[auto-mode-classifier]\nenabled = true\nscreen-model = \"\"\n\
+             screen-effort = \"Low\"",
+        );
+        assert_eq!(config.auto_mode_classifier.screen(), None);
+        assert!(
+            prepare_error(
+                "[auto-mode-classifier]\nenabled = true\nscreen-model = \"m\"\n\
+                 screen-effort = \"Low\""
+            )
+            .contains("screen-effort")
+        );
+
+        let template = Config::template();
+        assert!(template.contains("# Experimental, off by default."));
+        let start = template.find("#[auto-mode-classifier]").unwrap();
+        let section: String = template[start..]
+            .lines()
+            .take_while(|line| line.starts_with('#'))
+            .filter(|line| !line.starts_with("# "))
+            .map(|line| &line[1..])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let config = parse_and_prepare(&section);
+        assert!(config.auto_mode_classifier.enabled, "{section}");
+    }
+
+    /// `CLIProxyAPI` answers an effort it does not know with a 400 and drops
+    /// a service tier it does not know: each is a config error naming its
+    /// key, on GPT and Grok routes alike, and the screen's only with a screen.
+    #[test]
+    fn auto_mode_classifier_efforts_and_service_tiers_are_ones_cliproxy_knows() {
+        for (key, value) in [
+            ("effort", "x(y)"),
+            ("effort", "hgih"),
+            ("screen-effort", "hgih"),
+            ("service-tier", "flex"),
+            ("screen-service-tier", "Priority"),
+        ] {
+            let error = prepare_error(&format!(
+                "[auto-mode-classifier]\nenabled = true\n{key} = {value:?}"
+            ));
+            assert!(
+                error.starts_with(&format!("[auto-mode-classifier] {key} must be")),
+                "{key} {value}: {error}"
+            );
+        }
+        for effort in CLASSIFIER_EFFORTS {
+            parse_and_prepare(&format!(
+                "[grok]\nenabled = true\n[auto-mode-classifier]\nenabled = true\n\
+                 effort = {effort:?}\nscreen-model = \"grok-4.7\"\nscreen-effort = {effort:?}"
+            ));
+        }
+        for tier in ["priority", "fast"] {
+            parse_and_prepare(&format!(
+                "[auto-mode-classifier]\nenabled = true\nservice-tier = {tier:?}\n\
+                 screen-service-tier = {tier:?}"
+            ));
+        }
+        parse_and_prepare(
+            "[auto-mode-classifier]\nenabled = true\nscreen-model = \"\"\n\
+             screen-effort = \"hgih\"\nscreen-service-tier = \"flex\"",
+        );
     }
 }

@@ -179,6 +179,30 @@ here works until the binary resolves.
    setup named `<routing-id>(<effort>)` (in `~/.claude/agents/` or the
    project's `.claude/agents/`): offer to replace them following
    `references/custom-agents.md`.
+8. **Auto-mode classifier (experimental, ask once).** Skip this step when
+   `~/.config/model-router/config.toml` already has an
+   `[auto-mode-classifier]` section: the user has answered. Also skip it
+   while `$ROUTER doctor` fails `router-version`, until `$ROUTER service
+   refresh` fixes that: a router older than this plugin refuses a config
+   with the section and does not start. Otherwise ask, saying it is
+   experimental. In auto mode, Anthropic's server checks Claude's tool
+   calls for free, but once a session has a GPT reply with tool calls,
+   Claude Code checks those calls and every one after them in the session
+   with Sonnet on the user's Claude plan. With this on, the router checks those GPT tool calls
+   on GPT (Luna, then Sol for any Luna doesn't clear), and the session
+   keeps the free check. It pays off most for heavy Luna or Haiku users:
+   their sessions make many tool calls for the usage they otherwise drain,
+   so the Sonnet checks are a large share of it. The costs: it is
+   sometimes stricter than Claude Code's own check, a call it gets no
+   verdict on is denied (the agent may retry it), and a call Luna doesn't
+   clear waits several seconds longer. Write the answer either way, so the
+   next run doesn't ask again:
+   ```toml
+   [auto-mode-classifier]
+   enabled = true
+   ```
+   (`enabled = false` for no), then `$ROUTER service restart` and `$ROUTER
+   doctor`, whose `auto-mode-classifier` line shows it on.
 
 ## Moving to the HTTPS-proxy wiring
 

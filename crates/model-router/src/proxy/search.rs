@@ -134,7 +134,7 @@ pub(super) async fn gpt_branch_subcall(
     rewritten: Bytes,
     route: &crate::config::ModelRoute,
     subcall: &websearch::Subcall,
-    policies: GptPolicies,
+    mut policies: GptPolicies,
     mut capture: Option<RequestCapture>,
 ) -> Response {
     let origin = state.origin_of(&rewritten, subcall);
@@ -183,6 +183,12 @@ pub(super) async fn gpt_branch_subcall(
             Err(returned) => capture = returned,
         }
     }
+    // A sub-call carries no safeguards; with the classifier on, upstream
+    // verdicts are still stripped.
+    policies.auto_mode = state
+        .auto_mode
+        .as_ref()
+        .map(|_| crate::auto_mode::ReplyMode::StripOnly);
     forward_gpt(
         state,
         parts,

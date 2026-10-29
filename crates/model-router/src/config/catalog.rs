@@ -284,6 +284,20 @@ pub(crate) fn names_muse_model(upstream_model: &str) -> bool {
     bare_model_name(upstream_model).starts_with("muse-")
 }
 
+/// Whether `upstream_model` names an xAI Grok model (`grok-*`), however a
+/// hand-written route spells it.
+#[must_use]
+pub(super) fn names_grok_model(upstream_model: &str) -> bool {
+    bare_model_name(upstream_model).starts_with("grok-")
+}
+
+/// Whether `upstream_model` names an Anthropic Claude model (`claude-*`),
+/// however it is spelled.
+#[must_use]
+pub(super) fn names_claude_model(upstream_model: &str) -> bool {
+    bare_model_name(upstream_model).starts_with("claude-")
+}
+
 /// Whether `upstream_model` names [`MUSE_WONDER_FULL`] or its Contributor
 /// twin, however a hand-written route spells it.
 #[must_use]

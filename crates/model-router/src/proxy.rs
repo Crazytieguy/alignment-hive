@@ -19,6 +19,7 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::{Router, routing::any};
 use futures_util::StreamExt;
+use futures_util::stream::BoxStream;
 use serde_json::json;
 use tokio::net::TcpListener;
 
@@ -57,6 +58,9 @@ struct AppState {
     /// Contributor header, since startup ([`login_refusal`]).
     seen_overrides: Arc<crate::exclusions::Seen>,
     seen_headers: Arc<crate::muse::SeenHeaders>,
+    /// The router-side auto-mode classifier, when `[auto-mode-classifier]`
+    /// is enabled.
+    auto_mode: Option<Arc<crate::auto_mode::Runtime>>,
 }
 
 /// Passive response tap: watches a forwarded `/v1/messages` response for
@@ -148,10 +152,12 @@ impl AppState {
             crate::exclusions::record(&seen_overrides, &logins, &required);
             crate::muse::record(&seen_headers, &logins, mode);
         }
+        let auto_mode = crate::auto_mode::Runtime::new(&config, &client, capture.as_ref());
         Ok(Self {
             config: Arc::new(config),
             client,
             capture,
+            auto_mode,
             cliproxy_upstream,
             pending_searches: Arc::new(websearch::PendingSearches::default()),
             search_streams,
@@ -587,7 +593,8 @@ const COMPACTION_HEADER: &str = "x-claude-code-compaction";
 /// ([`crate::identity`]), the service tier the route asks for
 /// ([`crate::service_tier`]), the removal of tool-schema patterns the Codex
 /// validator cannot compile ([`crate::tool_schema`]), and on a compaction
-/// request a text-only reply.
+/// request a text-only reply. With the auto-mode classifier on, `safeguards`
+/// is removed too: the router answers it, not the upstream.
 ///
 /// Compaction is a one-turn fork that keeps the conversation's tools (for the
 /// prompt cache) and asks for a text summary. A GPT subagent answers it by
@@ -605,12 +612,16 @@ fn rewrite_gpt_body(
     body: &[u8],
     route: &crate::config::ModelRoute,
     compaction: bool,
+    strip_safeguards: bool,
 ) -> anyhow::Result<Vec<u8>> {
     let mut document: serde_json::Value =
         serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON: {error}"))?;
     // First: the compaction branch below reads whether `tools` is empty, and
     // the schema shim must reach the declared tools.
     crate::tool_changes::apply(&mut document, route.family);
+    if strip_safeguards && let Some(object) = document.as_object_mut() {
+        object.remove("safeguards");
+    }
     crate::identity::inject_identity_into(
         &mut document,
         &route.display_name,
@@ -688,7 +699,8 @@ async fn gpt_response(
         }
     };
     let compaction = parts.headers.contains_key(COMPACTION_HEADER);
-    let rewritten = match rewrite_gpt_body(&rewritten, route, compaction) {
+    let strip_safeguards = state.auto_mode.is_some();
+    let rewritten = match rewrite_gpt_body(&rewritten, route, compaction, strip_safeguards) {
         Ok(body) => Bytes::from(body),
         Err(error) => {
             tracing::warn!(%error, "failed to rewrite routed request body");
@@ -702,7 +714,7 @@ async fn gpt_response(
             .await;
         }
     };
-    let policies = gpt_policies(&rewritten, route);
+    let mut policies = gpt_policies(&rewritten, route);
 
     // Detected on the inbound body: the rewrite may drop a forced
     // `tool_choice` that detection keys on (see `rewrite_gpt_body`).
@@ -722,6 +734,7 @@ async fn gpt_response(
             routing_id: route.routing_id.clone(),
         },
     );
+    policies.auto_mode = auto_mode_plan(state, parts, &body).await;
     forward_gpt(
         state,
         parts,
@@ -732,6 +745,28 @@ async fn gpt_response(
         tap,
     )
     .await
+}
+
+/// What the auto-mode classifier does with this GPT-branch request's reply:
+/// nothing while it is off; otherwise at least strip upstream verdicts, and
+/// judge the reply when the request asks for it and the classifier's own
+/// route can be served.
+async fn auto_mode_plan(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    body: &[u8],
+) -> Option<crate::auto_mode::ReplyMode> {
+    let runtime = state.auto_mode.as_ref()?;
+    let asks = parts.method == Method::POST
+        && parts.uri.path() == "/v1/messages"
+        && crate::routing::find_top_level_value_range(body, "safeguards").is_some();
+    if !asks {
+        return Some(crate::auto_mode::ReplyMode::StripOnly);
+    }
+    let upstream = gpt_forward_target(&state.cliproxy_upstream);
+    let refusal = login_refusal(state, Some(runtime.judge_route())).await;
+    let screen_refusal = login_refusal(state, runtime.screen_route()).await;
+    Some(runtime.plan(&parts.headers, body, upstream, refusal, screen_refusal))
 }
 
 /// The inbound headers a GPT-bound forward should carry: rewritten to the
@@ -779,6 +814,7 @@ fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPoli
         estimate,
         scale: route.usage_scale,
         overflow,
+        auto_mode: None,
     }
 }
 
@@ -821,10 +857,12 @@ async fn forward_gpt(
     }
 }
 
-/// Where a GPT-branch request can be forwarded.
-struct ForwardTarget {
-    base_url: String,
-    credential: Option<headers::GptUpstreamCredential>,
+/// Where a GPT-branch request (or the auto-mode classifier's side call) can
+/// be forwarded.
+#[derive(Clone)]
+pub(crate) struct ForwardTarget {
+    pub(crate) base_url: String,
+    pub(crate) credential: Option<headers::GptUpstreamCredential>,
 }
 
 enum GptTarget {
@@ -979,19 +1017,24 @@ fn health_response(state: &AppState) -> Response {
         CliproxyUpstream::Managed(handle) if handle.is_ready() => ("ready", true),
         CliproxyUpstream::Managed(_) => ("not-ready", false),
     };
-    let bytes = Bytes::from(
-        json!({
-            "status": if healthy { "ok" } else { "degraded" },
-            "version": env!("CARGO_PKG_VERSION"),
-            "cliproxy-upstream": upstream,
-            // What this process resolved at startup (null: undeclared).
-            // Doctor compares it with a fresh read so a settings change the
-            // running service has not picked up is visible rather than
-            // silently mis-scaling.
-            "declared-context-window": state.config.declared_context_window,
-        })
-        .to_string(),
-    );
+    let mut health = json!({
+        "status": if healthy { "ok" } else { "degraded" },
+        "version": env!("CARGO_PKG_VERSION"),
+        "cliproxy-upstream": upstream,
+        // What this process resolved at startup (null: undeclared).
+        // Doctor compares it with a fresh read so a settings change the
+        // running service has not picked up is visible rather than
+        // silently mis-scaling.
+        "declared-context-window": state.config.declared_context_window,
+    });
+    // Present only while on, as this process read the settings at startup,
+    // so doctor can tell a service that has not picked a change up.
+    if state.auto_mode.is_some() {
+        health["auto-mode-classifier-settings"] = json!(crate::auto_mode::settings_digest(
+            &state.config.auto_mode_classifier
+        ));
+    }
+    let bytes = Bytes::from(health.to_string());
     build_response(StatusCode::OK, json_headers(), Body::from(bytes))
 }
 
@@ -1058,7 +1101,7 @@ async fn upstream_response(
     state: &AppState,
     response: reqwest::Response,
     capture: Option<RequestCapture>,
-    policies: Option<GptPolicies>,
+    mut policies: Option<GptPolicies>,
     tap: Option<SniffTap>,
 ) -> Response {
     let status = response.status();
@@ -1078,6 +1121,16 @@ async fn upstream_response(
             .and_then(|policies| policies.overflow.as_ref())
     {
         return overflow_translated_response(state, status, response, overflow, capture).await;
+    }
+    // Only a 200 carries a reply to judge (or upstream verdicts to strip).
+    let auto_mode = policies
+        .as_mut()
+        .and_then(|policies| policies.auto_mode.take())
+        .filter(|_| status == StatusCode::OK);
+    if let Some(mode) = &auto_mode
+        && !is_sse
+    {
+        return auto_mode_json_response(state, status, response, mode, capture).await;
     }
     let transform_usage = policies.is_some() && is_sse;
     let response_headers = headers::response_headers(response.headers(), transform_usage);
@@ -1135,6 +1188,12 @@ async fn upstream_response(
         } else {
             stream
         };
+    // After the usage rewrite, before capture: the capture records what the
+    // client received, verdicts included.
+    let stream = match auto_mode {
+        Some(mode) => crate::auto_mode::sse_stage(mode, stream),
+        None => stream,
+    };
     let body = streaming_response_body(state, status, &response_headers, capture, stream);
     build_response(status, response_headers, body)
 }
@@ -1154,53 +1213,149 @@ async fn overflow_translated_response(
     overflow: &OverflowRewrite,
     capture: Option<RequestCapture>,
 ) -> Response {
-    let passthrough_headers = headers::response_headers(response.headers(), false);
-    let rewritten_headers = headers::response_headers(response.headers(), true);
-    let mut stream = response.bytes_stream();
-    let mut chunks: Vec<Bytes> = Vec::new();
+    let upstream_headers = response.headers().clone();
+    let body = match buffer_bounded(response, OVERFLOW_BUFFER_LIMIT).await {
+        Ok(body) => body,
+        Err(unbuffered) => {
+            return pass_through(
+                state,
+                status,
+                &upstream_headers,
+                capture,
+                unbuffered.into_stream(),
+            );
+        }
+    };
+    let rewritten = overflow.rewrite_body(&body);
+    if rewritten.is_some() {
+        tracing::info!("translated a GPT context-overflow error to the canonical Anthropic form");
+    }
+    buffered_reply(state, status, &upstream_headers, body, rewritten, capture).await
+}
+
+/// Upper bound on a buffered non-streaming reply the auto-mode classifier
+/// judges. A larger reply it judges is answered with a retryable error; one
+/// it only strips passes through, cut short should it carry an upstream
+/// `safeguard_results`.
+const AUTO_MODE_BUFFER_LIMIT: usize = 16 * 1024 * 1024;
+
+/// A non-streaming 200 with the auto-mode classifier on: buffered, judged
+/// (or stripped), and sent with the verdicts at the top level.
+async fn auto_mode_json_response(
+    state: &AppState,
+    status: StatusCode,
+    response: reqwest::Response,
+    mode: &crate::auto_mode::ReplyMode,
+    capture: Option<RequestCapture>,
+) -> Response {
+    let upstream_headers = response.headers().clone();
+    let body = match buffer_bounded(response, AUTO_MODE_BUFFER_LIMIT).await {
+        Ok(body) => body,
+        // Raw bytes would reach the client unjudged: a retryable error
+        // instead.
+        Err(unbuffered) if matches!(mode, crate::auto_mode::ReplyMode::Judge(_)) => {
+            if let Unbuffered::Failed(_, error) = &unbuffered {
+                tracing::debug!(%error, "upstream reply cut off while buffered");
+            }
+            tracing::warn!(
+                "auto-mode classifier: a non-streaming reply could not be buffered whole; \
+                 answering a retryable error"
+            );
+            return local_error_response(
+                state,
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                "model-router: the auto-mode classifier could not read this reply; retry the \
+                 request",
+                capture,
+            )
+            .await;
+        }
+        Err(unbuffered) => {
+            let stream = crate::auto_mode::guard_raw(unbuffered.into_stream());
+            return pass_through(state, status, &upstream_headers, capture, stream);
+        }
+    };
+    let rewritten = crate::auto_mode::json_reply(mode, &body)
+        .await
+        .map(Bytes::from);
+    buffered_reply(state, status, &upstream_headers, body, rewritten, capture).await
+}
+
+/// Sends a buffered reply: `rewritten` when there is one, with headers that
+/// drop the upstream's now-stale `Content-Length` (the axum layer restates
+/// it), else the body as it came with the upstream's headers.
+async fn buffered_reply(
+    state: &AppState,
+    status: StatusCode,
+    upstream_headers: &HeaderMap,
+    body: Vec<u8>,
+    rewritten: Option<Bytes>,
+    capture: Option<RequestCapture>,
+) -> Response {
+    let changed = rewritten.is_some();
+    let body = rewritten.unwrap_or_else(|| Bytes::from(body));
+    let response_headers = headers::response_headers(upstream_headers, changed);
+    local_response(state, status, response_headers, vec![body], capture).await
+}
+
+/// A body [`buffer_bounded`] could not read whole, with the chunks it read.
+enum Unbuffered {
+    /// It outgrew the limit; the rest of it follows on the stream.
+    TooLarge(
+        Vec<Bytes>,
+        BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    ),
+    /// The read failed.
+    Failed(Vec<Bytes>, reqwest::Error),
+}
+
+impl Unbuffered {
+    /// The body as pass-through streaming would have sent it: the prefix,
+    /// then the rest or the failure.
+    fn into_stream(self) -> BoxStream<'static, Result<Bytes, reqwest::Error>> {
+        match self {
+            Self::TooLarge(read, rest) => futures_util::stream::iter(read.into_iter().map(Ok))
+                .chain(rest)
+                .boxed(),
+            Self::Failed(read, error) => {
+                futures_util::stream::iter(read.into_iter().map(Ok).chain([Err(error)])).boxed()
+            }
+        }
+    }
+}
+
+/// Reads a whole response body of at most `limit` bytes.
+async fn buffer_bounded(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, Unbuffered> {
+    let mut stream = response.bytes_stream().boxed();
+    let mut read: Vec<Bytes> = Vec::new();
     let mut total = 0usize;
     loop {
         match stream.next().await {
             Some(Ok(bytes)) => {
                 total = total.saturating_add(bytes.len());
-                chunks.push(bytes);
-                if total > OVERFLOW_BUFFER_LIMIT {
-                    let rest = futures_util::stream::iter(
-                        chunks.into_iter().map(Ok::<Bytes, reqwest::Error>),
-                    )
-                    .chain(stream);
-                    let body =
-                        streaming_response_body(state, status, &passthrough_headers, capture, rest);
-                    return build_response(status, passthrough_headers, body);
+                read.push(bytes);
+                if total > limit {
+                    return Err(Unbuffered::TooLarge(read, stream));
                 }
             }
-            Some(Err(error)) => {
-                // Forward the prefix and the failure exactly as pass-through
-                // streaming would have.
-                let rest =
-                    futures_util::stream::iter(chunks.into_iter().map(Ok).chain([Err(error)]));
-                let body =
-                    streaming_response_body(state, status, &passthrough_headers, capture, rest);
-                return build_response(status, passthrough_headers, body);
-            }
-            None => break,
+            Some(Err(error)) => return Err(Unbuffered::Failed(read, error)),
+            None => return Ok(read.concat()),
         }
     }
-    let body = chunks.concat();
-    if let Some(rewritten) = overflow.rewrite_body(&body) {
-        tracing::info!("translated a GPT context-overflow error to the canonical Anthropic form");
-        // The body changed length; rewritten_headers dropped the upstream's
-        // Content-Length so the axum layer restates it.
-        return local_response(state, status, rewritten_headers, vec![rewritten], capture).await;
-    }
-    local_response(
-        state,
-        status,
-        passthrough_headers,
-        vec![Bytes::from(body)],
-        capture,
-    )
-    .await
+}
+
+/// Streams a body that could not be buffered, under the upstream's headers.
+fn pass_through(
+    state: &AppState,
+    status: StatusCode,
+    upstream_headers: &HeaderMap,
+    capture: Option<RequestCapture>,
+    stream: BoxStream<'static, Result<Bytes, reqwest::Error>>,
+) -> Response {
+    let response_headers = headers::response_headers(upstream_headers, false);
+    let body = streaming_response_body(state, status, &response_headers, capture, stream);
+    build_response(status, response_headers, body)
 }
 
 fn streaming_response_body<S>(

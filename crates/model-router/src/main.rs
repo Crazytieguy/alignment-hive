@@ -458,6 +458,15 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
     if config.capture.enabled && config.capture.file.is_relative() {
         config.capture.file = dirs.state_dir.join(&config.capture.file);
     }
+    if config.auto_mode_classifier.enabled
+        && let Some(home) = state::home_dir()
+    {
+        config.auto_mode_classifier.defaults =
+            model_router::auto_mode::DefaultsSource::installed_under(
+                &home,
+                dirs.state_dir.join("auto-mode"),
+            );
+    }
     let _lock = InstanceLock::acquire(dirs)?;
 
     // Bind the router port BEFORE discovery and the managed child so a taken

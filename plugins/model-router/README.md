@@ -45,6 +45,15 @@ present themselves as Claude.
   on (setup presents the choice). Off by default; setup puts
   Meta's terms in front of you first, since they restrict the subscription
   credential to Muse Code, and model-router is outside it.
+- An experimental auto-mode classifier, off by default (setup asks once).
+  Once a session has a GPT reply with tool calls, Claude Code's auto mode
+  checks those calls and every one after them with Sonnet on your Claude
+  plan. With this
+  on, the gateway checks GPT replies' tool calls on GPT instead, and
+  Claude's keep Anthropic's free check. It pays off most for heavy Luna or
+  Haiku users, whose sessions make many tool calls for little usage of
+  their own. It is sometimes stricter than Claude Code's own check, denies
+  a call it gets no verdict on, and some calls wait several seconds longer.
 - A `delegating-to-models` skill that helps Claude pick the right model
   and effort when delegating.
 - Adversarial code and plan reviewers on GPT-6.1 Sol — a second model with

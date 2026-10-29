@@ -1,6 +1,7 @@
 //! Server-sent-event framing shared by every reader of a streamed response:
-//! the usage transformer, the `WebSearch` tool-use sniffer, and the xAI source
-//! harvester. Events are reassembled across arbitrary chunk boundaries.
+//! the usage transformer, the `WebSearch` tool-use sniffer, the xAI source
+//! harvester, and the auto-mode classifier's stage. Events are reassembled
+//! across arbitrary chunk boundaries.
 
 pub(crate) fn event_boundary(buffer: &[u8]) -> Option<usize> {
     event_boundary_from(buffer, 0)
@@ -21,6 +22,54 @@ fn event_boundary_from(buffer: &[u8], from: usize) -> Option<usize> {
     })
 }
 
+/// Reassembles SSE events from arbitrary chunk boundaries, unbounded: the
+/// auto-mode classifier's stage bounds it itself, and [`SseEventBuffer`]
+/// adds the passive readers' cap and latch.
+#[derive(Default)]
+pub(crate) struct SseFramer {
+    buffer: Vec<u8>,
+    /// How far the separator scan has already looked, so each chunk costs one
+    /// pass over its own bytes rather than over the whole buffer.
+    scanned: usize,
+}
+
+impl SseFramer {
+    pub(crate) fn push(&mut self, chunk: &[u8]) {
+        self.buffer.extend_from_slice(chunk);
+    }
+
+    /// The bytes not yet taken as an event.
+    pub(crate) const fn buffered(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Runs `read` over the next complete event, which is then removed;
+    /// `None` while no event is complete.
+    pub(crate) fn next_with<T>(&mut self, read: impl FnOnce(&[u8]) -> T) -> Option<T> {
+        // Rewind by the longest separator minus one so a separator split
+        // across two chunks is still found.
+        let resume = self.scanned.saturating_sub(3);
+        let Some(event_end) = event_boundary_from(&self.buffer, resume) else {
+            self.scanned = self.buffer.len();
+            return None;
+        };
+        let read = read(&self.buffer[..event_end]);
+        self.buffer.drain(..event_end);
+        self.scanned = 0;
+        Some(read)
+    }
+
+    pub(crate) fn next_event(&mut self) -> Option<Vec<u8>> {
+        self.next_with(<[u8]>::to_vec)
+    }
+
+    /// Everything buffered, a complete event or not.
+    pub(crate) fn take_rest(&mut self) -> Vec<u8> {
+        self.scanned = 0;
+        std::mem::take(&mut self.buffer)
+    }
+}
+
 /// Overall cap on bytes buffered per scanned response; overflowing latches
 /// the scanner off (forwarding, where there is any, is unaffected).
 pub(crate) const MAX_SCAN_BUFFER_BYTES: usize = 2 * 1024 * 1024;
@@ -31,10 +80,7 @@ pub(crate) const MAX_SCAN_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 /// drain loop; only what they do with each event differs.
 #[derive(Default)]
 pub(crate) struct SseEventBuffer {
-    buffer: Vec<u8>,
-    /// How far the separator scan has already looked, so each chunk costs one
-    /// pass over its own bytes rather than over the whole buffer.
-    scanned: usize,
+    events: SseFramer,
     disabled: bool,
 }
 
@@ -45,11 +91,11 @@ impl SseEventBuffer {
         if self.disabled {
             return false;
         }
-        if self.buffer.len().saturating_add(chunk.len()) > MAX_SCAN_BUFFER_BYTES {
+        if self.events.buffered().saturating_add(chunk.len()) > MAX_SCAN_BUFFER_BYTES {
             self.disable();
             return false;
         }
-        self.buffer.extend_from_slice(chunk);
+        self.events.push(chunk);
         true
     }
 
@@ -58,18 +104,9 @@ impl SseEventBuffer {
     /// removed. Events that are not valid UTF-8 are skipped.
     pub(crate) fn drain<T>(&mut self, mut handle: impl FnMut(&str) -> Option<T>) -> Option<T> {
         while !self.disabled {
-            // Rewind by the longest separator minus one so a separator split
-            // across two chunks is still found.
-            let resume = self.scanned.saturating_sub(3);
-            let Some(event_end) = event_boundary_from(&self.buffer, resume) else {
-                self.scanned = self.buffer.len();
-                return None;
-            };
-            let found = std::str::from_utf8(&self.buffer[..event_end])
-                .ok()
-                .and_then(&mut handle);
-            self.buffer.drain(..event_end);
-            self.scanned = 0;
+            let found = self
+                .events
+                .next_with(|event| std::str::from_utf8(event).ok().and_then(&mut handle))?;
             if found.is_some() {
                 return found;
             }
@@ -79,13 +116,26 @@ impl SseEventBuffer {
 
     pub(crate) fn disable(&mut self) {
         self.disabled = true;
-        self.buffer = Vec::new();
-        self.scanned = 0;
+        self.events = SseFramer::default();
     }
 
     pub(crate) const fn is_disabled(&self) -> bool {
         self.disabled
     }
+}
+
+/// `event` with its single `data:` payload (at `range`) replaced by `data`.
+pub(crate) fn splice_data(event: &[u8], range: &std::ops::Range<usize>, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        event
+            .len()
+            .saturating_sub(range.len())
+            .saturating_add(data.len()),
+    );
+    out.extend_from_slice(&event[..range.start]);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&event[range.end..]);
+    out
 }
 
 /// One parsed SSE event.
@@ -156,6 +206,19 @@ pub(crate) fn parse_event(event: &str) -> Option<SseEvent<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_framer_resumes_across_chunks() {
+        let mut framer = SseFramer::default();
+        framer.push(b"event: a\ndata: 1\n");
+        assert!(framer.next_event().is_none());
+        framer.push(b"\nevent: b\r\n");
+        assert_eq!(framer.next_event().unwrap(), b"event: a\ndata: 1\n\n");
+        framer.push(b"data: 2\r\n\r\nrest");
+        assert_eq!(framer.next_event().unwrap(), b"event: b\r\ndata: 2\r\n\r\n");
+        assert!(framer.next_event().is_none());
+        assert_eq!(framer.take_rest(), b"rest");
+    }
 
     #[test]
     fn whitespace_only_data_lines_parse_as_empty_payloads() {

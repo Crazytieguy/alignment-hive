@@ -123,9 +123,32 @@ impl CaptureSink {
             response_body_captured_bytes: response_body.bytes.len(),
             response_body_received_bytes: response_body.received_bytes,
         };
-        let mut encoded = serde_json::to_vec(&record)?;
-        encoded.push(b'\n');
+        self.write_line(&record).await
+    }
 
+    /// Appends a record of a router-made side call (the auto-mode
+    /// classifier's), which carries its own `kind`, with `response_body`
+    /// bounded like a request's and stored as its `response_body` field.
+    ///
+    /// # Errors
+    /// Returns an error when serialization or writing the capture file fails.
+    pub async fn append_record(
+        &self,
+        mut record: serde_json::Value,
+        response_body: &[u8],
+    ) -> anyhow::Result<()> {
+        let mut bounded = self.response_body_capture();
+        bounded.push(response_body);
+        record["response_body"] =
+            serde_json::Value::String(String::from_utf8_lossy(&bounded.bytes).into_owned());
+        record["response_body_truncated"] = serde_json::Value::Bool(bounded.truncated);
+        self.write_line(&record).await
+    }
+
+    /// Encodes `record` as one line and appends it under the write lock.
+    async fn write_line(&self, record: &impl serde::Serialize) -> anyhow::Result<()> {
+        let mut encoded = serde_json::to_vec(record)?;
+        encoded.push(b'\n');
         let _guard = self.write_lock.lock().await;
         let mut file = open_capture_file(&self.path).await?;
         file.write_all(&encoded).await?;

@@ -68,9 +68,22 @@ pub fn effort_qualified_model<'a>(route: &'a ModelRoute, body: &[u8]) -> Cow<'a,
     if !route.family.effort_via_model_suffix() || route.split_upstream_model().1.is_some() {
         return Cow::Borrowed(&route.upstream_model);
     }
-    match requested_effort(body) {
-        Some(effort) => Cow::Owned(format!("{}({effort})", route.upstream_model)),
-        None => Cow::Borrowed(&route.upstream_model),
+    qualify_with_effort(route, requested_effort(body).as_deref())
+}
+
+/// [`effort_qualified_model`] for an effort already in hand: the
+/// `model(effort)` suffix on families that take effort that way, unless
+/// `upstream-model` already pins one. `effort` must fit the suffix grammar
+/// (no parentheses).
+pub fn qualify_with_effort<'a>(route: &'a ModelRoute, effort: Option<&str>) -> Cow<'a, str> {
+    match effort {
+        Some(effort)
+            if route.family.effort_via_model_suffix()
+                && route.split_upstream_model().1.is_none() =>
+        {
+            Cow::Owned(format!("{}({effort})", route.upstream_model))
+        }
+        _ => Cow::Borrowed(&route.upstream_model),
     }
 }
 

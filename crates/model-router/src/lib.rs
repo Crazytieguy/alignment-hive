@@ -9,6 +9,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod acquire;
+pub mod auto_mode;
 mod cache_marks;
 mod capture;
 mod claude_settings;

@@ -98,8 +98,8 @@ impl GptUpstreamCredential {
 
 /// The Claude Code headers `CLIProxyAPI` reads the prompt-cache identity
 /// (and reasoning-replay scope) from.
-const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
-const AGENT_ID_HEADER: &str = "x-claude-code-agent-id";
+pub(crate) const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
+pub(crate) const AGENT_ID_HEADER: &str = "x-claude-code-agent-id";
 
 /// A copy of `input` whose session header carries the shared-prefix
 /// prompt-cache key and whose agent header is removed — the pair
