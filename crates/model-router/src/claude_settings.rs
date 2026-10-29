@@ -1,7 +1,7 @@
 //! Claude Code's settings files, and how values are resolved across them.
 //!
 //! Reverse engineered, like everything else about the client
-//! (`plugins/model-router/docs/experiments.md` records the read-outs): most
+//! (`experiments/model-router.md` records the read-outs): most
 //! keys are owned whole by the highest-precedence file that sets one — a
 //! value a higher file shadows is never in effect, however well-formed. A few
 //! merge across files instead, so callers get every file in order too.

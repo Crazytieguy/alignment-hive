@@ -57,7 +57,7 @@ pub fn decide<'a>(config: &'a Config, body: &[u8]) -> RoutingDecision<'a> {
 /// Claude Code expresses effort as top-level `output_config.effort`. The
 /// child forwards that field on the Codex, openai-compat and Meta paths but
 /// drops it on the xAI path, so the suffix is the only channel that reaches
-/// xAI (measured; see `docs/experiments.md`). Which families take the suffix
+/// xAI (measured; see `experiments/model-router.md`). Which families take the suffix
 /// is [`crate::config::ModelFamily::effort_via_model_suffix`]. The value
 /// passes through unvalidated on purpose: the child owns the per-model
 /// clamping table, and a copy here would drift. A route whose

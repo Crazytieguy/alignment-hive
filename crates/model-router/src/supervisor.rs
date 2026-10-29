@@ -287,7 +287,7 @@ routing:
     // Sub-provider pins ride CLIProxyAPI's payload rules: one rule per
     // pinned model, scoped by the model's alias (unique per route, unlike
     // the upstream name), setting OpenRouter's `provider.only`. Measured to
-    // reach OpenRouter (docs/experiments.md, provider pinning).
+    // reach OpenRouter (experiments/model-router.md, provider pinning).
     let pinned: Vec<(&ProviderModel, &Vec<String>)> = served
         .iter()
         .flat_map(|(_, _, models)| models.iter().copied())

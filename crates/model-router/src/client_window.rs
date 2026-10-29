@@ -8,7 +8,7 @@
 //! [`UsageScale`], which converts real token counts into the window Claude
 //! Code believes a route has. Keeping the model in one
 //! place matters because it is reverse engineered:
-//! `plugins/model-router/docs/experiments.md` records how each rule was
+//! `experiments/model-router.md` records how each rule was
 //! verified, and a Claude Code upgrade invalidates all of it at once.
 
 use std::collections::BTreeMap;
@@ -159,7 +159,7 @@ fn resolve_with(env: Option<&str>, settings: &Settings) -> EnvSetting {
 /// `var` as the next Claude Code session started over `files` inherits it,
 /// which [`resolve`] cannot say once a settings edit is made mid-session. A
 /// settings file's `env` beats an inherited value
-/// (`plugins/model-router/docs/experiments.md`), and Claude Code puts the
+/// (`experiments/model-router.md`), and Claude Code puts the
 /// `env` of `current` (the files of the session this process runs in) into
 /// this process's environment `env`, so it only stands for the shell when
 /// neither sets the variable.

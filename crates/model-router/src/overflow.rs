@@ -20,7 +20,7 @@
 //! estimate to be near the window ([`OverflowDialect::min_estimate_percent`]).
 //!
 //! The Codex and xAI wire shapes and the client behavior are recorded in
-//! `plugins/model-router/docs/experiments.md` (measured against Claude Code
+//! `experiments/model-router.md` (measured against Claude Code
 //! 2.1.220 and `CLIProxyAPI` 7.2.92; a version change on either side is a
 //! retest trigger).
 
