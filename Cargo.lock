@@ -2005,7 +2005,7 @@ dependencies = [
 
 [[package]]
 name = "model-router"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2704,7 +2704,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remote-kernels"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
