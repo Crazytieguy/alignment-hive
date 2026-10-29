@@ -17,11 +17,23 @@ export async function hive($: EngineInterface, args: string[]) {
   return $.process.run(argv($, args), { env: env($), timeoutMs: 60_000 })
 }
 
+/** The CLI exited unsuccessfully; `hasRows`: it printed rows first. */
+export class CliFailed extends Error {
+  constructor(
+    message: string,
+    readonly hasRows: boolean,
+  ) {
+    super(message)
+  }
+}
+
 /**
  * The CLI's JSON Lines rows, read as they stream: `$.process.run` keeps only the first 4 MiB of output, which a
- * project's outlines can pass. A line that does not parse is skipped.
+ * project's outlines can pass. A line that does not parse is skipped. Rejects with CliFailed when the CLI exits
+ * unsuccessfully, so a read that failed partway never passes for a whole one, and at once when `signal` aborts; the
+ * CLI is then ended at its next write, as a pending read cannot be cut short, or finishes on its own.
  */
-export async function hiveRows($: EngineInterface, args: string[]): Promise<Array<Record<string, unknown>>> {
+export async function hiveRows($: EngineInterface, args: string[], signal?: AbortSignal): Promise<Array<Record<string, unknown>>> {
   const rows: Array<Record<string, unknown>> = []
   const take = (line: string) => {
     try {
@@ -30,13 +42,26 @@ export async function hiveRows($: EngineInterface, args: string[]): Promise<Arra
       // a note or a blank line
     }
   }
+  signal?.throwIfAborted()
+  const stopped = new Promise<never>((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))
+  const child = $.process.spawn({ argv: argv($, args), env: env($) })
+  // It rejects when the child is ended early; the loop below reads how it ended.
+  child.result.catch(() => undefined)
   let rest = ''
-  for await (const piece of $.process.spawn({ argv: argv($, args), env: env($) })) {
-    if (piece.stream !== 'stdout') continue
-    const lines = (rest + piece.text).split('\n')
-    rest = lines.pop()!
-    lines.forEach(take)
+  try {
+    for (;;) {
+      const piece = await Promise.race([child.next(), stopped])
+      if (piece.done) {
+        take(rest)
+        if (piece.value.code === 0) return rows
+        throw new CliFailed(`hive ${args.slice(0, 2).join(' ')}: exit ${piece.value.code ?? piece.value.signal}`, rows.length > 0)
+      }
+      if (piece.value.stream !== 'stdout') continue
+      const lines = (rest + piece.value.text).split('\n')
+      rest = lines.pop()!
+      lines.forEach(take)
+    }
+  } finally {
+    void child.return(undefined as never).catch(() => undefined)
   }
-  take(rest)
-  return rows
 }

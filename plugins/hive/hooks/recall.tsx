@@ -1,7 +1,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Hook, RenderElement, RenderInput } from 'claude-code'
 
-import { hiveRows } from './cli'
+import { CliFailed, hiveRows } from './cli'
 import { FAILED, INSTRUCTIONS, budgetFor, entries, history, promptBlocks, reportOf, sessionsFor } from './recall-text'
 import type { Listed, Row } from './recall-text'
 import type { HiveRecalled } from '../types'
@@ -32,18 +32,33 @@ type Outcome = { context?: string; shown: Shown }
 const NOTHING: Outcome = { shown: 'none' }
 const FAILURE: Outcome = { context: FAILED, shown: 'failed' }
 
-async function recall($: EngineInterface, choice: string, prompt: string): Promise<Outcome> {
+/** Recall for `prompt`, until `deadline` (the clock's time): past it, `signal` aborts and nothing new starts. */
+async function recall($: EngineInterface, choice: string, prompt: string, deadline: number, signal: AbortSignal): Promise<Outcome> {
   const session = (await $.session.id()).slice(0, 8)
   const models = choice === 'auto' ? (isSolMissing ? [FALLBACK] : [SOL, FALLBACK]) : [choice]
-  const listed = (await hiveRows($, ['local', 'sessions', '-n', '500'])) as Array<Listed>
-  const outline = (locs: Array<string>) => hiveRows($, ['local', 'outline', ...locs, '--replies', '--clip', '0']) as Promise<Array<Row>>
+  const listed = (await hiveRows($, ['local', 'sessions', '-n', '500', '--brief'], signal)) as Array<Listed>
+  const outlineOf = (locs: Array<string>) =>
+    hiveRows($, ['local', 'outline', ...locs, '--replies', '--no-agents', '--clip', '0'], signal) as Promise<Array<Row>>
+  // A session gone since the listing fails its whole batch before a row prints: the batch is read again one session
+  // at a time, without the ones that fail.
+  const outline = (locs: Array<string>) =>
+    outlineOf(locs).catch(async (error: unknown) => {
+      if (!(error instanceof CliFailed) || error.hasRows || locs.length === 1) throw error
+      const rows: Array<Row> = []
+      for (const loc of locs) rows.push(...(await outlineOf([loc]).catch((e: unknown) => (e instanceof CliFailed && !e.hasRows ? [] : Promise.reject(e)))))
+      return rows
+    })
   const sessions = await sessionsFor(listed, outline, budgetFor(models[0]!))
   for (const model of models) {
-    const h = history(sessions, await $.clock.now(), budgetFor(model), session)
+    const now = await $.clock.now()
+    const h = history(sessions, now, budgetFor(model), session)
     // Nothing the main agent lacks (a new project, say): no entry could come of a call.
     if (![...h.seen.keys()].some(h.isNew)) return NOTHING
+    // A call with under a second left could not answer.
+    const left = Math.ceil(deadline - now)
+    if (left < 1000) return FAILURE
     const r = await $.model
-      .complete({ model, system: INSTRUCTIONS, prompt: promptBlocks(h, session, prompt), effort: 'low', maxTokens: 4000, timeoutMs: TIMEOUT_MS })
+      .complete({ model, system: INSTRUCTIONS, prompt: promptBlocks(h, session, prompt), effort: 'low', maxTokens: 4000, timeoutMs: left }, { signal })
       .catch(() => undefined)
     if (r?.isAnswered) {
       const found = entries(r.text, h)
@@ -64,8 +79,12 @@ export async function submitWithRecall($: EngineInterface, e: Submit[1], next: S
   // Only what the user typed, at the terminal or through Remote Control; never a slash command.
   if ((e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') || e.command) return next(e)
   $.ui.status('recalling past sessions…')
-  // A slow CLI read or model call past the limit keeps running, but the prompt goes on.
-  const { context, shown } = await Promise.race([recall($, choice, e.text), $.clock.sleep(TIMEOUT_MS).then(() => FAILURE)]).catch(() => FAILURE)
+  // Past the limit the prompt goes on, and the CLI reads and model call still running are stopped.
+  const stop = new AbortController()
+  const deadline = (await $.clock.now()) + TIMEOUT_MS
+  const expired = $.clock.sleep(TIMEOUT_MS, { signal: stop.signal }).then(() => FAILURE)
+  const { context, shown } = await Promise.race([recall($, choice, e.text, deadline, stop.signal), expired]).catch(() => FAILURE)
+  stop.abort()
   $.ui.status(undefined)
   const waiting = { prompt: e.text, shown }
   unstored.push(waiting)

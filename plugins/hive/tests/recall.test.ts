@@ -15,7 +15,8 @@ const usage = { input_tokens: 10, output_tokens: 10, cache_read_input_tokens: 0,
 function world(on: On, { isSolMissing = false } = {}) {
   const asked: Array<string> = []
   const contexts: Array<ReadonlyArray<string>> = []
-  const state = { hold: false, isCliSlow: false, recalledBefore: false, reply: REPLY, isDropped: false }
+  const timeouts: Array<number | undefined> = []
+  const state = { hold: false, isCliSlow: false, isCliFailing: false, isProjectNew: false, isSessionGone: false, recalledBefore: false, reply: REPLY, isDropped: false }
   const clock = mock.clock(on, { now: NOW })
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('session.id', async () => ({ value: SESSION }))
@@ -25,11 +26,18 @@ function world(on: On, { isSolMissing = false } = {}) {
   })
   const cli = (args: ReadonlyArray<string>): Array<unknown> => {
     if (args[0] === 'notices') return [{ notices: [], isSessionKnown: true }]
-    if (args[1] === 'sessions') return [{ loc: 'abcd1234', end: '2026-10-20T15:29:00Z' }, { loc: 'feed0001', end: '2026-10-19T09:00:00Z' }]
-    if (args[1] !== 'outline') return []
+    // A project with no transcripts yet lists none (and the CLI exits 0); a session gone since the listing fails its batch.
+    if (args[1] === 'sessions' && state.isProjectNew) return []
+    if (args[1] === 'sessions')
+      return [{ loc: 'abcd1234', end: '2026-10-20T15:29:00Z' }, ...(state.isSessionGone ? [{ loc: 'dead0001', end: '2026-10-19T12:00:00Z' }] : []), { loc: 'feed0001', end: '2026-10-19T09:00:00Z' }]
+    if (args[1] !== 'outline' || isFailing(args)) return []
     const report = { loc: 'abcd1234:2', time: '2026-10-20T15:29:30Z', kind: 'user', origin: 'recall', recall: true, text: '[hive recall] Entries.\n\n> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)' }
-    return [ENTRY, { loc: 'abcd1234:1', time: '2026-10-20T15:29:00Z', kind: 'user', text: 'Format the file.' }, ...(state.recalledBefore ? [report] : [])]
+    return [
+      ...(args.includes('feed0001') ? [ENTRY] : []),
+      ...(args.includes('abcd1234') ? [{ loc: 'abcd1234:1', time: '2026-10-20T15:29:00Z', kind: 'user', text: 'Format the file.' }, ...(state.recalledBefore ? [report] : [])] : []),
+    ]
   }
+  const isFailing = (args: ReadonlyArray<string>) => state.isCliFailing || (state.isSessionGone && args.includes('dead0001'))
   on('process.run', async (_$, e) => {
     const stdout = cli(e.argv.slice(2)).map(r => JSON.stringify(r)).join('\n')
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
@@ -39,10 +47,11 @@ function world(on: On, { isSolMissing = false } = {}) {
     if (state.isCliSlow) await clock.sleep(60_000)
     const stdout = cli(e.argv.slice(2)).map(r => JSON.stringify(r)).join('\n')
     for (let i = 0; i < stdout.length; i += 7) yield { stream: 'stdout' as const, text: stdout.slice(i, i + 7) }
-    return { value: { exitCode: 0, signal: null } }
+    return { value: { code: isFailing(e.argv.slice(2)) ? 2 : 0, signal: null } }
   } as never)
   on('model.complete', async (_$, e) => {
     asked.push(e.model)
+    timeouts.push(e.timeoutMs)
     if (state.hold) {
       await clock.sleep(e.timeoutMs ?? 0)
       return { value: { isAnswered: false, reason: 'aborted', usage } } as never
@@ -52,7 +61,7 @@ function world(on: On, { isSolMissing = false } = {}) {
   })
   on('ui.status', async () => ({ value: undefined }) as never)
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
-  return { asked, contexts, clock, state }
+  return { asked, contexts, clock, state, timeouts }
 }
 
 const start = ($: Parameters<Parameters<typeof test>[1]>[0]) => $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
@@ -111,7 +120,7 @@ describe('automatic recall', () => {
     expect(contexts[0]?.join('')).toContain('did not finish')
   })
 
-  test('on: a CLI read past 30 seconds holds the prompt no longer', { options: { recall: true } }, async ($, on) => {
+  test('on: a CLI read past 30 seconds holds the prompt no longer, and no model call starts after', { options: { recall: true } }, async ($, on) => {
     const { asked, contexts, clock, state } = world(on)
     await start($)
     state.isCliSlow = true
@@ -119,7 +128,41 @@ describe('automatic recall', () => {
     await clock.advance(31_000)
     await submitted
     expect(contexts[0]?.join('')).toContain('did not finish')
+    await clock.advance(60_000)
     expect(asked).toEqual([])
+  })
+
+  test('on: the model call gets the time left of the 30 seconds', { options: { recall: true } }, async ($, on) => {
+    const { timeouts } = world(on)
+    await start($)
+    await $.prompt.submit(typed('Format the file.'))
+    expect(timeouts).toEqual([30_000])
+  })
+
+  test('on: a session gone since the listing costs only itself; the rest of its batch is read', { options: { recall: true } }, async ($, on) => {
+    const { contexts, state } = world(on)
+    await start($)
+    state.isSessionGone = true
+    await $.prompt.submit(typed('Format the file.'))
+    expect(contexts[0]?.join('')).toContain('> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)')
+  })
+
+  test('on: a project with no transcripts yet finds nothing', { options: { recall: true } }, async ($, on) => {
+    const { asked, contexts, state } = world(on)
+    await start($)
+    state.isProjectNew = true
+    await $.prompt.submit(typed('Format the file.'))
+    expect(asked).toEqual([])
+    expect(contexts).toEqual([[]])
+  })
+
+  test('on: a CLI read that fails partway is no history at all', { options: { recall: true } }, async ($, on) => {
+    const { asked, contexts, state } = world(on)
+    await start($)
+    state.isCliFailing = true
+    await $.prompt.submit(typed('Format the file.'))
+    expect(asked).toEqual([])
+    expect(contexts[0]?.join('')).toContain('did not finish')
   })
 })
 
