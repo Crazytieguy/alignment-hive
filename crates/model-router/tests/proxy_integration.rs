@@ -2409,6 +2409,99 @@ async fn gpt_turn_drops_tool_schema_patterns_the_codex_validator_rejects() {
     assert_eq!(forwarded[0].body, claude_body.as_bytes());
 }
 
+/// A tool Claude Code adds mid-conversation arrives as a system message's
+/// `tool_addition` block, which the child drops: a GPT turn gets it declared
+/// in `tools[]` (through the schema shim too) and loses the deferred-tool
+/// placeholder, while a Claude turn is forwarded byte for byte.
+#[tokio::test]
+async fn gpt_turn_declares_tools_added_mid_conversation() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(handler).await;
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        ..websearch_config(cpa_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let late_artifact = artifact_tools()[1].clone();
+    let body_for = |model: &str| {
+        serde_json::to_string(&serde_json::json!({
+            "model": model,
+            "max_tokens": 16,
+            "tools": [
+                {"name": "Bash", "input_schema": {"type": "object", "properties": {}}},
+                {
+                    "name": "DeferredToolPlaceholder",
+                    "description": "Reserved placeholder that keeps deferred tool loading active; never call this tool.",
+                    "input_schema": {"type": "object", "properties": {}},
+                    "defer_loading": true,
+                },
+            ],
+            "messages": [
+                {"role": "user", "content": "review this"},
+                {"role": "system", "content": [
+                    {"type": "text", "text": "Artifact is now available."},
+                    {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": late_artifact}},
+                ]},
+                {"role": "user", "content": "go on"},
+            ],
+        }))
+        .unwrap()
+    };
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(body_for("claude-gpt-test")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let forwarded = cpa_observed.lock().await;
+    assert_eq!(forwarded.len(), 1);
+    let document: serde_json::Value = serde_json::from_slice(&forwarded[0].body).unwrap();
+    let tools = document["tools"].as_array().unwrap();
+    let names: Vec<_> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Bash", "Artifact"]);
+    assert!(
+        tools[1]["input_schema"]["properties"]["field"]
+            .get("pattern")
+            .is_none()
+    );
+    assert_eq!(
+        document["messages"][1],
+        serde_json::json!({"role": "system", "content": [{"type": "text", "text": "Artifact is now available."}]})
+    );
+    drop(forwarded);
+
+    let claude_body = body_for("claude-sonnet-4-5");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(claude_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let forwarded = anthropic_observed.lock().await;
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0].body, claude_body.as_bytes());
+}
+
 /// A compaction request keeps its tools but must be answered in text:
 /// Claude Code's compaction header turns tool use off, and only there, and
 /// only for Codex-native GPT models and Grok. An openai-compat host, or a

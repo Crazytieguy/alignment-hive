@@ -34,6 +34,7 @@ mod sse;
 pub mod state;
 mod stub;
 pub mod supervisor;
+mod tool_changes;
 mod tool_schema;
 mod usage;
 pub mod verify;

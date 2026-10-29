@@ -183,6 +183,19 @@ impl ModelFamily {
             Self::Grok | Self::Muse | Self::OpenAiCompat => false,
         }
     }
+
+    /// Whether the tools Claude Code adds or withdraws mid-conversation, in
+    /// a system message's `tool_addition`/`tool_removal` blocks, must be
+    /// declared in `tools[]` ([`crate::tool_changes`]): every translator of
+    /// the child keeps only such a message's text.
+    ///
+    /// Matched exhaustively on purpose: a new family must decide.
+    #[must_use]
+    pub const fn hoists_tool_changes(self) -> bool {
+        match self {
+            Self::Gpt | Self::Grok | Self::Muse | Self::OpenAiCompat => true,
+        }
+    }
 }
 
 // No `Debug` outside tests: `ingress_token` and the providers' keys must not

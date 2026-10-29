@@ -16,6 +16,7 @@ import {
   judgeLatency,
   judgeOverflow,
   judgeReach,
+  judgeToolAddition,
   judgeToolTurn1,
   judgeToolTurn2,
   judgeWebsearch,
@@ -283,6 +284,14 @@ describe('validators', () => {
     expect(judgeToolTurn2(answer, false, {}).status).toBe('warn');
     expect(judgeToolTurn2(ok(pong), true, {}).status).toBe('fail');
     expect(judgeToolTurn2(bad('HTTP 400: invalid signature', 400), true, {}).detail).toBe('turn 2: HTTP 400: invalid signature');
+  });
+
+  test('tool addition', () => {
+    const call = (name: string) => ok(msg([{ type: 'tool_use', id: 'c1', name, input: {} }], { stop_reason: 'tool_use' }));
+    expect(judgeToolAddition(call('get_code')).status).toBe('pass');
+    expect(judgeToolAddition(call('DeferredToolPlaceholder')).detail).toContain('called DeferredToolPlaceholder');
+    expect(judgeToolAddition(ok(pong)).detail).toContain('no tool call');
+    expect(judgeToolAddition(bad('HTTP 400: bad')).status).toBe('fail');
   });
 
   test('prompt cache', () => {

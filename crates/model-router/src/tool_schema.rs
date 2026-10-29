@@ -93,19 +93,6 @@ pub(crate) fn drop_unportable_patterns(document: &mut Value) -> Vec<String> {
     affected
 }
 
-/// Byte-level wrapper for callers that hold the body as bytes.
-///
-/// # Errors
-/// Returns an error when the body is not JSON.
-pub(crate) fn drop_unportable_patterns_in_body(body: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut document: Value =
-        serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON: {error}"))?;
-    if drop_unportable_patterns(&mut document).is_empty() {
-        return Ok(body.to_vec());
-    }
-    Ok(serde_json::to_vec(&document)?)
-}
-
 /// Walks one schema through the JSON Schema keywords only — never through
 /// data-carrying keywords such as `default`, `enum`, or `examples`, and never
 /// into a *property named* `pattern` (Claude Code's Glob tool has one) except
@@ -225,16 +212,6 @@ mod tests {
             "Glob's `pattern` property is data"
         );
         assert_eq!(document["model"], original["model"]);
-    }
-
-    #[test]
-    fn untouched_body_round_trips_byte_identical() {
-        let body = br#"{ "model" : "gpt-test", "tools" : [{"name":"Artifact","input_schema":{"properties":{"doc_id":{"pattern":"^(?!x)a$"}}}}] }"#;
-        assert_eq!(
-            drop_unportable_patterns_in_body(body).unwrap(),
-            body.to_vec()
-        );
-        assert!(drop_unportable_patterns_in_body(b"not json").is_err());
     }
 
     /// Every supported keyword is reached, and reaching one removes exactly

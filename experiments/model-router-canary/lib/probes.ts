@@ -382,6 +382,16 @@ export function judgeToolTurn2(r: Reply, signed: boolean, metrics: Record<string
   return { status: 'pass', detail: `round trip ok, ${metrics.thinking_blocks ?? 1} signed thinking block(s), ${metrics.signature_chars} signature chars replayed`, metrics };
 }
 
+/** The added tool must be the one called: GPT called CC's declared placeholder when the addition was dropped. */
+export function judgeToolAddition(r: Reply): Result {
+  if (r.error) return { status: 'fail', detail: r.error };
+  const m = r.message!;
+  const calls = m.content.filter((b) => b.type === 'tool_use').map((b) => b.name);
+  if (calls.includes('get_code')) return { status: 'pass', detail: 'called get_code, declared only by a mid-conversation tool_addition' };
+  const got = calls.length ? `called ${calls.join(', ')}` : `no tool call (stop_reason ${m.stop_reason}): "${excerpt(textOf(m), 80)}"`;
+  return { status: 'fail', detail: `the tool_addition never reached the model: ${got}` };
+}
+
 export const cacheRead = (m?: Message): number => Number(m?.usage?.cache_read_input_tokens ?? 0) || 0;
 
 export function judgeCache(first: Reply, second: Reply): Result {
@@ -527,6 +537,37 @@ async function probeToolReplay(t: RouterTarget, model: string): Promise<Result> 
   return judgeToolTurn2(r2, t1.signed, metrics);
 }
 
+/**
+ * Claude Code declares a tool that joins mid-conversation (SubagentHandback on a resume, a late MCP server) in a
+ * `role: "system"` message's `tool_addition` block. CLIProxyAPI's translators keep only that message's text; the
+ * router declares the tool in tools[] (tool_changes.rs). The decoy and CC's deferred placeholder stand in for the
+ * tools the model could call instead.
+ */
+async function probeToolAddition(t: RouterTarget, model: string): Promise<Result> {
+  const tools = [
+    { name: 'list_files', description: 'Lists the files in a directory.', input_schema: { type: 'object', properties: { path: { type: 'string' } } } },
+    {
+      name: 'DeferredToolPlaceholder',
+      description: 'Reserved placeholder that keeps deferred tool loading active; never call this tool.',
+      input_schema: { type: 'object', properties: {} },
+      defer_loading: true,
+    },
+  ];
+  const messages = [
+    { role: 'user', content: 'Reply with the single word: ready' },
+    { role: 'assistant', content: [{ type: 'text', text: 'ready' }] },
+    {
+      role: 'system',
+      content: [
+        { type: 'text', text: 'The get_code tool is now available.' },
+        { type: 'tool_addition', tool: { type: 'tool_definition', definition: GET_CODE_TOOL } },
+      ],
+    },
+    { role: 'user', content: 'Call the get_code tool with factor 7. Call no other tool.' },
+  ];
+  return judgeToolAddition(await send(t, messagesBody(model, messages, { tools, max_tokens: 1024 })));
+}
+
 /** ~5K o200k tokens of deterministic filler, distinct per run so the first request is a genuine miss. */
 export function cacheSystemPrompt(nonce: string): string {
   const words = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliett', 'kilo', 'lima'];
@@ -643,6 +684,7 @@ export async function runProbes(targets: Array<RouterTarget>, models: ModelSet, 
   for (const model of [...models.gpt, ...models.grok, ...models.muse]) await each(`reach/${model}`, model, (t) => probeReach(t, model));
   const p = models.primary;
   await each('tool-replay', p, (t) => probeToolReplay(t, p));
+  await each('tool-addition', p, (t) => probeToolAddition(t, p));
   await each('prompt-cache', p, (t) => probePromptCache(t, p));
   await each('image', p, (t) => probeImage(t, p));
   await each('websearch', p, (t) => probeWebsearch(t, p), (t) => {

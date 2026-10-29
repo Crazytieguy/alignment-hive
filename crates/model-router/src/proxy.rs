@@ -582,9 +582,11 @@ async fn forward_to_anthropic(
 const COMPACTION_HEADER: &str = "x-claude-code-compaction";
 
 /// The DOM-level rewrites every GPT-branch turn gets, in one parse: the
-/// identity system block ([`crate::identity`]), the removal of tool-schema
-/// patterns the Codex validator cannot compile ([`crate::tool_schema`]), and
-/// on a compaction request a text-only reply.
+/// tools the history adds mid-conversation declared in `tools[]`
+/// ([`crate::tool_changes`]), the identity system block
+/// ([`crate::identity`]), the removal of tool-schema patterns the Codex
+/// validator cannot compile ([`crate::tool_schema`]), and on a compaction
+/// request a text-only reply.
 ///
 /// Compaction is a one-turn fork that keeps the conversation's tools (for the
 /// prompt cache) and asks for a text summary. A GPT subagent answers it by
@@ -605,6 +607,9 @@ fn rewrite_gpt_body(
 ) -> anyhow::Result<Vec<u8>> {
     let mut document: serde_json::Value =
         serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON: {error}"))?;
+    // First: the compaction branch below reads whether `tools` is empty, and
+    // the schema shim must reach the declared tools.
+    crate::tool_changes::apply(&mut document, route.family);
     crate::identity::inject_identity_into(
         &mut document,
         &route.display_name,

@@ -78,11 +78,11 @@ pub(super) async fn gpt_origin_on_claude_branch(
     }
     // A forced search may carry the caller's full tool set alongside
     // `web_search` (see `websearch::detect`), and `legacy_websearch` forwards
-    // it, so this GPT-bound body needs the schema rewrite too — identity it
+    // it, so this GPT-bound body needs the tool rewrites too — identity it
     // does not: the side call's own system prompt is not a conversation.
     match (route, gpt_forward_target(&state.cliproxy_upstream)) {
         (Some(route), Some(target)) => match substitute_model(&body, &route.upstream_model)
-            .and_then(|body| crate::tool_schema::drop_unportable_patterns_in_body(&body))
+            .and_then(|body| crate::tool_changes::portable_tools_in_body(&body, route.family))
         {
             Ok(rewritten) => {
                 match gpt_backend_answer(
