@@ -815,8 +815,8 @@ fn shipped_agent_routes_check(config: &Config) -> Check {
     if !twinless.is_empty() {
         let twins: Vec<String> = twinless.iter().map(|route| fast_twin_id(route)).collect();
         problems.push(format!(
-            "{} get no -fast twin, which the shipped -fast agents need ({}): only a gpt route \
-             to a shipped GPT model gets one, so point their [[models]] entries at one",
+            "no -fast twin for {}, which the shipped -fast agents need ({}): only a gpt route \
+             to a shipped GPT model gets one, so point each such [[models]] entry at one",
             twinless.join(", "),
             twins.join(", ")
         ));
@@ -1494,7 +1494,7 @@ mod tests {
         assert!(
             check
                 .detail
-                .starts_with("gpt-6.1-sol get no -fast twin, which the shipped -fast agents need (gpt-6.1-sol-fast)"),
+                .starts_with("no -fast twin for gpt-6.1-sol, which the shipped -fast agents need (gpt-6.1-sol-fast)"),
             "{}",
             check.detail
         );
