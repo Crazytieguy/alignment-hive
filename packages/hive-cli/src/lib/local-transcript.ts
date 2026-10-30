@@ -1,92 +1,119 @@
-// One transcript loaded for `hive local`: its bytes (mapped, or a buffer reused across a loop, to
-// bound memory), parsed through session-data, with each tool entry linked to the agents it started.
+// One transcript loaded for `hive local`: its bytes (as many as the descriptor read says it holds; mapped, or a buffer
+// reused across a loop, to bound memory), parsed through session-data, with each tool entry linked to the agents it
+// started.
 
-import { closeSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { LocalError, warn } from '../commands/local';
 import { transcriptAsOf } from './as-of';
+import { onFile, readView, still } from './file-memo';
 import { linkAgents } from './locators';
 import { localErrors, localNotes } from './messages';
-import type { Entry, Transcript } from '@alignment-hive/session-data';
+import type { Entry } from '@alignment-hive/session-data';
+import type { FileView } from './file-memo';
 import type { Printer, Range, TranscriptRef } from './locators';
 import type { RowContext } from './local-rows';
 
+/** Entries parsed from one transcript file: all of them, or those one kind of output can print (see show.ts). */
+export interface Parsed {
+  entries: ReadonlyArray<Entry>;
+  /** How many entries the transcript has. */
+  count: number;
+  malformed: ReadonlyArray<number>;
+}
+
 export interface LoadedTranscript {
-  t: Transcript;
+  entries: ReadonlyArray<Entry>;
+  count: number;
   ctx: RowContext;
 }
 
 /** Smaller files use reusedBytes' scratch buffer; larger ones are mapped on macOS or read elsewhere. */
 const REUSE_MAX = 16 * 1024 * 1024;
 
+/** A file system error reading a transcript, as a LocalError naming the file; any other error as it is. */
+export function unreadable(ref: TranscriptRef, error: unknown): unknown {
+  return error instanceof Error && 'code' in error
+    ? new LocalError(localErrors.cannotRead(ref.path, error.message))
+    : error;
+}
+
 /**
- * A transcript file's bytes; an unreadable file is a LocalError naming it. Large files on macOS are
- * mapped, so the system can drop and reload file-backed pages. Smaller files or failed mappings are read.
+ * A large file's bytes mapped on macOS, so the system can drop and reload file-backed pages; undefined for a smaller
+ * file, a failed mapping, or a file changed or replaced since the descriptor read it (as `id`). Claude Code can
+ * truncate in place; on Linux a mapped page past the new EOF raises uncatchable SIGBUS.
  */
-export async function readBytes(ref: TranscriptRef): Promise<Buffer> {
-  // Claude Code can truncate in place; on Linux a mapped page past the new EOF raises uncatchable SIGBUS.
-  if (process.platform === 'darwin') {
-    try {
-      if (statSync(ref.path).size >= REUSE_MAX) {
-        const mapped = Bun.mmap(ref.path, { shared: false });
-        return Buffer.from(mapped.buffer, mapped.byteOffset, mapped.length);
-      }
-    } catch {
-      // reading reports why
-    }
+function mapped(path: string, view: FileView, id: string): Buffer | undefined {
+  if (process.platform !== 'darwin' || view.size < REUSE_MAX) return undefined;
+  try {
+    const map = Bun.mmap(path, { shared: false });
+    // After mapping, so that it is the mapped file that is checked.
+    if (!still(path, id) || map.length < view.size) return undefined;
+    return Buffer.from(map.buffer, map.byteOffset, view.size);
+  } catch {
+    return undefined;
   }
-  return readFile(ref.path).catch((error: Error) => {
-    throw new LocalError(localErrors.cannotRead(ref.path, error.message));
-  });
+}
+
+/** The bytes a descriptor of the transcript at `path` sees (as `id`): mapped when large (see mapped), else read. */
+export const bytesOf = (path: string, view: FileView, id: string): Buffer => mapped(path, view, id) ?? readView(view);
+
+/** A transcript file's bytes; an unreadable file is a LocalError naming it. */
+export function readBytes(ref: TranscriptRef): Buffer {
+  try {
+    return onFile(ref.path, (view, id) => bytesOf(ref.path, view, id));
+  } catch (error) {
+    throw unreadable(ref, error);
+  }
 }
 
 /**
  * readBytes for a loop over many files that keeps none of their bytes: each call's buffer is
  * overwritten by the next. Parsed records and entries keep decoded strings, not these bytes.
  */
-export function reusedBytes(): (ref: TranscriptRef) => Promise<Buffer> {
+export function reusedBytes(): (ref: TranscriptRef) => Buffer {
   let scratch = Buffer.alloc(0);
-  return async (ref) => {
-    let fd;
+  return (ref) => {
     try {
-      fd = openSync(ref.path, 'r');
-      const size = fstatSync(fd).size;
-      if (size < REUSE_MAX) {
-        if (scratch.length <= size) scratch = Buffer.alloc(Math.min(REUSE_MAX, Math.max(size + 1, 1 << 20)));
-        let n = 0;
-        for (let got = 1; got > 0 && n < scratch.length; n += got)
-          got = readSync(fd, scratch, n, scratch.length - n, n);
-        // A file that grew past the buffer while being read is read whole below.
-        if (n < scratch.length) return scratch.subarray(0, n);
-      }
+      const bytes = onFile(ref.path, (view) => {
+        if (view.size >= REUSE_MAX) return undefined;
+        if (scratch.length < view.size) scratch = Buffer.alloc(Math.min(REUSE_MAX, Math.max(view.size, 1 << 20)));
+        return readView(view, scratch);
+      });
+      if (bytes) return bytes;
     } catch {
       // readBytes reports why.
-    } finally {
-      if (fd !== undefined) closeSync(fd);
     }
     return readBytes(ref);
   };
 }
 
 /**
- * Parse one transcript's bytes. `agents` are the agent transcripts of its session, which its tool
+ * A transcript file's bytes parsed for `hive local`: its entries as of HIVE_LOCAL_CUTOFF, each ArtifactComments result
+ * cut to its comments, and the lines that did not parse.
+ */
+export function transcriptOf(bytes: Uint8Array): Parsed {
+  const { transcript, malformed } = transcriptAsOf(bytes);
+  // The entries are this parse's own until it returns.
+  for (const e of transcript.entries)
+    if (e.kind === 'tool' && e.tool === 'ArtifactComments' && e.result) e.result = commentsOnly(e.result);
+  return { entries: transcript.entries, count: transcript.entries.length, malformed };
+}
+
+/**
+ * One transcript's parsed entries, ready to print. `agents` are the agent transcripts of its session, which its tool
  * entries may have started or messaged. Malformed lines are skipped with a warning.
  */
 export function loadTranscript(
   ref: TranscriptRef,
-  bytes: Buffer,
+  parsed: Parsed,
   agents: ReadonlyArray<TranscriptRef>,
   print: Printer,
 ): LoadedTranscript {
-  const { transcript: t, malformed } = transcriptAsOf(bytes);
-  for (const e of t.entries)
-    if (e.kind === 'tool' && e.tool === 'ArtifactComments' && e.result) e.result = commentsOnly(e.result);
   const prefix = print.transcript(ref, agents);
-  if (malformed.length) warn(localNotes.malformed(prefix, malformed));
+  if (parsed.malformed.length) warn(localNotes.malformed(prefix, [...parsed.malformed]));
   const links = new Map(
-    [...linkAgents(t.entries, agents)].map(([n, refs]) => [n, refs.map((a) => print.transcript(a, agents))]),
+    [...linkAgents(parsed.entries, agents)].map(([n, refs]) => [n, refs.map((a) => print.transcript(a, agents))]),
   );
-  return { t, ctx: { prefix, agents: links, session: print.session } };
+  return { entries: parsed.entries, count: parsed.count, ctx: { prefix, agents: links, session: print.session } };
 }
 
 /**
@@ -105,13 +132,13 @@ export function commentsOnly(result: string): string {
 }
 
 /** How many entries a transcript has; an unreadable file is a LocalError naming it. */
-export async function entryCount(ref: TranscriptRef): Promise<number> {
-  return transcriptAsOf(await readBytes(ref)).transcript.entries.length;
+export function entryCount(ref: TranscriptRef): number {
+  return transcriptAsOf(readBytes(ref)).transcript.entries.length;
 }
 
 /** The entries in the range; a range past the end clamps, one that starts past it is an error. */
 export function selectRange(loaded: LoadedTranscript, r: Range): Array<Entry> {
-  const { entries } = loaded.t;
+  const { entries } = loaded;
   if (r.from > entries.length) {
     const text = r.to === undefined ? `${r.from}-` : r.to === r.from ? `${r.from}` : `${r.from}-${r.to}`;
     throw new LocalError(localErrors.outOfRange(text, loaded.ctx.prefix, entries.length));

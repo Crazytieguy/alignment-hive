@@ -62,6 +62,8 @@ const COMMANDS = new Map<string, () => Promise<number>>([
   ['registry-backfill', async () => (await import('./commands/registry-backfill')).registryBackfill()],
   ['login', async () => (await import('./commands/login')).login(process.argv.slice(3))],
   ['local', async () => (await import('./commands/local')).local()],
+  // Internal, run by the hive plugin's recall; deliberately absent from the usage line.
+  ['local-server', async () => (await import('./commands/local-server')).localServer(process.argv.slice(3))],
   ['debrief', async () => (await import('./commands/debrief')).reviewCommand(process.argv.slice(3))],
   [
     'consent',

@@ -18,8 +18,9 @@ import {
 import { LocatorError, parseLocator, parseRange, projectDirs } from '../lib/locators';
 import { localErrors, localHelp, localNotes, localUsage } from '../lib/messages';
 import { makeProjectSessionFilter } from '../lib/session-state';
+import { requestCwd, requestEnv } from '../lib/request-context';
 import { snapshot } from '../lib/snapshot';
-import { writeLine } from '../lib/stdout';
+import { stderrRow, writeLine } from '../lib/stdout';
 import { cutoffTime } from '../lib/as-of';
 import { parseTimeSpec } from '../lib/time-filter';
 import { extractCwdFromFile, projectScanData, resolveTranscriptDirs } from '../lib/transcript-discovery';
@@ -80,8 +81,6 @@ export class LocalError extends Error {
 }
 
 export const emit = (row: unknown): void => writeLine(JSON.stringify(row));
-/** One JSON object per stderr line, so that `2>&1 | jq` still parses; never colored (console.error is, under FORCE_COLOR). */
-const stderrRow = (row: Record<string, string>): void => void process.stderr.write(`${JSON.stringify(row)}\n`);
 export const note = (text: string): void => stderrRow({ note: text });
 export const warn = (text: string): void => stderrRow({ warning: text });
 
@@ -155,8 +154,8 @@ export async function scopeOf(env: LocalEnv, args: Args): Promise<Scope> {
     typeof project === 'string'
       ? project.startsWith('~/')
         ? join(homedir(), project.slice(2))
-        : resolve(project)
-      : process.cwd();
+        : resolve(requestCwd(), project)
+      : requestCwd();
   if (statSync(path, { throwIfNoEntry: false })?.isDirectory() === false)
     throw new LocalError(localErrors.notADirectory(path));
   const transcripts = await env.project(path);
@@ -175,7 +174,7 @@ export async function scopeOf(env: LocalEnv, args: Args): Promise<Scope> {
 export function sessionLocator(text: string): Locator {
   const m = /^current(?=$|[/:])/.exec(text);
   if (!m) return parseLocator(text);
-  const id = process.env.CLAUDE_CODE_SESSION_ID;
+  const id = requestEnv('CLAUDE_CODE_SESSION_ID');
   if (!id) throw new LocalError(localErrors.noCurrentSession);
   return parseLocator(id + text.slice(m[0].length));
 }
@@ -242,12 +241,17 @@ export async function localCore(env: LocalEnv, argv: Array<string>): Promise<num
   }
 }
 
-/** Any other failure (a filesystem error, a bug) is an error row too, so stderr stays JSON. */
-export async function local(): Promise<number> {
+/**
+ * `hive local ARGV`, for the CLI and for `hive local-server` alike. Any other failure (a filesystem error, a bug) is an
+ * error row too, so stderr stays JSON.
+ */
+export async function runLocal(env: LocalEnv, argv: Array<string>): Promise<number> {
   try {
-    return await localCore(localEnv(), process.argv.slice(3));
+    return await localCore(env, argv);
   } catch (error) {
     stderrRow({ error: error instanceof Error ? error.message : String(error) });
     return 2;
   }
 }
+
+export const local = (): Promise<number> => runLocal(localEnv(), process.argv.slice(3));

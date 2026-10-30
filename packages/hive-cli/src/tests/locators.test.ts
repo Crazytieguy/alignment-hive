@@ -16,6 +16,7 @@ import {
   sessionAgents,
   sessionFiles,
 } from '../lib/locators';
+import { clearMemo, dirEntries, setMemoBudget } from '../lib/file-memo';
 import { locatorErrors } from '../lib/messages';
 import type { Entry } from '@alignment-hive/session-data';
 
@@ -169,6 +170,31 @@ describe('parseLocator and parseRange', () => {
 });
 
 describe('printing', () => {
+  test('a rebuilt session index does not keep the preceding listings alive', async () => {
+    clearMemo();
+    setMemoBudget(1 << 20);
+    try {
+      // A settled listing is shared by dirEntries and the index, so this weak reference observes the index's own.
+      await Bun.sleep(1100);
+      const rebuild = async () => {
+        const old = new WeakRef(await dirEntries(root));
+        await printer(root);
+        clearMemo();
+        await printer(root);
+        clearMemo();
+        return old;
+      };
+      const old = await rebuild();
+      // WeakRef keeps its target alive through the job that created it; collect in a later one.
+      await Bun.sleep(0);
+      Bun.gc(true);
+      expect(old.deref()).toBeUndefined();
+    } finally {
+      clearMemo();
+      setMemoBudget(0);
+    }
+  });
+
   test('printed and canonical forms', () => {
     const agent = { session: S1, agentId: AGENT };
     expect(formatLocator({ session: S1 }, 148)).toBe('a4eff20e:148');
@@ -242,7 +268,9 @@ describe('resolveTranscript', () => {
     expect((await failure('wf_zz/agent-a79f')).message).toBe(
       'no Workflow run matching "wf_zz" has an agent matching "agent-a79f"',
     );
-    expect((await failure('c0ffee00/wf_ec55/agent-ffff')).message).toBe('no agent of session c0ffee00 matches "agent-ffff"');
+    expect((await failure('c0ffee00/wf_ec55/agent-ffff')).message).toBe(
+      'no agent of session c0ffee00 matches "agent-ffff"',
+    );
   });
 
   test('an id two Workflow runs share needs its run; a full id beats the longer id it prefixes', async () => {

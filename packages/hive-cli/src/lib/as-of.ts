@@ -1,6 +1,7 @@
 import { leanRecord, numbersFor, readRecords, readTranscript } from '@alignment-hive/session-data';
 import { LocalError } from '../commands/local';
 import { localErrors } from './messages';
+import { requestEnv } from './request-context';
 import type { RawRecord, Transcript } from '@alignment-hive/session-data';
 
 // An evaluation hook, left out of the help: HIVE_LOCAL_CUTOFF (an ISO time) makes every verb read the
@@ -8,7 +9,7 @@ import type { RawRecord, Transcript } from '@alignment-hive/session-data';
 
 /** HIVE_LOCAL_CUTOFF in ms, or undefined when unset; a value that is not a time is a LocalError. */
 export function cutoffTime(): number | undefined {
-  const v = process.env.HIVE_LOCAL_CUTOFF;
+  const v = requestEnv('HIVE_LOCAL_CUTOFF');
   if (!v) return undefined;
   const t = Date.parse(v);
   if (Number.isNaN(t)) throw new LocalError(localErrors.badCutoff(v));

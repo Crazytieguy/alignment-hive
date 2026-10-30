@@ -64,10 +64,14 @@ const REQUEST_BYTES = ascii(REQUEST_PREFIX);
  * calls. Each line's text is garbage once parsed, as is what `map` drops, and left to itself Bun
  * collected too late: that garbage grew past twice what a parse keeps. A line whose toolUseResult is
  * skipped counts its bytes, skipped ones included: counted as less, collections came later, and
- * `show` of a 36 MB transcript peaked 10 MB higher.
+ * `show` of a 36 MB transcript peaked 10 MB higher. In `hive local-server`, which keeps values across
+ * requests, they took 75 ms of a 930 ms cold fill and held its peak RSS at 67 MB, against 350 MB without.
  */
 const COLLECT_EVERY = 16 * 2 ** 20;
 let parsed = 0;
+
+/** Time spent in forced collections so far, in ms. */
+export const forcedCollections = { ms: 0 };
 
 /**
  * Parse JSONL text, or a file's bytes, into records, each passed through `map`. Bytes are decoded
@@ -139,7 +143,9 @@ export function readRecords(
     parsed += length;
     if (parsed >= COLLECT_EVERY && typeof Bun !== 'undefined') {
       parsed = 0;
+      const began = performance.now();
       Bun.gc(true);
+      forcedCollections.ms += performance.now() - began;
     }
     if (end < 0) break;
     start = end + 1;

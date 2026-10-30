@@ -4,9 +4,10 @@
 // what they find in the transcripts-dirs registry; `hive local` resolves without writing.
 
 import { execSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseTranscript } from '@alignment-hive/session-data';
+import { dirEntriesSync, fileFact, onFile, readAt } from './file-memo';
 import {
   addTranscriptsDirs,
   claudeProjectDirPrefix,
@@ -16,6 +17,7 @@ import {
   listWorktreePaths,
   loadTranscriptsDirs,
 } from './config';
+import type { FileView } from './file-memo';
 
 /** Extract cwd from a JSONL line. Returns null if the line doesn't contain a valid cwd. */
 export function parseCwdFromLine(line: string): string | null {
@@ -42,30 +44,30 @@ export function extractCwds(content: string): Set<string> {
 const HEAD_READ_BYTES = 8192;
 const HEAD_READ_MAX = 1024 * 1024;
 
+/** Read a file line by line from the start, stopping at the first line for which `find` returns a value. */
+function findInHead<T>(view: FileView, find: (line: string) => T | null): T | null {
+  const buf = Buffer.alloc(HEAD_READ_BYTES);
+  let carry = '';
+  for (let pos = 0; pos < HEAD_READ_MAX; pos += HEAD_READ_BYTES) {
+    const bytesRead = readAt(view, buf, 0, HEAD_READ_BYTES, pos);
+    if (bytesRead === 0) break;
+    const lines = (carry + buf.toString('utf-8', 0, bytesRead)).split('\n');
+    carry = lines.pop() ?? '';
+    for (const line of lines) {
+      const found = find(line);
+      if (found !== null) return found;
+    }
+  }
+  return carry ? find(carry) : null;
+}
+
 /**
  * Read a file line by line from the start, stopping at the first line for which `find`
  * returns a value. Reads at most HEAD_READ_MAX bytes. Null on no match or unreadable file.
  */
 export function findInFileHead<T>(filePath: string, find: (line: string) => T | null): T | null {
   try {
-    const fd = openSync(filePath, 'r');
-    try {
-      const buf = Buffer.alloc(HEAD_READ_BYTES);
-      let carry = '';
-      for (let pos = 0; pos < HEAD_READ_MAX; pos += HEAD_READ_BYTES) {
-        const bytesRead = readSync(fd, buf, 0, HEAD_READ_BYTES, pos);
-        if (bytesRead === 0) break;
-        const lines = (carry + buf.toString('utf-8', 0, bytesRead)).split('\n');
-        carry = lines.pop() ?? '';
-        for (const line of lines) {
-          const found = find(line);
-          if (found !== null) return found;
-        }
-      }
-      return carry ? find(carry) : null;
-    } finally {
-      closeSync(fd);
-    }
+    return onFile(filePath, (view) => findInHead(view, find));
   } catch {
     return null;
   }
@@ -77,7 +79,11 @@ export function findInFileHead<T>(filePath: string, find: (line: string) => T | 
  * so this reads until a whole line is available rather than a fixed prefix.
  */
 export function extractCwdFromFile(filePath: string): string | null {
-  return findInFileHead(filePath, parseCwdFromLine);
+  try {
+    return fileFact('cwd', filePath, (view) => findInHead(view, parseCwdFromLine));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -89,7 +95,7 @@ export function extractCwdFromFile(filePath: string): string | null {
 export function extractCwd(projectDir: string): string | null {
   let entries: Array<string>;
   try {
-    entries = readdirSync(projectDir);
+    entries = dirEntriesSync(projectDir).map((e) => e.name);
   } catch {
     return null; // unreadable directory
   }
@@ -103,7 +109,7 @@ export function extractCwd(projectDir: string): string | null {
     const subagentsDir = join(projectDir, entry, 'subagents');
     let agentFiles: Array<string>;
     try {
-      agentFiles = readdirSync(subagentsDir);
+      agentFiles = dirEntriesSync(subagentsDir).map((e) => e.name);
     } catch {
       continue; // a plain file, or a session dir without agents
     }
@@ -183,7 +189,7 @@ export interface TranscriptScanData {
 function scanCwds(root: string, keep: (name: string) => boolean = () => true): Map<string, string> {
   const cwdMap = new Map<string, string>();
   try {
-    for (const entry of readdirSync(root, { withFileTypes: true })) {
+    for (const entry of dirEntriesSync(root)) {
       if (!entry.isDirectory() || !keep(entry.name)) continue;
       const transcriptDir = join(root, entry.name);
       const cwd = extractCwd(transcriptDir);

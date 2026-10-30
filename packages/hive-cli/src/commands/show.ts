@@ -1,12 +1,22 @@
 import { hiddenBy, inOutline, isRecall } from '@alignment-hive/session-data';
+import { fileFact } from '../lib/file-memo';
 import { printer, resolveTranscript, sameAgentFiles, sessionAgents } from '../lib/locators';
 import { boundItems, clipEach, clipToFirstLine, entryRow, hiddenCounts } from '../lib/local-rows';
-import { entryCount, loadTranscript, readBytes, selectRange } from '../lib/local-transcript';
+import {
+  bytesOf,
+  entryCount,
+  loadTranscript,
+  readBytes,
+  selectRange,
+  transcriptOf,
+  unreadable,
+} from '../lib/local-transcript';
 import { localErrors, localNotes } from '../lib/messages';
+import { pausePoint } from '../lib/request-context';
 import { LocalError, emit, note, numberFlag, sessionArguments, sessionLocator } from './local';
 import type { Entry } from '@alignment-hive/session-data';
 import type { Locator, TranscriptRef } from '../lib/locators';
-import type { LoadedTranscript } from '../lib/local-transcript';
+import type { LoadedTranscript, Parsed } from '../lib/local-transcript';
 import type { Args, LocalEnv } from './local';
 
 /** A tool input prints about this many times the clip at most; later items are counted instead. */
@@ -15,6 +25,26 @@ const INPUT_CLIPS = 3;
 const OUTLINE_AGENTS = 5;
 /** Calls that start agents: their result is a launch notice or the agent's report, so outline leaves it out. */
 const STARTS_AGENTS: ReadonlyArray<string> = ['Agent', 'Task', 'Workflow'];
+
+/** Whether an outline prints the entry: with `replies`, the assistant's replies too. */
+const outlines = (e: Entry, startsAgents: boolean, agentTranscript: boolean, replies: boolean): boolean =>
+  inOutline(e, startsAgents, agentTranscript) || (replies && e.kind === 'assistant');
+
+/**
+ * What an outline without agents (--no-agents) can print of a transcript file, with or without --replies.
+ * `hive local-server` keeps it for each file (file-memo.ts); which entries print, hiding and clipping stay per call.
+ */
+function outlineEntries(ref: TranscriptRef): Parsed {
+  const agentTranscript = ref.agentId !== undefined;
+  try {
+    return fileFact(`outline:${agentTranscript ? 'agent' : 'session'}`, ref.path, (view, id) => {
+      const parsed = transcriptOf(bytesOf(ref.path, view, id));
+      return { ...parsed, entries: parsed.entries.filter((e) => outlines(e, false, agentTranscript, true)) };
+    });
+  } catch (error) {
+    throw unreadable(ref, error);
+  }
+}
 
 interface Loaded {
   ref: TranscriptRef;
@@ -52,7 +82,8 @@ async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'):
     let t = transcripts.get(ref.path);
     if (!t) {
       const agents = agentless && ref.agentId === undefined ? [] : await sessionAgents(env.root, ref.session);
-      const loaded = loadTranscript(ref, await readBytes(ref), agents, print);
+      const parsed = verb === 'outline' && agentless ? outlineEntries(ref) : transcriptOf(readBytes(ref));
+      const loaded = loadTranscript(ref, parsed, agents, print);
       if (agentless) loaded.ctx.agents.clear();
       t = { ref, agents, loaded, printed: new Set(), hidden: [] };
       transcripts.set(ref.path, t);
@@ -60,21 +91,17 @@ async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'):
     return t;
   };
   // Every locator and range is checked before the first row prints, so a bad one prints nothing.
-  const selections: Array<{ t: Loaded; entries: Array<Entry> }> = [];
+  const selections: Array<{ t: Loaded; entries: ReadonlyArray<Entry> }> = [];
   for (const locator of locators) {
+    await pausePoint();
     const t = await load(locator);
-    selections.push({ t, entries: locator.range ? selectRange(t.loaded, locator.range) : t.loaded.t.entries });
+    selections.push({ t, entries: locator.range ? selectRange(t.loaded, locator.range) : t.loaded.entries });
   }
   for (const { t, entries } of selections) {
     const agentTranscript = t.ref.agentId !== undefined;
     for (const e of entries) {
       if (t.printed.has(e.n)) continue;
-      if (
-        verb === 'outline' &&
-        !inOutline(e, t.loaded.ctx.agents.has(e.n), agentTranscript) &&
-        !(replies && e.kind === 'assistant')
-      )
-        continue;
+      if (verb === 'outline' && !outlines(e, t.loaded.ctx.agents.has(e.n), agentTranscript, replies)) continue;
       t.printed.add(e.n);
       const rule = hiddenBy(e);
       if (rule && !all) {
@@ -96,11 +123,11 @@ async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'):
   for (const { ref, agents, loaded, printed, hidden } of transcripts.values()) {
     const counts = hiddenCounts(hidden);
     const shown = printed.size - hidden.length;
-    note(localNotes.printed(loaded.ctx.prefix, loaded.t.entries.length, shown, counts.total, counts.text));
+    note(localNotes.printed(loaded.ctx.prefix, loaded.count, shown, counts.total, counts.text));
     // One agent in two files: link them on stderr, since an entry in either would renumber it.
     const { continues, continuedIn } = sameAgentFiles(ref, agents);
     for (const r of continues)
-      note(localNotes.continues(loaded.ctx.prefix, `${print.transcript(r, agents)}:${await entryCount(r)}`));
+      note(localNotes.continues(loaded.ctx.prefix, `${print.transcript(r, agents)}:${entryCount(r)}`));
     for (const r of continuedIn) note(localNotes.continuedIn(loaded.ctx.prefix, print.transcript(r, agents)));
   }
   return 0;

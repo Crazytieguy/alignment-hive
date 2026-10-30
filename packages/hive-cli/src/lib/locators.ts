@@ -10,8 +10,9 @@
  * the other as `SESSION/agent-ID`.
  */
 
-import { readdir, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
+import { dirEntries } from './file-memo';
 import { locatorErrors } from './messages';
 import { AGENT_PREFIX, findFlatAgents, isSessionFile, scanSubagentDir } from './session-io';
 import { remembered } from './snapshot';
@@ -184,9 +185,61 @@ export interface Printer {
   transcript: (ref: TranscriptRef, siblings?: ReadonlyArray<TranscriptRef>) => string;
 }
 
+/** Every session file under a root, by id (in listing order within one id), and the ids' printed lengths. */
+interface SessionIndex {
+  /** The listings of the root and its project dirs it was made from. */
+  listings: Array<ReadonlyArray<Dirent>>;
+  files: Array<TranscriptRef>;
+  lengths: () => Map<string, number>;
+}
+
+/**
+ * The last index made. `hive local-server` keeps a listing (the same array) while its directory is unchanged
+ * (file-memo.ts), so the same listings give the same index.
+ */
+let lastIndex: SessionIndex | undefined;
+
+function sessionIndex(root: string): Promise<SessionIndex> {
+  return remembered(`index:${root}`, () => readIndex(root));
+}
+
+async function readIndex(root: string): Promise<SessionIndex> {
+  const top = await listing(root);
+  const dirs = dirsIn(root, top);
+  const inDirs = await Promise.all(dirs.map(listing));
+  const listings = [top, ...inDirs];
+  const last = lastIndex;
+  if (last?.listings.length === listings.length && listings.every((l, i) => l === last.listings[i])) return last;
+  const files = dirs
+    .flatMap((dir, i) => sessionsIn(dir, inDirs[i]))
+    .sort((x, y) => (x.session < y.session ? -1 : x.session > y.session ? 1 : 0));
+  lastIndex = lazyIndex(listings, files);
+  return lastIndex;
+}
+
+/** Its own scope: the lazy lengths must not capture the preceding index from readIndex. */
+function lazyIndex(listings: SessionIndex['listings'], files: SessionIndex['files']): SessionIndex {
+  let lengths: Map<string, number> | undefined;
+  return { listings, files, lengths: () => (lengths ??= uniquePrefixLengths(files.map((r) => r.session))) };
+}
+
+/** The index's files whose session id starts with `prefix`, as sessionFiles finds them. */
+function sessionsStarting(index: SessionIndex, prefix: string): Array<TranscriptRef> {
+  const { files } = index;
+  let at = 0;
+  for (let hi = files.length; at < hi;) {
+    const mid = (at + hi) >> 1;
+    if (files[mid].session < prefix) at = mid + 1;
+    else hi = mid;
+  }
+  const found: Array<TranscriptRef> = [];
+  for (; at < files.length && files[at].session.startsWith(prefix); at++) found.push(files[at]);
+  return found;
+}
+
 /** Git-like abbreviation: 8 characters, longer where another session or sibling agent shares the prefix. */
 export async function printer(root: string): Promise<Printer> {
-  const lengths = uniquePrefixLengths((await sessionFiles(await projectDirs(root))).map((r) => r.session));
+  const lengths = (await sessionIndex(root)).lengths();
   return {
     session: (id) => id.slice(0, lengths.get(id) ?? 8),
     transcript: (ref, siblings = []) =>
@@ -198,32 +251,36 @@ export async function printer(root: string): Promise<Printer> {
   };
 }
 
-/** A directory's entries, once per snapshot (see snapshot.ts); none for a directory that cannot be read. */
+/**
+ * A directory's entries, once per snapshot (see snapshot.ts) and kept by `hive local-server` while the directory is
+ * unchanged (file-memo.ts); none for a directory that cannot be read.
+ */
 function listing(dir: string): Promise<ReadonlyArray<Dirent>> {
-  return remembered(`dir:${dir}`, () => readdir(dir, { withFileTypes: true }).catch(() => []));
+  return remembered(`dir:${dir}`, () => dirEntries(dir).catch(() => UNREADABLE));
 }
+const UNREADABLE: ReadonlyArray<Dirent> = [];
+
+/** The project dirs among the root's entries. */
+const dirsIn = (root: string, entries: ReadonlyArray<Dirent>): Array<string> =>
+  entries.filter((e) => e.isDirectory()).map((e) => join(root, e.name));
 
 /** Every project's transcript dir under the root (~/.claude/projects). */
 export async function projectDirs(root: string): Promise<Array<string>> {
-  return (await listing(root)).filter((e) => e.isDirectory()).map((e) => join(root, e.name));
+  return dirsIn(root, await listing(root));
 }
 
 /**
- * Session files in the given project dirs whose id starts with the prefix. No file is read. A name
- * no locator can spell is not a session: Claude Code's `<id>.orphaned-<time>-<hex>.jsonl` holds
- * only title records of the session `<id>`.
+ * The session files among one project dir's entries. A name no locator can spell is not a session:
+ * Claude Code's `<id>.orphaned-<time>-<hex>.jsonl` holds only title records of the session `<id>`.
  */
-export async function sessionFiles(dirs: Array<string>, prefix = ''): Promise<Array<TranscriptRef>> {
-  const found = await Promise.all(
-    dirs.map(async (dir) =>
-      (await listing(dir))
-        .filter(
-          (f) => f.isFile() && isSessionFile(f.name) && f.name.startsWith(prefix) && ID.test(basename(f.name, '.jsonl')),
-        )
-        .map((f) => ({ path: join(dir, f.name), session: basename(f.name, '.jsonl') })),
-    ),
-  );
-  return found.flat();
+const sessionsIn = (dir: string, entries: ReadonlyArray<Dirent>): Array<TranscriptRef> =>
+  entries
+    .filter((f) => isSessionFile(f.name) && f.isFile() && ID.test(basename(f.name, '.jsonl')))
+    .map((f) => ({ path: join(dir, f.name), session: basename(f.name, '.jsonl') }));
+
+/** Session files in the given project dirs (see sessionsIn). No file is read. */
+export async function sessionFiles(dirs: Array<string>): Promise<Array<TranscriptRef>> {
+  return (await Promise.all(dirs.map(async (dir) => sessionsIn(dir, await listing(dir))))).flat();
 }
 
 /** Legacy flat agent transcripts (`<dir>/agent-<id>.jsonl`) in one project dir, ids starting with the prefix. */
@@ -346,7 +403,7 @@ export async function resolveTranscript(l: Locator, root: string): Promise<Trans
         : locatorErrors.unknownAgent(typed, of);
     return preferred(named(kept, typed, none, isAgent(agent!)));
   };
-  const sessions = session ? await sessionFiles(await projectDirs(root), session) : [];
+  const sessions = session ? sessionsStarting(await sessionIndex(root), session) : [];
   if (session && agent !== undefined) {
     const id = named(sessions, session, locatorErrors.unknownSession(session), isSession)[0].session;
     return agentIn(await sessionAgents(root, id, agent), id);
@@ -393,7 +450,11 @@ export function linkAgents(
       ...(to.length >= 7 ? agents.flatMap((a, i) => (a.agentId?.startsWith(to) ? [i] : [])) : []),
     ]);
     // In the agents' order, as before indexing.
-    if (found.size) links.set(e.n, [...found].sort((x, y) => x - y).map((i) => agents[i]));
+    if (found.size)
+      links.set(
+        e.n,
+        [...found].sort((x, y) => x - y).map((i) => agents[i]),
+      );
   }
   return links;
 }

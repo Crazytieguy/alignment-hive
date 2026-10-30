@@ -3,9 +3,20 @@ import { hiddenBy, repeatsSession } from '@alignment-hive/session-data';
 import { agentsOf, printer, resolveTranscript, sessionAgents } from '../lib/locators';
 import { clipAround, clipFirstLine, entryRow, mapStrings } from '../lib/local-rows';
 import { escapeRegExp, mandatoryLiterals, mayMatch } from '../lib/grep-prefilter';
-import { loadTranscript, reusedBytes, selectRange } from '../lib/local-transcript';
+import { loadTranscript, reusedBytes, selectRange, transcriptOf } from '../lib/local-transcript';
 import { localErrors, localNotes } from '../lib/messages';
-import { LocalError, emit, inWindow, note, numberFlag, scopeOf, sessionLocator, spanInWindow, timeWindow, warn } from './local';
+import {
+  LocalError,
+  emit,
+  inWindow,
+  note,
+  numberFlag,
+  scopeOf,
+  sessionLocator,
+  spanInWindow,
+  timeWindow,
+  warn,
+} from './local';
 import { sessionsByActivity, sessionsIn } from './sessions';
 import type { Entry } from '@alignment-hive/session-data';
 import type { Range, TranscriptRef } from '../lib/locators';
@@ -184,7 +195,7 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
       else sessions++;
       let bytes;
       try {
-        bytes = await read(target.ref);
+        bytes = read(target.ref);
       } catch (error) {
         if (!(error instanceof LocalError)) throw error;
         warn(error.message);
@@ -192,9 +203,9 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
       }
       // Like the single-literal prefilter, alternations assume printable ASCII is written unescaped (no \uXXXX or \/).
       if (literals && !literals.some((l) => mayMatch(bytes, l, ignoreCase, re))) continue;
-      const loaded = loadTranscript(target.ref, bytes, group.agents, print);
+      const loaded = loadTranscript(target.ref, transcriptOf(bytes), group.agents, print);
       let k = 0;
-      for (const e of target.ranges ? inRanges(loaded, target.ranges) : loaded.t.entries) {
+      for (const e of target.ranges ? inRanges(loaded, target.ranges) : loaded.entries) {
         if (k >= max) break;
         if (!inWindow(e.time ? Date.parse(e.time) : undefined, w)) continue;
         const hits = search(e, re);

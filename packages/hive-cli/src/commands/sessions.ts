@@ -5,6 +5,7 @@ import { cutoffTime, transcriptAsOf } from '../lib/as-of';
 import { preferred, printer, sessionFiles } from '../lib/locators';
 import { clipToFirstLine, localTime } from '../lib/local-rows';
 import { localErrors, localNotes } from '../lib/messages';
+import { pausePoint } from '../lib/request-context';
 import { firstHumanMessage, sessionFacts, sessionPresence, sessionTitle, someEntry } from '../lib/session-facts';
 import { extractCwd, extractCwdFromFile } from '../lib/transcript-discovery';
 import { LocalError, emit, inWindow, note, numberFlag, scopeOf, spanInWindow, timeWindow } from './local';
@@ -30,6 +31,9 @@ function factsAsOf(f: SessionFacts): Facts {
   const end = asOf.entries.findLast((e) => e.time !== undefined)?.time;
   return { ...f, end: end ? Date.parse(end) : undefined, branch: asOf.branch, asOf };
 }
+
+/** Files read between points where a server's other requests may run (see request-context.ts). */
+const PAUSE_EVERY = 64;
 
 /** Newest first: by last entry time, then first. */
 const byActivity = (a: SessionFacts, b: SessionFacts): number =>
@@ -77,7 +81,8 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
   let counted = 0;
   /** The `limit` latest ends among the listed sessions read so far, latest first. */
   const latest: Array<number> = [];
-  for (const { ref, order, written } of files) {
+  for (const [i, { ref, order, written }] of files.entries()) {
+    if (i % PAUSE_EVERY === PAUSE_EVERY - 1) await pausePoint();
     if (!windowed && (limit === 0 || (latest.length >= limit && latest[limit - 1] > written))) {
       const p = sessionPresence(ref);
       if (p.timed && !humanOf(p)?.empty) counted++;
