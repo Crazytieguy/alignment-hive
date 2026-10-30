@@ -10,7 +10,8 @@ import { BENCH, BIN, CLAUDE_ENV, CWD, PROJECT } from './env';
 import { index } from './score4';
 
 // Round 6: the shipped prompt and history (chunked by content, sessions read until the budget is covered).
-type Variant = { model: string; budget?: number };
+// `effort` reaches the model: claude -p sends adaptive thinking, so CLIProxyAPI passes it on (low unless set).
+type Variant = { model: string; budget?: number; effort?: string };
 const VARIANTS: Record<string, Variant> = {
   'recall6-sol': { model: 'gpt-6.1-sol' },
   'recall6-sol-1200k': { model: 'gpt-6.1-sol', budget: 1_200_000 },
@@ -29,6 +30,12 @@ const VARIANTS: Record<string, Variant> = {
   // quotes parse), which earlier rounds overcounted.
   'recall9-sol': { model: 'gpt-6.1-sol' },
   'recall9-sonnet': { model: 'claude-sonnet-5-5' },
+  // Round 10: GPT-6.1 Terra against Sol at medium, the effort the plugin's call really gets (it sends no thinking block,
+  // so CLIProxyAPI runs it at its default whatever the plugin asks); rounds up to 9 ran at low. Terra at low pairs with
+  // recall9-sol.
+  'recall10-sol-medium': { model: 'gpt-6.1-sol', effort: 'medium' },
+  'recall10-terra-medium': { model: 'gpt-6.1-terra', effort: 'medium' },
+  'recall10-terra': { model: 'gpt-6.1-terra' },
 };
 const SETTINGS = join(BENCH, 'settings.json');
 
@@ -90,7 +97,7 @@ async function runOne(c: (typeof index)[number], name: string, v: Variant): Prom
   const t0 = performance.now();
   const r = await run(
     'claude',
-    ['-p', '--model', v.model, '--effort', 'low', '--system-prompt', INSTRUCTIONS, '--tools', '', '--strict-mcp-config', '--setting-sources', 'project', '--settings', SETTINGS, '--output-format', 'json'],
+    ['-p', '--model', v.model, '--effort', v.effort ?? 'low', '--system-prompt', INSTRUCTIONS, '--tools', '', '--strict-mcp-config', '--setting-sources', 'project', '--settings', SETTINGS, '--output-format', 'json'],
     // A Claude model would write the whole prompt to the cache, which no later case reads.
     { ...CLAUDE_ENV, DISABLE_PROMPT_CACHING: '1' },
     text,
