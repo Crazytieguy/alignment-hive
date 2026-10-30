@@ -187,7 +187,7 @@ function quoted(text: string): string {
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    cli.projectDir = e.cwd
+    cli.projectDir = await $.session.root()
     inBackground(refresh($))
     return started
   })

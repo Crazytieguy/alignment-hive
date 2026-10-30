@@ -18,11 +18,14 @@ function world(on: On, { isSolMissing = false } = {}) {
   const asked: Array<string> = []
   const contexts: Array<ReadonlyArray<string>> = []
   const timeouts: Array<number | undefined> = []
+  // The directory each CLI read ran in.
+  const dirs: Array<string | undefined> = []
   // `transcript`: this session's rows as `hive local outline SESSION --uuids` reads them; `readBacks` counts those reads.
   const state = { hold: false, isCliSlow: false, isCliFailing: false, isProjectNew: false, isSessionGone: false, recalledBefore: false, reply: REPLY, isDropped: false, transcript: [] as Array<unknown>, readBacks: 0 }
   const clock = mock.clock(on, { now: NOW })
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('session.id', async () => ({ value: SESSION }))
+  on('session.root', async () => ({ value: '/tmp/project' }))
   on('prompt.submit', async (_$, e) => {
     contexts.push(e.context ?? [])
     return (state.isDropped ? { drop: 'a settings hook refused it' } : { text: e.text }) as never
@@ -51,6 +54,7 @@ function world(on: On, { isSolMissing = false } = {}) {
   })
   // Streamed in pieces that cut lines, as a pipe does.
   on('process.spawn', async function* (_$, e) {
+    dirs.push(e.cwd)
     if (state.isCliSlow) await clock.sleep(60_000)
     const stdout = cli(e.argv.slice(2)).map(r => JSON.stringify(r)).join('\n')
     for (let i = 0; i < stdout.length; i += 7) yield { stream: 'stdout' as const, text: stdout.slice(i, i + 7) }
@@ -68,7 +72,7 @@ function world(on: On, { isSolMissing = false } = {}) {
   })
   on('ui.status', async () => ({ value: undefined }) as never)
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
-  return { asked, contexts, clock, state, timeouts }
+  return { asked, contexts, clock, dirs, state, timeouts }
 }
 
 const start = ($: Parameters<Parameters<typeof test>[1]>[0]) => $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
@@ -161,6 +165,16 @@ describe('automatic recall', () => {
     await $.prompt.submit(typed('Format the file.'))
     expect(asked).toEqual([])
     expect(contexts).toEqual([[]])
+  })
+
+  test('on: the CLI reads the project the session started in, wherever a shell cd took it', { options: { recall: true } }, async ($, on) => {
+    const { contexts, dirs } = world(on)
+    on('session.cwd', async () => ({ value: '/tmp/project/notes' }))
+    await start($)
+    await $.prompt.submit(typed('Format the file.'))
+    expect(contexts[0]?.join('')).toContain('> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)')
+    expect(dirs.length).toBeGreaterThan(0)
+    expect(new Set(dirs)).toEqual(new Set(['/tmp/project']))
   })
 
   test('on: a CLI read that fails partway is no history at all', { options: { recall: true } }, async ($, on) => {

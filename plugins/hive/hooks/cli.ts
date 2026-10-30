@@ -7,15 +7,17 @@ function argv($: EngineInterface, args: string[]) {
   return ['bash', `${$.plugin.root}/scripts/hive.sh`, ...args]
 }
 
-// NO_COLOR: the CLI's words reach a toast, not a terminal. Before session.start sets projectDir (a resumed session
-// draws its rows first), the session's cwd is still the directory it started in.
-async function env($: EngineInterface) {
-  return { CLAUDE_PLUGIN_ROOT: $.plugin.root, CLAUDE_PROJECT_DIR: cli.projectDir || (await $.session.cwd()), NO_COLOR: '1' }
+// The CLI reads the project from its working directory, which must not follow a shell `cd`: a session started in ~
+// keeps every `cd` beneath it. Before session.start sets projectDir (a resumed session draws its rows first), the
+// session's root is still the directory it started in. NO_COLOR: the CLI's words reach a toast, not a terminal.
+async function init($: EngineInterface) {
+  const dir = cli.projectDir || (await $.session.root())
+  return { cwd: dir, env: { CLAUDE_PLUGIN_ROOT: $.plugin.root, CLAUDE_PROJECT_DIR: dir, NO_COLOR: '1' } }
 }
 
-/** Runs the CLI this plugin pins (scripts/hive.sh) in the session's working directory. */
+/** Runs the CLI this plugin pins (scripts/hive.sh) in the directory the session started in. */
 export async function hive($: EngineInterface, args: string[]) {
-  return $.process.run(argv($, args), { env: await env($), timeoutMs: 60_000 })
+  return $.process.run(argv($, args), { ...(await init($)), timeoutMs: 60_000 })
 }
 
 /** The CLI exited unsuccessfully; `hasRows`: it printed rows first. */
@@ -45,7 +47,7 @@ export async function hiveRows($: EngineInterface, args: string[], signal?: Abor
   }
   signal?.throwIfAborted()
   const stopped = new Promise<never>((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))
-  const child = $.process.spawn({ argv: argv($, args), env: await env($) })
+  const child = $.process.spawn({ argv: argv($, args), ...(await init($)) })
   // It rejects when the child is ended early; the loop below reads how it ended.
   child.result.catch(() => undefined)
   let rest = ''

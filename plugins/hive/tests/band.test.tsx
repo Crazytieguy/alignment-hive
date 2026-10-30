@@ -33,6 +33,7 @@ function fakeHive(on: On, knownFrom = 1) {
   const clock = mock.clock(on)
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('session.id', async () => ({ value: 'abc' }))
+  on('session.root', async () => ({ value: '/tmp/project' }))
   on('turn.complete', async () => ({ text: '' }) as never)
   on('prompt.submit', async (_$, e) => ({ text: e.text }) as never)
   on('ui.toast', async (_$, e) => {
