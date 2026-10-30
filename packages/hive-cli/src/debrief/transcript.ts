@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises';
 import { hiddenBy, isHumanMessage, parseTranscript } from '@alignment-hive/session-data';
 import { claudeProjectsRoot } from '../lib/config';
+import { commentThreads, commentsOnly } from '../lib/local-transcript';
 import { LocatorError, canonicalLocator, parseLocator, resolveTranscript } from '../lib/locators';
 import { review as msg } from '../lib/messages';
 import type { Capture } from './capture';
@@ -11,7 +12,7 @@ import type { Locator, TranscriptRef } from '../lib/locators';
 
 type TranscriptRole = 'user' | 'asst' | 'agent' | 'tool';
 type TranscriptSource = 'parent' | 'subagent';
-interface Located { ref: TranscriptRef; source: TranscriptSource; entry: Entry }
+interface Located { ref: TranscriptRef; source: TranscriptSource; entry: Entry; item?: string }
 /** One entry of this debrief's session or one of its agents, as the shared parser reads it; `locator` is canonical. */
 export interface TranscriptEntry {
   locator: string; source: TranscriptSource; entry: Entry;
@@ -138,13 +139,20 @@ export class Transcripts {
     const parsed = parseLocator(locator);
     try { ref = await this.resolve(parsed); } catch (error) { throw error instanceof LocatorError ? new Error(error.message) : error; }
     if (ref.session !== this.session) throw new Error(msg.otherSession(locator));
-    const n = parsed.range!.from, entry = (await this.read(ref)).entries[n - 1] as Entry | undefined;
+    const { from: n, item } = parsed.range!;
+    const entry = (await this.read(ref)).entries[n - 1] as Entry | undefined;
     if (!entry) throw new Error(msg.entryNotFound(canonicalLocator(ref, n)));
-    return { ref, source: ref.agentId ? 'subagent' : 'parent', entry };
+    if (!item) return { ref, source: ref.agentId ? 'subagent' : 'parent', entry };
+    // One thread of a comments read, as `hive local` prints it.
+    const comments = entry.kind === 'tool' && entry.tool === 'ArtifactComments' && entry.result ? commentsOnly(entry.result) : '';
+    const thread = commentThreads(comments)?.find((t) => t.id === item);
+    if (!thread || entry.kind !== 'tool') throw new Error(msg.entryNotFound(`${canonicalLocator(ref, n)}#${item}`));
+    return { ref, source: ref.agentId ? 'subagent' : 'parent', entry: { ...entry, result: thread.text }, item };
   }
   async entry(locator: string, summary: string): Promise<TranscriptEntry> {
-    const { ref, source, entry } = await this.locate(locator);
-    return { locator: canonicalLocator(ref, entry.n), transcript: canonicalLocator(ref), source, entry, ...display(entry, source === 'subagent'), summary };
+    const { ref, source, entry, item } = await this.locate(locator);
+    const at = `${canonicalLocator(ref, entry.n)}${item ? `#${item}` : ''}`;
+    return { locator: at, transcript: canonicalLocator(ref), source, entry, ...display(entry, source === 'subagent'), summary };
   }
   /** A Write call, with its path and content as recorded. */
   async written(locator: string): Promise<WrittenFile> {

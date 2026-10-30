@@ -24,6 +24,8 @@ export interface Range {
   from: number;
   /** Undefined: to the end. */
   to?: number;
+  /** `N#ITEM`: one item of entry N, a thread of an ArtifactComments read. */
+  item?: string;
 }
 
 export interface Locator {
@@ -44,15 +46,16 @@ export interface TranscriptRef extends RawSessionRef {
 /** A locator that does not parse or names no single transcript; the message names the cause. */
 export class LocatorError extends Error {}
 
-const RANGE = /^(\d+)(?:-(\d*))?$/;
+const RANGE = /^(\d+)(?:-(\d*)|#([0-9a-f]{8}))?$/;
 
-/** `N`, `N-M` or `N-` (to the end). `M` past the end is the caller's to clamp. */
+/** `N`, `N-M`, `N-` (to the end) or `N#ITEM`. `M` past the end is the caller's to clamp. */
 export function parseRange(text: string): Range {
   const m = RANGE.exec(text);
   const from = Number(m?.[1]);
   const to = m?.[2] ? Number(m[2]) : undefined;
   if (!m || !Number.isSafeInteger(from) || from < 1 || (to !== undefined && (!Number.isSafeInteger(to) || to < from)))
     throw new LocatorError(locatorErrors.badRange(text));
+  if (m[3]) return { from, to: from, item: m[3] };
   return m[2] === '' ? { from } : { from, to: to ?? from };
 }
 

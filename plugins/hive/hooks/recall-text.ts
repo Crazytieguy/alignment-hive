@@ -19,9 +19,9 @@ export type Row = {
 }
 export type Session = { loc: string; rows: ReadonlyArray<Row> }
 /** A row of `hive local sessions`. */
-export type Listed = { loc: string; end?: string }
+export type Listed = { loc: string; end?: string; scripted?: boolean }
 
-/** What one message or reply keeps, in characters: the reader sees this much, and the main agent the same. */
+/** What one reply or answer keeps, in characters (a message the user typed keeps all of it): the reader sees this much, and the main agent the same. */
 export const CLIP = 6_000
 /**
  * The history's size in characters: about 300k tokens either way (2.7 characters a Claude token here, 4 a GPT token).
@@ -33,7 +33,7 @@ const CHUNKS_PER_BUDGET = 8
 
 const clip = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, n)} [+${s.length - n} chars]`)
 const sessionOf = (loc: string) => loc.split(/[:/]/)[0]!
-const entryNumber = (loc: string) => Number(loc.slice(loc.lastIndexOf(':') + 1))
+const entryNumber = (loc: string) => parseInt(loc.slice(loc.lastIndexOf(':') + 1), 10)
 
 /** Pasted text (Claude Code wraps it in <pasted_content>) keeps its opening lines: the user's own words go first. */
 export const collapsePasted = (s: string): string =>
@@ -57,7 +57,7 @@ export function quotesIn(report: string): Array<Quote> {
       .map(l => l.replace(/^> ?/, ''))
       .join('\n')
     const m = /^\[([^\]]+)\]\s*([\s\S]*?)\s*\(([^()]*)\)\s*$/.exec(quote)
-    const loc = m && /(?<![0-9a-f])[0-9a-f]{8}(?:\/[\w-]+)*:\d+/.exec(m[3]!)
+    const loc = m && /(?<![0-9a-f])[0-9a-f]{8}(?:\/[\w-]+)*:\d+(?:#[0-9a-f]{8})?/.exec(m[3]!)
     if (m && loc) out.push({ kind: m[1]!, text: m[2]!, loc: loc[0], date: /\d{4}-\d{2}-\d{2}/.exec(m[3]!)?.[0] ?? '' })
   }
   return out
@@ -69,6 +69,16 @@ const plain = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
 const ELIDED = /\[\+\d+ chars\]|\[pasted, \+\d+ chars\]|\[\s*(?:\.\.\.|…)\s*\]|\.\.\.|…|["“”]/
 // ArtifactComments starts each line of a comment with an id.
 const COMMENT_LINE = /^[ \t]*[0-9a-f]{8}\| ?/gm
+
+/**
+ * A comment thread as a later read repeats it: without the read's line markers, the thread's status line (whether it
+ * is open or carried from an earlier version of the page) and the anchored element's text, which reads of a carried
+ * thread leave out. A format this misses only repeats the thread.
+ */
+const threadKey = (thread: string) =>
+  thread.replace(COMMENT_LINE, '').replace(/^ {2}(?:open|resolved)\b.*\n?/m, '').replace(/^ {2}\[anchored element\].*\n?/m, '')
+/** An entry's thread as threadKey keys it, for an entry of one comment thread (`N#THREAD`). */
+const threadOf = (loc: string, text: string) => (loc.includes('#') ? threadKey(text) : undefined)
 
 /** An entry's text in each form a quote of it may take: as recorded, its pasted text collapsed, its comment ids gone. */
 const quotableOf = (entry: string) => [...new Set([entry, collapsePasted(entry), entry.replace(COMMENT_LINE, '')])].map(plain)
@@ -82,7 +92,7 @@ function isQuoteOf(quote: string, texts: ReadonlyArray<string>): boolean {
 /** A row's label and text in the history, or undefined for a row it leaves out. */
 function shown(r: Row, n: number): { label: string; text: string } | undefined {
   const s = label(r)
-  return s && { ...s, text: s.label === 'recall' ? s.text : clip(s.text, n) }
+  return s && { ...s, text: s.label === 'recall' || s.label === 'user' ? s.text : clip(s.text, n) }
 }
 
 /** What an entry takes of the budget. */
@@ -96,9 +106,9 @@ function label(r: Row): { label: string; text: string } | undefined {
   }
   if (r.kind === 'user' && !r.origin && r.text) return { label: 'user', text: collapsePasted(r.text) }
   if (r.kind === 'assistant' && r.text) return { label: 'assistant', text: r.text }
-  // The human's answers to questions and comments on pages.
-  if (r.kind === 'tool' && (r.tool === 'AskUserQuestion' || r.tool === 'ArtifactComments') && r.result)
-    return { label: 'user answer', text: r.result }
+  // The human's answers to questions, and comments on pages: a thread a row, or a whole read the CLI could not split.
+  if (r.kind === 'tool' && r.tool === 'AskUserQuestion' && r.result) return { label: 'user answer', text: r.result }
+  if (r.kind === 'tool' && r.tool === 'ArtifactComments' && r.result) return { label: 'comments', text: r.result }
   if (r.kind === 'system' && r.subtype === 'compact_boundary') return { label: 'compaction', text: '' }
   return undefined
 }
@@ -165,14 +175,19 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
   // or a report quoting it) and as an `again` line after, so an appearance found further back takes over the whole
   // size, and the one it replaces costs an `again` line. A report adds its quotes alone.
   const counted = new Map<string, number>()
-  const once = (loc: string, size: number) => {
-    const later = counted.get(loc)
-    counted.set(loc, size)
-    return later === undefined ? size : size - later + againSize(loc)
+  const once = (key: string, size: number, again = againSize(key)) => {
+    const later = counted.get(key)
+    counted.set(key, size)
+    return later === undefined ? size : size - later + again
+  }
+  // A thread prints whole where it first appears, as a row or a quote, and as an `unchanged` line where it repeats.
+  const appearance = (loc: string, text: string) => {
+    const thread = threadOf(loc, text)
+    return thread === undefined ? once(loc, sizeOf(text)) : once(thread, sizeOf(text), 2 * againSize(loc))
   }
   const cost = (it: Item): number => {
-    if (it.label !== 'recall') return once(it.row.loc, sizeOf(it.text))
-    return it.quotes.length ? it.quotes.reduceRight((sum, q) => sum + once(q.loc, sizeOf(clip(q.text, n))), 40) : 0
+    if (it.label !== 'recall') return appearance(it.row.loc, it.text)
+    return it.quotes.length ? it.quotes.reduceRight((sum, q) => sum + appearance(q.loc, clip(q.text, n)), 40) : 0
   }
   // The window, newest back while it fits: the open chunk entry by entry, then closed chunks whole.
   const open = chunks.pop()!
@@ -190,20 +205,36 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
   // retrieval agent's slip, or a CLI that numbered entries differently): it would print under that entry's loc, or
   // hide the entry. Only the window's entries, so a check changes only when its entry's chunk leaves the window, which
   // changes the prompt's cached prefix anyway.
-  const inWindow = new Map(units.slice(from).flat().map(it => [it.row.loc, it.row] as const))
+  // A comments read the CLI splits into threads is the text of all of them, for a quote that cites the read.
+  const inWindow = new Map<string, string>()
+  for (const it of units.slice(from).flat()) {
+    const text = (it.row.kind === 'tool' ? it.row.result : it.row.text) ?? ''
+    const read = it.row.loc.split('#')[0]!
+    inWindow.set(it.row.loc, text)
+    if (read !== it.row.loc) inWindow.set(read, `${inWindow.get(read) ?? ''}\n${text}`)
+  }
   // Each entry's quotable forms, made once: reports quote the same entries again and again.
   const quotable = new Map<string, ReadonlyArray<string>>()
   const isPlaced = (q: Quote) => {
-    const row = inWindow.get(q.loc)
-    if (!row) return true
+    const text = inWindow.get(q.loc)
+    if (text === undefined) return true
     let texts = quotable.get(q.loc)
-    if (!texts) quotable.set(q.loc, (texts = quotableOf((row.kind === 'tool' ? row.result : row.text) ?? '')))
+    if (!texts) quotable.set(q.loc, (texts = quotableOf(text)))
     return isQuoteOf(q.text, texts)
   }
 
   const seen = new Map<string, Seen>()
   const compactedAt = Math.max(0, ...items.filter(it => it.session === current && it.label === 'compaction').map(it => entryNumber(it.row.loc)))
   const recalledHere = new Set<string>()
+  /** Each thread's first appearance in the window. */
+  const firstRead = new Map<string, string>()
+  /** Where a thread appeared before, if it did; else this appearance is its first. */
+  const firstOf = (loc: string, text: string) => {
+    const thread = threadOf(loc, text)
+    const first = thread === undefined ? undefined : firstRead.get(thread)
+    if (thread !== undefined && first === undefined) firstRead.set(thread, loc)
+    return first
+  }
   const render = (chunk: Array<Item>): string => {
     const bySession = new Map<string, Array<string>>()
     for (const it of chunk) {
@@ -217,6 +248,8 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
             if (seen.has(q.loc)) return `  ${q.loc} again`
             const text = clip(q.text, n)
             seen.set(q.loc, { label: q.kind, text, date: q.date })
+            const first = firstOf(q.loc, text)
+            if (first !== undefined) return `  ${q.loc} unchanged since ${first}`
             return `  ${q.loc}${q.date && ` (${q.date})`} ${q.kind}: ${text}`
           })
           .join('\n')}`
@@ -225,7 +258,8 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
       } else {
         if (seen.has(it.row.loc)) continue // recalled above
         seen.set(it.row.loc, { label: it.label, text: it.text, date: (it.row.time ?? '').slice(0, 10) })
-        line = `[${it.row.loc}] ${it.label}: ${it.text}`
+        const first = firstOf(it.row.loc, it.text)
+        line = `[${it.row.loc}] ${it.label}: ${first === undefined ? it.text : `unchanged since ${first}`}`
       }
       const lines = bySession.get(it.session)
       if (lines) lines.push(line)
@@ -243,11 +277,15 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
   }
 }
 
-/** The sessions the history needs, newest first, outlined in batches until older ones cannot reach the window. */
+/**
+ * The sessions the history needs, newest first, outlined in batches until older ones cannot reach the window. Sessions
+ * a script ran are left out: their prompts are the script's, not the user's.
+ */
 export async function sessionsFor(listed: ReadonlyArray<Listed>, outline: (locs: Array<string>) => Promise<Array<Row>>, budget: number): Promise<Array<Session>> {
   const sessions: Array<Session> = []
-  for (let i = 0; i < listed.length; i += 20) {
-    const batch = listed.slice(i, i + 20)
+  const typed = listed.filter(s => !s.scripted)
+  for (let i = 0; i < typed.length; i += 20) {
+    const batch = typed.slice(i, i + 20)
     const rows = await outline(batch.map(s => s.loc))
     const bySession = new Map<string, Array<Row>>()
     for (const row of rows) {
@@ -258,11 +296,15 @@ export async function sessionsFor(listed: ReadonlyArray<Listed>, outline: (locs:
     }
     for (const s of batch) sessions.push({ loc: s.loc, rows: bySession.get(s.loc) ?? [] })
     // Every session not yet read ended before `oldest`: once what came after it fills the budget, none can enter.
-    // Reports count nothing here: what they quote mostly prints in its own row.
+    // Reports count nothing here: what they quote mostly prints in its own row. A thread counts once, as it prints.
     const oldest = Math.min(...batch.map(s => (s.end ? Date.parse(s.end) : Infinity)))
+    const threads = new Set<string>()
     const after = sessions.reduce((sum, s) => sum + s.rows.reduce((t, r) => {
       const e = r.time && Date.parse(r.time) >= oldest && !r.recall ? shown(r, CLIP) : undefined
-      return e ? t + sizeOf(e.text) : t
+      const thread = e && threadOf(r.loc, e.text)
+      if (!e || (thread !== undefined && threads.has(thread))) return t
+      if (thread !== undefined) threads.add(thread)
+      return t + sizeOf(e.text)
     }, 0), 0)
     if (after >= budget) break
   }
@@ -296,7 +338,7 @@ export function promptBlocks(h: History, session: string, prompt: string, isEver
 }
 
 // A cited line: `- <loc> | <context>`, as models write it: the loc maybe in brackets or backticks.
-const CITE = /^\s*-\s*[[`]?([0-9a-f]{8}(?:\/[\w-]+)*:\d+)[\]`]?\s*(?:\|(.*))?$/
+const CITE = /^\s*-\s*[[`]?([0-9a-f]{8}(?:\/[\w-]+)*:\d+(?:#[0-9a-f]{8})?)[\]`]?\s*(?:\|(.*))?$/
 
 /** The reply's citations, in order, each loc once. */
 export function citations(reply: string): Array<{ loc: string; context: string }> {

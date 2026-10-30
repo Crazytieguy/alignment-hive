@@ -143,6 +143,8 @@ export interface SessionFacts extends SessionPresence {
   start?: number;
   end?: number;
   branch?: string;
+  /** Run by a script: Claude Code's entrypoint on the last record is sdk-cli (claude -p) or another sdk-. */
+  scripted?: boolean;
 }
 
 const ASSISTANT = '"type":"assistant"';
@@ -198,7 +200,14 @@ export function sessionFacts(ref: TranscriptRef, startOnUse = false): SessionFac
       return end === undefined ? undefined : { end, branch: t.branch };
     };
     const found = last(tail.toString('utf8')) ?? scan(view, 'tail', CHUNK * 16, last);
-    return { size: view.size, hasAssistant, end: found?.end, branch: found?.branch };
+    // A script's last record can be longer than the tail; files from before Claude Code wrote entrypoints have none,
+    // so the search stops at one longer read.
+    const entrypoint = (text: string) => [...text.matchAll(/"entrypoint":"([^"]*)"/g)].at(-1)?.[1];
+    const latest =
+      entrypoint(tail.toString('utf8')) ??
+      (view.size > CHUNK ? entrypoint(edge(view, CHUNK * 16, 'tail').text) : undefined);
+    const scripted = latest?.startsWith('sdk-') === true;
+    return { size: view.size, hasAssistant, end: found?.end, branch: found?.branch, scripted };
   });
   const { size } = ended;
   const facts: SessionFacts = { ref, size, hasAssistant: ended.hasAssistant };
@@ -210,6 +219,7 @@ export function sessionFacts(ref: TranscriptRef, startOnUse = false): SessionFac
   } else facts.start = start();
   facts.end = ended.end;
   facts.branch = ended.branch;
+  if (ended.scripted) facts.scripted = true;
   return facts;
 }
 

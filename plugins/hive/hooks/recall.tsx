@@ -207,7 +207,7 @@ export async function onPromptStored($: EngineInterface, e: Append[1], next: App
 type UserMessage = RenderInput<'UserMessage'>
 
 // Who wrote an entry, by its label in the history.
-const WHO: Record<string, string> = { user: 'You', assistant: 'Claude', 'user answer': 'Your answer' }
+const WHO: Record<string, string> = { user: 'You', assistant: 'Claude', 'user answer': 'Your answer', comments: 'Page comments' }
 
 /**
  * What recall gave a prompt, under it: a dim line counting the entries it found, drawn like the transcript's own

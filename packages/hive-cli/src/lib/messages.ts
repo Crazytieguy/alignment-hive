@@ -246,7 +246,7 @@ export const locatorErrors = {
     `bad locator "${text}": use SESSION, SESSION:N, SESSION/agent-ID:N or SESSION/wf_RUN/agent-ID:N`,
   unknownRun: (run: string, agent: string, session?: string): string =>
     `no Workflow run matching "${run}" has an agent matching "${agent}"${session ? ` in session ${session.slice(0, 8)}` : ''}`,
-  badRange: (text: string): string => `bad range "${text}": use N, N-M or N- (entries start at 1)`,
+  badRange: (text: string): string => `bad range "${text}": use N, N-M, N- or N#THREAD (entries start at 1)`,
   unknownSession: (prefix: string): string => `no session matches "${prefix}"`,
   unknownAgent: (prefix: string, session?: string): string =>
     session ? `no agent of session ${session.slice(0, 8)} matches "${prefix}"` : `no agent matches "${prefix}"`,
@@ -289,16 +289,18 @@ Output: JSON Lines on stdout, one entry per line. Keys that don't apply are left
   In an agent's transcript, user entries are messages from the session that started it.
   A user entry "[Request interrupted by user]" marks where the human stopped Claude; it is not typed text.
   The human also answers through tools: AskUserQuestion results, and ArtifactComments reads (comments on
-  artifact pages). outline lists both. An ArtifactComments result is cut to its comments.
+  artifact pages). outline lists both. An ArtifactComments result is cut to its comments, and show and outline
+  print a row per thread, loc SESSION:N#THREAD (THREAD: the first 8 characters of the thread's id).
   sessions rows: loc, start and end (times of its first and last entries; a fork starts at its own first
   entry, not the context it copied), branch, title (Claude Code's session title, if any), first (the first
-  human message, or slash command if none, clipped to its first line), and project with --all-projects.
+  human message, or slash command if none, clipped to its first line), scripted (true when a script ran it:
+  claude -p or the Agent SDK), and project with --all-projects.
   --brief leaves out start, title and first, faster. Sessions overlap in time. A session with no human message
   and no reply is not listed.
   jq selects rows: hive local show S | jq -c 'select(.tool=="Write")' lists a session's Write calls, and
   hive local show S | jq -r '.agents[]?' lists its agent transcripts.
 
-RANGE: N, N-M or N- (to the end); give several to print several. SESSION:N also works as one argument, and can be
+RANGE: N, N-M, N- (to the end) or N#THREAD; give several to print several. SESSION:N also works as one argument, and can be
   repeated; a bare RANGE is of the transcript named last.
 SESSION current: the session this runs in; in a subagent, the session that started it.
 Hidden unless --all-entries: empty thinking, routine system entries (timings, hook summaries, API retries,
@@ -355,6 +357,8 @@ export const localErrors = {
   badRegex: (pattern: string, message: string): string => `bad regex "${pattern}": ${message}`,
   outOfRange: (range: string, loc: string, total: number): string =>
     total ? `entry ${range} is out of range: ${loc} has entries 1-${total}` : `${loc} has no entries`,
+  noThread: (loc: string, thread: string): string =>
+    `${loc} has no comment thread ${thread}; show ${loc} prints the entry`,
   cannotRead: (path: string, message: string): string => `cannot read ${path}: ${message}`,
 };
 

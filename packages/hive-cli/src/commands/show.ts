@@ -4,6 +4,7 @@ import { printer, resolveTranscript, sameAgentFiles, sessionAgents } from '../li
 import { boundItems, clipEach, clipToFirstLine, entryRow, hiddenCounts } from '../lib/local-rows';
 import {
   bytesOf,
+  commentThreads,
   entryCount,
   loadTranscript,
   readBytes,
@@ -46,11 +47,16 @@ function outlineEntries(ref: TranscriptRef): Parsed {
   }
 }
 
+const threadsOf = (e: Entry | undefined) =>
+  e?.kind === 'tool' && e.tool === 'ArtifactComments' && e.result ? commentThreads(e.result) : undefined;
+
 interface Loaded {
   ref: TranscriptRef;
   agents: Array<TranscriptRef>;
   loaded: LoadedTranscript;
   printed: Set<number>;
+  /** Locs of the rows printed: an entry's, or each thread's of a comments read. */
+  rows: Set<string>;
   hidden: Array<string>;
 }
 
@@ -85,29 +91,35 @@ async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'):
       const parsed = verb === 'outline' && agentless ? outlineEntries(ref) : transcriptOf(readBytes(ref));
       const loaded = loadTranscript(ref, parsed, agents, print);
       if (agentless) loaded.ctx.agents.clear();
-      t = { ref, agents, loaded, printed: new Set(), hidden: [] };
+      t = { ref, agents, loaded, printed: new Set(), rows: new Set(), hidden: [] };
       transcripts.set(ref.path, t);
     }
     return t;
   };
   // Every locator and range is checked before the first row prints, so a bad one prints nothing.
-  const selections: Array<{ t: Loaded; entries: ReadonlyArray<Entry> }> = [];
+  const selections: Array<{ t: Loaded; entries: ReadonlyArray<Entry>; item?: string }> = [];
   for (const locator of locators) {
     await pausePoint();
     const t = await load(locator);
-    selections.push({ t, entries: locator.range ? selectRange(t.loaded, locator.range) : t.loaded.entries });
+    const entries = locator.range ? selectRange(t.loaded, locator.range) : t.loaded.entries;
+    const item = locator.range?.item;
+    if (item && !threadsOf(entries[0])?.some((x) => x.id === item))
+      throw new LocalError(localErrors.noThread(`${t.loaded.ctx.prefix}:${entries[0].n}`, item));
+    selections.push({ t, entries, item });
   }
-  for (const { t, entries } of selections) {
+  for (const { t, entries, item } of selections) {
     const agentTranscript = t.ref.agentId !== undefined;
     for (const e of entries) {
-      if (t.printed.has(e.n)) continue;
       if (verb === 'outline' && !outlines(e, t.loaded.ctx.agents.has(e.n), agentTranscript, replies)) continue;
+      const again = t.printed.has(e.n);
       t.printed.add(e.n);
       const rule = hiddenBy(e);
       if (rule && !all) {
-        t.hidden.push(rule);
+        if (!again) t.hidden.push(rule);
         continue;
       }
+      // An entry prints once; a comments read, thread by thread.
+      if (again && !threadsOf(e)) continue;
       const row = entryRow(e, t.loaded.ctx, clip, rule);
       if (e.kind === 'tool') {
         if (n > 0) row.input = boundItems(row.input, INPUT_CLIPS * n);
@@ -117,7 +129,14 @@ async function showEntries(env: LocalEnv, args: Args, verb: 'show' | 'outline'):
         if (verb === 'outline' && STARTS_AGENTS.includes(e.tool) && !isRecall(e)) delete row.result;
       }
       if (uuids && e.uuid) row.uuid = e.uuid;
-      emit(row);
+      // A comments read prints a row per thread, `N#THREAD`; a row prints once.
+      const threads = threadsOf(e)?.filter((x) => !item || x.id === item);
+      const rows = threads?.map((x) => ({ ...row, loc: `${String(row.loc)}#${x.id}`, result: clip('result', x.text) }));
+      for (const r of rows ?? [row])
+        if (!t.rows.has(String(r.loc))) {
+          t.rows.add(String(r.loc));
+          emit(r);
+        }
     }
   }
   for (const { ref, agents, loaded, printed, hidden } of transcripts.values()) {

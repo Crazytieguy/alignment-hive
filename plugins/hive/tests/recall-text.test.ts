@@ -148,6 +148,52 @@ test('history: a quote whose loc names an entry in the window, but not the entry
   expect(laterText).toContain('aaaa0001:3 (2026-10-01) user: Don’t use tabs')
 })
 
+test('history: a comment thread prints whole where it first appears; a later read repeating it, as its loc', () => {
+  const thread = (status: string, nonce: string, comments: Array<string>) =>
+    [`Thread 79cff63a-231a-426f-b106-f112accd6dc5`, `  ${status} · Claude: NOT activated · created 2026-10-29`, '  [location] Entry numbers', ...comments.flatMap(c => ['  [the user (owner) — 2026-10-29T21:22]', `      ${nonce}| ${c}`])].join('\n')
+  const read = (loc: string, hoursAgo: number, result: string): Row => ({ loc, time: at(hoursAgo), kind: 'tool', tool: 'ArtifactComments', result })
+  // Reads of a carried thread leave out the anchored element's text.
+  const first = thread('open', '0a1b2c3d', ['Less scary than I thought.']).replace('\n  [location] Entry numbers', '\n  [location] Entry numbers\n  [anchored element] <p> Entry numbers…')
+  const rows = [
+    read('aaaa0001:3#79cff63a', 3, first),
+    // The next version of the page carries it, under the next read's line markers.
+    read('aaaa0001:9#79cff63a', 2, thread('open · carried from an earlier version', '9f8e7d6c', ['Less scary than I thought.'])),
+    read('aaaa0001:14#79cff63a', 1, thread('open', '11223344', ['Less scary than I thought.', 'Now ship it.'])),
+    read('aaaa0001:20#79cff63a', 0.8, thread('resolved (by Claude)', '55667788', ['Less scary than I thought.', 'Now ship it.'])),
+  ]
+  const h = history([{ loc: 'aaaa0001', rows }], NOW, 100_000, 'bbbb0002')
+  const text = h.closed.join('') + h.open
+  expect(text).toContain(`[aaaa0001:3#79cff63a] comments: ${first}`)
+  expect(text).toContain('[aaaa0001:9#79cff63a] comments: unchanged since aaaa0001:3#79cff63a')
+  expect(text).toContain('[aaaa0001:14#79cff63a] comments: Thread 79cff63a')
+  expect(text).toContain('Now ship it.')
+  expect(text).toContain('[aaaa0001:20#79cff63a] comments: unchanged since aaaa0001:14#79cff63a')
+  // Cited, a repeat gives its own read's text. That report, back in the history, still counts as reported: its quote
+  // is from the entry it names, and the thread it quotes is unchanged since its first read.
+  const repeat = rows[1]!.result!
+  const cited = report('- aaaa0001:9#79cff63a |', h)!
+  expect(cited).toContain(`> [comments] ${repeat.replace(/\n/g, '\n> ')} (aaaa0001:9#79cff63a, ${at(2).slice(0, 10)})`)
+  const next = history([{ loc: 'aaaa0001', rows }, { loc: 'bbbb0002', rows: [{ loc: 'bbbb0002:2', time: at(0.5), kind: 'user', origin: 'recall', recall: true, text: cited }] }], NOW, 100_000, 'bbbb0002')
+  expect(next.closed.join('') + next.open).toContain('[bbbb0002:2] recall:\n  aaaa0001:9#79cff63a again')
+  expect(next.isNew('aaaa0001:9#79cff63a')).toBe(false)
+  const before = history([{ loc: 'aaaa0001', rows: rows.slice(0, 1) }, { loc: 'bbbb0002', rows: [{ loc: 'bbbb0002:2', time: at(0.5), kind: 'user', origin: 'recall', recall: true, text: cited }] }], NOW, 100_000, 'cccc0003')
+  expect(before.closed.join('') + before.open).toContain('  aaaa0001:9#79cff63a unchanged since aaaa0001:3#79cff63a')
+  // A quote citing the read the threads came from is checked against all of them.
+  const quoted: Row = { loc: 'cccc0003:1', time: at(0.5), kind: 'user', origin: 'recall', recall: true, text: '[hive recall] Entries.\n\n> [tool] Now ship it. (aaaa0001:14, 2026-10-29)\n\n> [tool] Ship nothing. (aaaa0001:9, 2026-10-29)' }
+  const both = history([{ loc: 'aaaa0001', rows }, { loc: 'cccc0003', rows: [quoted] }], NOW, 100_000, 'bbbb0002')
+  const bothText = both.closed.join('') + both.open
+  expect(bothText).toContain('aaaa0001:14 (2026-10-29) tool: Now ship it.')
+  expect(bothText).not.toContain('Ship nothing.')
+})
+
+test('history: a message the user typed prints whole; a reply is clipped', () => {
+  const long = 'w'.repeat(9_000)
+  const h = history([{ loc: 'aaaa0001', rows: [user('aaaa0001:1', 2, long), { loc: 'aaaa0001:2', time: at(1), kind: 'assistant', text: long }] }], NOW, 100_000)
+  const text = h.closed.join('') + h.open
+  expect(text).toContain(`[aaaa0001:1] user: ${long}\n`)
+  expect(text).toContain(`[aaaa0001:2] assistant: ${'w'.repeat(6_000)} [+3000 chars]`)
+})
+
 test('promptBlocks: one block per closed chunk; the last marked for the cache, or each of them for GPT', () => {
   const h = history([{ loc: 'aaaa0001', rows: many('aaaa0001', 400, 1000) }], NOW, 100_000)
   const marked = (blocks: ReturnType<typeof promptBlocks>) => blocks.map(b => b.cache === true)
@@ -174,13 +220,24 @@ test('sessionsFor reads newest sessions in batches until older ones cannot reach
   // Nor do reports, which mostly quote what the history prints anyway.
   const reported = async (locs: Array<string>) => locs.map(loc => ({ ...user(`${loc}:1`, Number(loc.slice(1)), 'z'.repeat(30_000)), origin: 'recall', recall: true }))
   expect(await sessionsFor(listed.slice(0, 40), reported, 600_000)).toHaveLength(40)
+  // A thread every session's reads repeat counts once, as the history prints it.
+  const repeated = async (locs: Array<string>) =>
+    locs.flatMap(loc => Array.from({ length: 20 }, (_, k): Row => ({
+      loc: `${loc}:${k + 1}#79cff63a`, time: at(Number(loc.slice(1)) + k / 100), kind: 'tool', tool: 'ArtifactComments',
+      result: `Thread 79cff63a-231a-426f-b106-f112accd6dc5\n      ${String(k).padStart(8, '0')}| ${'c'.repeat(3000)}`,
+    })))
+  expect(await sessionsFor(listed.slice(0, 21), repeated, 800_000)).toHaveLength(21)
+  // Sessions a script ran are not read.
+  const scripted = listed.slice(0, 3).map((s, i) => ({ ...s, scripted: i === 1 || undefined }))
+  expect((await sessionsFor(scripted, outline, 1_000_000)).map(s => s.loc)).toEqual([listed[0]!.loc, listed[2]!.loc])
 })
 
 test('quotesIn reads the recall and retrieval agent formats, and a report handed back indented', () => {
-  const report = '## Findings\n\nctx\n> [user] a\n>   b (aaaa0001:3, 2026-09-01)\n\n> [assistant] c (bbbb0002/agent-x1:9, 2026-09-02)'
+  const report = '## Findings\n\nctx\n> [user] a\n>   b (aaaa0001:3, 2026-09-01)\n\n> [assistant] c (bbbb0002/agent-x1:9, 2026-09-02)\n\n> [tool] d (cccc0003:4#79cff63a, 2026-09-03)'
   const quotes = [
     { kind: 'user', text: 'a\n  b', loc: 'aaaa0001:3', date: '2026-09-01' },
     { kind: 'assistant', text: 'c', loc: 'bbbb0002/agent-x1:9', date: '2026-09-02' },
+    { kind: 'tool', text: 'd', loc: 'cccc0003:4#79cff63a', date: '2026-09-03' },
   ]
   expect(quotesIn(report)).toEqual(quotes)
   const handedBack = `<agent-message from="a1">\n[Subagent hand-back] The report follows:\n${report.replace(/^/gm, '  ')}\n</agent-message>`
@@ -206,9 +263,10 @@ test('collapsePasted keeps the opening of pasted text and the words around it', 
 
 test('report: each entry as the reader saw it, with context only where given, and how far back recall read', () => {
   const h = history([{ loc: 'aaaa0001', rows: [user('aaaa0001:3', 30, 'We use tabs. Also, lunch is at noon.')] }], NOW, 100_000, 'abcd1234')
-  expect(citations('- `aaaa0001:3` | \n- aaaa0001:3 | again\n- [ffff0000:1] | made up')).toEqual([
+  expect(citations('- `aaaa0001:3` | \n- aaaa0001:3 | again\n- [ffff0000:1] | made up\n- aaaa0001:4#79cff63a |')).toEqual([
     { loc: 'aaaa0001:3', context: '' },
     { loc: 'ffff0000:1', context: 'made up' },
+    { loc: 'aaaa0001:4#79cff63a', context: '' },
   ])
   const whole = report('- aaaa0001:3 |', h)!
   expect(whole).toContain('> [user] We use tabs. Also, lunch is at noon. (aaaa0001:3, 2026-10-19)')

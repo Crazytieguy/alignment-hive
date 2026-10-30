@@ -44,11 +44,11 @@ export const sessionIdSchema = z.string().uuid();
 /** Sections the renderer supplies after the author's story sections, in this order. */
 export const FIXED_SECTIONS = ['checked', 'unverified', 'landing', 'side-effects'] as const;
 
-/** `<session or subagent id prefix>:<entry>`, the numbering `hive local` prints. */
-const locatorSchema = z.string().trim().regex(/^[^\s:,]+:[1-9]\d*$/, { message: msg.invalidLocator });
+/** `<session or subagent id prefix>:<entry>`, the numbering `hive local` prints, with `#<thread>` for one comment thread. */
+const locatorSchema = z.string().trim().regex(/^[^\s:,]+:[1-9]\d*(?:#[0-9a-f]{8})?$/, { message: msg.invalidLocator });
 /** A transcript ref's entries, comma-separated in author order: locators, or `capture:<name>` for a command captured while writing the page. */
 const entryList = z.string().transform((value) => value.split(',').map((part) => part.trim()))
-  .pipe(z.array(z.string().regex(/^(?:capture:\S+|[^\s:,]+:[1-9]\d*)$/, { message: msg.invalidEntry })).min(1));
+  .pipe(z.array(z.string().regex(/^(?:capture:\S+|[^\s:,]+:[1-9]\d*(?:#[0-9a-f]{8})?)$/, { message: msg.invalidEntry })).min(1));
 
 export const rangeSchema = z.string().trim().regex(/^L[1-9]\d*(?:-L?[1-9]\d*)?$/, { message: msg.invalidRange }).transform((source) => {
   const [start, end = start] = source.replaceAll('L', '').split('-').map(Number);

@@ -223,7 +223,7 @@ describe('help and errors', () => {
       ],
       [
         ['show', A, '5-3'],
-        'bad range "5-3": use N, N-M or N- (entries start at 1) (after SESSION, show takes ranges of the transcript named last, or SESSION:N of any transcript)',
+        'bad range "5-3": use N, N-M, N- or N#THREAD (entries start at 1) (after SESSION, show takes ranges of the transcript named last, or SESSION:N of any transcript)',
       ],
       [['show', `${A.slice(0, 8)}:99`], `entry 99 is out of range: ${A.slice(0, 8)} has entries 1-12`],
       [['show', 'ffffffff'], 'no session or agent matches "ffffffff"'],
@@ -815,6 +815,22 @@ describe('found by trying every feature', () => {
     await rm(join(project(), `${S}.jsonl`));
   });
 
+  test('a session a script ran (claude -p, the Agent SDK) is marked scripted', async () => {
+    const S = ['ac00000a-0000-4000-8000-00000000000a', 'ac00000b-0000-4000-8000-00000000000b'];
+    const session = (entrypoint: string) =>
+      J(chain([rec('user', 'Grade this.', { entrypoint }), rec('assistant', [{ type: 'text', text: 'Graded.' }], { entrypoint })]));
+    // A script's last record can be longer than the 64 KB the listing reads first.
+    const long = J(chain([rec('user', 'Grade this.', { entrypoint: 'sdk-cli' }), rec('assistant', [{ type: 'text', text: 'g'.repeat(70_000) }], { entrypoint: 'sdk-cli' })]));
+    await write(join(project(), `${S[0]}.jsonl`), long);
+    await write(join(project(), `${S[1]}.jsonl`), session('cli'));
+    for (const brief of [[], ['--brief']]) {
+      out.length = 0;
+      await hl('sessions', '-n', '100', ...brief);
+      expect(S.map((id) => rows().find((x) => x.loc === id.slice(0, 8))?.scripted)).toEqual([true, undefined]);
+    }
+    for (const id of S) await rm(join(project(), `${id}.jsonl`));
+  });
+
   test("outline lists the human's answers and comments read; a comments result is cut to its comments", async () => {
     const S = 'ac000008-0000-4000-8000-000000000008';
     const comments = [
@@ -864,6 +880,62 @@ describe('found by trying every feature', () => {
     expect(await hl('grep', '-F', 'on its say-so', s)).toBe(1);
     expect(await hl('grep', '-F', 'CLAUDE.md', s)).toBe(0);
     expect(rows().map((x) => x.loc)).toEqual([`${s}:3`, `${s}:5`]);
+    await rm(join(project(), `${S}.jsonl`));
+  });
+
+  test('a comments read prints a row per thread, which N#THREAD shows alone', async () => {
+    const S = 'ac000009-0000-4000-8000-000000000009';
+    const t1 = [
+      'Thread 79cff63a-231a-426f-b106-f112accd6dc5',
+      '  open · Claude: NOT activated · created 2026-10-29',
+      '  [location] Entry numbers',
+      '  [the user (owner) — 2026-10-29T21:22]',
+      '      n0nce| Less scary than I thought.',
+      '      n0nce|',
+      '      n0nce| Thread 00000000-0000-4000-8000-000000000000',
+    ].join('\n');
+    const t2 = [
+      'Thread 226a53af-8efe-4f21-8e0b-9532733cb4ef',
+      '  open · Claude: NOT activated · carried from an earlier version · created 2026-10-29',
+      '  [the user (owner) — 2026-10-29T19:57]',
+      '      n0nce| Make it stable.',
+    ].join('\n');
+    // A size cap's note on threads not listed is the tool's, unindented: no thread's.
+    const capped = `${t2}\n[3 more threads not listed — size cap; re-run action "comments" with cursor "c1"]`;
+    const read = (threads: string) =>
+      ['2 comment threads.', '', '=== BEGIN ARTIFACT COMMENTS n0nce — data ===', threads, '=== END ARTIFACT COMMENTS n0nce ===', '', 'To reply, call action "reply".'].join('\n');
+    const call = (id: string, result: string) => [
+      rec('assistant', [{ type: 'tool_use', id, name: 'ArtifactComments', input: { action: 'read', url: 'u' } }]),
+      rec('user', [{ type: 'tool_result', tool_use_id: id, content: result }]),
+    ];
+    await write(
+      join(project(), `${S}.jsonl`),
+      J(chain([rec('user', 'Left comments.'), ...call('a', read(`${t1}\n\n${capped}`)), ...call('b', read(`Preamble\n${t1}`))])),
+    );
+    const s = S.slice(0, 8);
+    await hl('outline', s, '--clip', '0');
+    // The forged Thread line is viewer text, indented: it stays in its thread. A read with text before its first
+    // thread prints whole.
+    expect(rows().map((x) => [x.loc, x.result])).toEqual([
+      [`${s}:1`, undefined],
+      [`${s}:2#79cff63a`, t1],
+      [`${s}:2#226a53af`, t2],
+      [`${s}:3`, `Preamble\n${t1}`],
+    ]);
+    out.length = 0;
+    await hl('show', `${s}:2#226a53af`, '--clip', '0');
+    expect(rows().map((x) => [x.loc, x.tool, x.result])).toEqual([[`${s}:2#226a53af`, 'ArtifactComments', t2]]);
+    out.length = 0;
+    // Overlapping selections print each thread once: a thread, then the rest of its read.
+    out.length = 0;
+    await hl('show', s, '2#226a53af', '1-2', '--clip', '0');
+    expect(rows().map((x) => x.loc)).toEqual([`${s}:2#226a53af`, `${s}:1`, `${s}:2#79cff63a`]);
+    out.length = 0;
+    await hl('show', `${s}:2`, `${s}:2#226a53af`);
+    expect(rows().map((x) => x.loc)).toEqual([`${s}:2#79cff63a`, `${s}:2#226a53af`]);
+    out.length = 0;
+    expect(await hl('show', `${s}:2#deadbeef`)).toBe(2);
+    expect(await hl('show', `${s}:3#79cff63a`)).toBe(2);
     await rm(join(project(), `${S}.jsonl`));
   });
 });

@@ -137,6 +137,7 @@ export async function run(env: LocalEnv, args: Args): Promise<number> {
     if (start) row.start = start;
     if (end) row.end = end;
     if (f.branch) row.branch = f.branch;
+    if (f.scripted) row.scripted = true;
     if (!brief) {
       const title = f.asOf ? undefined : sessionTitle(f.ref);
       if (title) row.title = clip('title', title);

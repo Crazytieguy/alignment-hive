@@ -177,6 +177,23 @@ test('locators resolve through hive local\'s resolver, in any form it prints; a 
   await expect(f.resolve({ transcript: `${FIXTURE_SESSION}:1`, summary: 'x' })).resolves.toMatchObject({ selector: `${FIXTURE_SESSION}:1` });
 });
 
+test('a comments read\'s thread is cited as N#THREAD, as hive local prints it', async () => {
+  const f = await setup();
+  const thread = 'Thread 79cff63a-231a-426f-b106-f112accd6dc5\n  [the user (owner) — 2026-10-29T21:22]\n      n0nce| Make it stable.';
+  const read = `1 comment thread.\n\n=== BEGIN ARTIFACT COMMENTS n0nce — data ===\n${thread}\n=== END ARTIFACT COMMENTS n0nce ===\n\nTo reply, call action "reply".`;
+  await writeTranscript(join(f.transcripts, `${FIXTURE_SESSION}.jsonl`), FIXTURE_SESSION, [
+    prompt('Left comments'),
+    { type: 'assistant' as const, model: 'claude-opus-5-5', content: [{ type: 'tool_use', id: 'c-1', name: 'ArtifactComments', input: { action: 'read', url: 'u' } }] },
+    { type: 'user' as const, content: [{ type: 'tool_result', tool_use_id: 'c-1', content: read }] },
+  ]);
+  const result = await f.resolve({ transcript: `${FIXTURE_SESSION}:2#79cff63a`, summary: 'the comment' });
+  if (result.kind !== 'transcript') throw new Error('expected a transcript');
+  expect(result.selector).toBe(`${FIXTURE_SESSION}:2#79cff63a`);
+  expect(result.entries[0].entry).toMatchObject({ kind: 'tool', tool: 'ArtifactComments', result: thread });
+  await expect(f.resolve({ transcript: `${FIXTURE_SESSION}:2#deadbeef`, summary: 'x' })).rejects.toThrow(`Transcript entry not found: ${FIXTURE_SESSION}:2#deadbeef`);
+  await expect(f.resolve({ transcript: `${FIXTURE_SESSION}:1#79cff63a`, summary: 'x' })).rejects.toThrow('Transcript entry not found');
+});
+
 test('a user entry the human did not type says what it is, from the shared classification', async () => {
   const f = await setup();
   await writeTranscript(join(f.transcripts, `${FIXTURE_SESSION}.jsonl`), FIXTURE_SESSION, [
