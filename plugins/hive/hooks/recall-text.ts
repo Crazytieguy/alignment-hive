@@ -70,9 +70,11 @@ const ELIDED = /\[\+\d+ chars\]|\[pasted, \+\d+ chars\]|\[\s*(?:\.\.\.|…)\s*\]
 // ArtifactComments starts each line of a comment with an id.
 const COMMENT_LINE = /^[ \t]*[0-9a-f]{8}\| ?/gm
 
-/** Whether a quote is from the entry: each part of it, between where it leaves text out, is in the entry. */
-function isQuoteOf(quote: string, entry: string): boolean {
-  const texts = [entry, collapsePasted(entry), entry.replace(COMMENT_LINE, '')].map(plain)
+/** An entry's text in each form a quote of it may take: as recorded, its pasted text collapsed, its comment ids gone. */
+const quotableOf = (entry: string) => [...new Set([entry, collapsePasted(entry), entry.replace(COMMENT_LINE, '')])].map(plain)
+
+/** Whether a quote is from the entry `texts` are of: each part of it, between where it leaves text out, is in the entry. */
+function isQuoteOf(quote: string, texts: ReadonlyArray<string>): boolean {
   const parts = quote.split(ELIDED).map(plain).filter(Boolean)
   return parts.length > 0 && parts.every(p => texts.some(t => t.includes(p)))
 }
@@ -189,9 +191,14 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
   // hide the entry. Only the window's entries, so a check changes only when its entry's chunk leaves the window, which
   // changes the prompt's cached prefix anyway.
   const inWindow = new Map(units.slice(from).flat().map(it => [it.row.loc, it.row] as const))
+  // Each entry's quotable forms, made once: reports quote the same entries again and again.
+  const quotable = new Map<string, ReadonlyArray<string>>()
   const isPlaced = (q: Quote) => {
     const row = inWindow.get(q.loc)
-    return !row || isQuoteOf(q.text, (row.kind === 'tool' ? row.result : row.text) ?? '')
+    if (!row) return true
+    let texts = quotable.get(q.loc)
+    if (!texts) quotable.set(q.loc, (texts = quotableOf((row.kind === 'tool' ? row.result : row.text) ?? '')))
+    return isQuoteOf(q.text, texts)
   }
 
   const seen = new Map<string, Seen>()

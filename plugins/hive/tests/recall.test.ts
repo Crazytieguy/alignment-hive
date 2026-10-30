@@ -8,22 +8,57 @@ const SESSION = 'abcd1234-0000-4000-8000-000000000000'
 const ENTRY = { loc: 'feed0001:7', time: '2026-10-19T09:00:00Z', kind: 'user', text: 'Always use tabs in this repo, never spaces.' }
 const REPLY = '- feed0001:7 | '
 const usage = { input_tokens: 10, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+const FAST = 'gpt-6.1-sol-fast'
+const SOL = 'gpt-6.1-sol'
+const SOCKET = '/tmp/hive-run/local-test.sock'
+
+// Background work runs unawaited after the session starts and after a turn; a test waits it out. setTimeout is the
+// test runner's, outside the mods' library.
+declare const setTimeout: (run: () => void, ms: number) => void
+const settle = () => new Promise<void>(resolve => setTimeout(resolve, 20))
+
+/** A read the local server was asked for. */
+type Served = { argv: Array<string>; cwd: string; sessionId: string | null; socket?: string; isWarm: boolean }
 
 /**
  * The world beneath the plugin: a CLI with one past session (scripts/hive.sh), and models that answer `reply`, Sol
- * among them unless `isSolMissing`. `hold` keeps a model call running until its time is up; `recalledBefore` puts
- * a report of ENTRY in the current session.
+ * and its fast tier among them unless `isSolMissing`. `hold` keeps a model call running until its time is up;
+ * `fails` has a model answer with an error status instead, after `afterMs`; `recalledBefore` puts a report of ENTRY
+ * in the current session. `server`: the local server `hive local-server --ensure` names, answering reads as the CLI
+ * does (`up`, `none` by default), refusing them (`down`) or never answering (`stuck`); `held` keeps that many of its
+ * next reads unanswered.
  */
 function world(on: On, { isSolMissing = false } = {}) {
   const asked: Array<string> = []
+  const prompts: Array<string> = []
   const contexts: Array<ReadonlyArray<string>> = []
   const timeouts: Array<number | undefined> = []
   // The directory each CLI read ran in.
   const dirs: Array<string | undefined> = []
+  const served: Array<Served> = []
+  const logs: Array<string> = []
   // `transcript`: this session's rows as `hive local outline SESSION --uuids` reads them; `readBacks` counts those reads.
-  const state = { hold: false, isCliSlow: false, isCliFailing: false, isProjectNew: false, isSessionGone: false, recalledBefore: false, reply: REPLY, isDropped: false, transcript: [] as Array<unknown>, readBacks: 0 }
+  const state = {
+    hold: false,
+    isCliSlow: false,
+    isCliFailing: false,
+    isProjectNew: false,
+    isSessionGone: false,
+    isSessionNew: false,
+    recalledBefore: false,
+    reply: REPLY,
+    isDropped: false,
+    historyRows: [ENTRY],
+    transcript: [] as Array<unknown>,
+    readBacks: 0,
+    fails: (isSolMissing ? { [FAST]: { status: 404 }, [SOL]: { status: 404 } } : {}) as Record<string, { status: number; afterMs?: number }>,
+    server: 'none' as 'none' | 'up' | 'down' | 'stuck',
+    held: 0,
+    ensures: 0,
+  }
   const clock = mock.clock(on, { now: NOW })
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('turn.complete', async () => ({ text: '' }) as never)
   on('session.id', async () => ({ value: SESSION }))
   on('session.root', async () => ({ value: '/tmp/project' }))
   on('prompt.submit', async (_$, e) => {
@@ -32,10 +67,16 @@ function world(on: On, { isSolMissing = false } = {}) {
   })
   const cli = (args: ReadonlyArray<string>): Array<unknown> => {
     if (args[0] === 'notices') return [{ notices: [], isSessionKnown: true }]
-    // A project with no transcripts yet lists none (and the CLI exits 0); a session gone since the listing fails its batch.
+    // A project with no transcripts yet lists none (and the CLI exits 0); a session gone since the listing fails its
+    // batch; a new one has nothing to outline yet.
     if (args[1] === 'sessions' && state.isProjectNew) return []
     if (args[1] === 'sessions')
-      return [{ loc: 'abcd1234', end: '2026-10-20T15:29:00Z' }, ...(state.isSessionGone ? [{ loc: 'dead0001', end: '2026-10-19T12:00:00Z' }] : []), { loc: 'feed0001', end: '2026-10-19T09:00:00Z' }]
+      return [
+        { loc: 'abcd1234', end: '2026-10-20T15:29:00Z' },
+        ...(state.isSessionNew ? [{ loc: 'beef0001', end: '2026-10-20T15:00:00Z' }] : []),
+        ...(state.isSessionGone ? [{ loc: 'dead0001', end: '2026-10-19T12:00:00Z' }] : []),
+        { loc: 'feed0001', end: '2026-10-19T09:00:00Z' },
+      ]
     if (args[1] !== 'outline' || isFailing(args)) return []
     if (args.includes('--uuids')) {
       state.readBacks++
@@ -43,14 +84,28 @@ function world(on: On, { isSolMissing = false } = {}) {
     }
     const report = { loc: 'abcd1234:2', time: '2026-10-20T15:29:30Z', kind: 'user', origin: 'recall', recall: true, text: '[hive recall] Entries.\n\n> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)' }
     return [
-      ...(args.includes('feed0001') ? [ENTRY] : []),
+      ...(args.includes('feed0001') ? state.historyRows : []),
       ...(args.includes('abcd1234') ? [{ loc: 'abcd1234:1', time: '2026-10-20T15:29:00Z', kind: 'user', text: 'Format the file.' }, ...(state.recalledBefore ? [report] : [])] : []),
     ]
   }
   const isFailing = (args: ReadonlyArray<string>) => state.isCliFailing || (state.isSessionGone && args.includes('dead0001'))
   on('process.run', async (_$, e) => {
-    const stdout = cli(e.argv.slice(2)).map(r => JSON.stringify(r)).join('\n')
+    const args = e.argv.slice(2)
+    if (args[0] === 'local-server') state.ensures++
+    const stdout = args[0] === 'local-server' ? JSON.stringify(state.server === 'none' ? {} : { socket: SOCKET }) : cli(args).map(r => JSON.stringify(r)).join('\n')
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('http.fetch', async (_$, e) => {
+    // `argv`: what follows `hive local`, its only verbs served.
+    const { argv, cwd, sessionId } = JSON.parse(e.init?.body ?? '{}') as { argv: Array<string>; cwd: string; sessionId: string | null }
+    const isWarm = e.init?.headers?.['x-hive-warm'] === '1'
+    served.push({ argv, cwd, sessionId, socket: e.init?.socketPath, isWarm })
+    if (state.server === 'stuck' || (state.held > 0 && state.held--)) await clock.sleep(600_000)
+    if (state.server === 'down') throw new Error('connect ECONNREFUSED')
+    if (!['sessions', 'outline'].includes(argv[0]!)) return { value: { status: 400, ok: false, headers: {}, text: '' } } as never
+    const code = isFailing(['local', ...argv]) ? 2 : 0
+    const stdout = cli(['local', ...argv]).map(r => JSON.stringify(r)).join('\n')
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ code, stdout, stderr: '' }) } } as never
   })
   // Streamed in pieces that cut lines, as a pipe does.
   on('process.spawn', async function* (_$, e) {
@@ -62,17 +117,24 @@ function world(on: On, { isSolMissing = false } = {}) {
   } as never)
   on('model.complete', async (_$, e) => {
     asked.push(e.model)
+    prompts.push(JSON.stringify(e.prompt))
     timeouts.push(e.timeoutMs)
     if (state.hold) {
       await clock.sleep(e.timeoutMs ?? 0)
       return { value: { isAnswered: false, reason: 'aborted', usage } } as never
     }
-    if (isSolMissing && e.model === 'gpt-6.1-sol') return { value: { isAnswered: false, reason: 'api-error', status: 404, error: 'not_found_error', usage } } as never
+    const fails = state.fails[e.model]
+    if (fails?.afterMs) await clock.sleep(fails.afterMs)
+    if (fails) return { value: { isAnswered: false, reason: 'api-error', status: fails.status, error: fails.status === 429 ? 'rate_limit' : 'not_found_error', usage } } as never
     return { value: { isAnswered: true, text: state.reply, usage } } as never
   })
   on('ui.status', async () => ({ value: undefined }) as never)
+  on('ui.log', async (_$, e) => {
+    logs.push(e.text)
+    return { value: undefined } as never
+  })
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
-  return { asked, contexts, clock, dirs, state, timeouts }
+  return { asked, contexts, clock, dirs, logs, prompts, served, state, timeouts }
 }
 
 const start = ($: Parameters<Parameters<typeof test>[1]>[0]) => $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
@@ -91,7 +153,7 @@ describe('automatic recall', () => {
     const { asked, contexts } = world(on)
     await start($)
     await $.prompt.submit(typed('Format the file.'))
-    expect(asked).toEqual(['gpt-6.1-sol'])
+    expect(asked).toEqual([FAST])
     expect(contexts[0]?.join('')).toContain('> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)')
     expect(contexts[0]?.join('')).toContain('hive:retrieval')
 
@@ -117,8 +179,104 @@ describe('automatic recall', () => {
     await start($)
     await $.prompt.submit(typed('Format the file.'))
     await $.prompt.submit(typed('And the other one.'))
-    expect(asked).toEqual(['gpt-6.1-sol', 'sonnet', 'sonnet'])
+    expect(asked).toEqual([FAST, SOL, 'sonnet', 'sonnet'])
     expect(contexts[1]?.join('')).toContain('Always use tabs')
+  })
+
+  test('on, auto without model-router: a 4xx from Sonnet fails only that prompt, and Sonnet is asked again', { options: { recall: true } }, async ($, on) => {
+    const { asked, contexts, state } = world(on, { isSolMissing: true })
+    await start($)
+    state.fails.sonnet = { status: 400 }
+    await $.prompt.submit(typed('Format the file.'))
+    delete state.fails.sonnet
+    await $.prompt.submit(typed('And the other one.'))
+    await $.prompt.submit(typed('And a third.'))
+    expect(asked).toEqual([FAST, SOL, 'sonnet', 'sonnet', 'sonnet'])
+    const found = expect.stringContaining('Always use tabs')
+    expect(contexts.map(c => c.join(''))).toEqual([expect.stringContaining('did not finish'), found, found])
+  })
+
+  test('on, Sonnet chosen by name: a 4xx fails only that prompt', { options: { recall: true, recallModel: 'sonnet' } }, async ($, on) => {
+    const { asked, contexts, state } = world(on)
+    await start($)
+    state.fails.sonnet = { status: 400 }
+    await $.prompt.submit(typed('Format the file.'))
+    delete state.fails.sonnet
+    await $.prompt.submit(typed('And the other one.'))
+    expect(asked).toEqual(['sonnet', 'sonnet'])
+    expect(contexts[1]?.join('')).toContain('Always use tabs')
+  })
+
+  test('on, auto with a router that lacks the fast tier: standard Sol answers, and the fast tier is not asked again', { options: { recall: true } }, async ($, on) => {
+    const { asked, contexts, state } = world(on)
+    state.fails[FAST] = { status: 404 }
+    await start($)
+    await $.prompt.submit(typed('Format the file.'))
+    await $.prompt.submit(typed('And the other one.'))
+    expect(asked).toEqual([FAST, SOL, SOL])
+    expect(contexts[1]?.join('')).toContain('Always use tabs')
+  })
+
+  test('on, auto: when the fast tier fails, standard Sol answers if it has the time; else the prompt goes on without recall', { options: { recall: true } }, async ($, on) => {
+    const { asked, clock, contexts, state, timeouts } = world(on)
+    await start($)
+    state.fails[FAST] = { status: 429, afterMs: 5_000 }
+    const first = $.prompt.submit(typed('Format the file.'))
+    await clock.advance(5_000)
+    await first
+    expect(asked).toEqual([FAST, SOL])
+    expect(timeouts).toEqual([30_000, 25_000])
+    expect(contexts[0]?.join('')).toContain('Always use tabs')
+
+    // Under 25 seconds left: a standard call starts cold, and could not finish.
+    state.fails[FAST] = { status: 429, afterMs: 5_001 }
+    const submitted = $.prompt.submit(typed('And the other one.'))
+    await clock.advance(5_001)
+    await submitted
+    expect(asked).toEqual([FAST, SOL, FAST])
+    expect(contexts[1]?.join('')).toContain('did not finish')
+  })
+
+  test('on, auto: the history is built once per budget, with fresh time left for every attempt', { options: { recall: true } }, async ($, on) => {
+    const { asked, clock, prompts, state, timeouts } = world(on)
+    // A row just ahead of the first attempt's clock distinguishes a reused history from a newly built one.
+    const later = 'A newer entry in the same outline.'
+    state.historyRows.push({ ...ENTRY, loc: 'feed0001:8', text: later, time: new Date(NOW + 1_000).toISOString() })
+    state.fails[FAST] = { status: 404, afterMs: 5_000 }
+    state.fails[SOL] = { status: 404 }
+    await start($)
+    const submitted = $.prompt.submit(typed('Format the file.'))
+    await clock.advance(5_000)
+    await submitted
+    expect(asked).toEqual([FAST, SOL, 'sonnet'])
+    expect(timeouts).toEqual([30_000, 25_000, 25_000])
+    expect(prompts[0]).toBe(prompts[1])
+    expect(prompts[0]).not.toContain(later)
+    // Sonnet's different budget gets its own history, at that attempt's clock.
+    expect(prompts[2]).toContain(later)
+  })
+
+  test('on, auto: when standard Sol fails, the prompt goes on without recall, not on Sonnet', { options: { recall: true } }, async ($, on) => {
+    const { asked, contexts, state } = world(on)
+    state.fails[FAST] = { status: 404 }
+    state.fails[SOL] = { status: 429 }
+    await start($)
+    await $.prompt.submit(typed('Format the file.'))
+    await $.prompt.submit(typed('And the other one.'))
+    expect(asked).toEqual([FAST, SOL, SOL])
+    expect(contexts.map(c => c.join(''))).toEqual([expect.stringContaining('did not finish'), expect.stringContaining('did not finish')])
+  })
+
+  test('on, a model chosen by name: only it is asked, and once missing, not again', { options: { recall: true, recallModel: FAST } }, async ($, on) => {
+    const { asked, contexts, state } = world(on)
+    await start($)
+    state.fails[FAST] = { status: 429 }
+    await $.prompt.submit(typed('Format the file.'))
+    state.fails[FAST] = { status: 404 }
+    await $.prompt.submit(typed('And the other one.'))
+    await $.prompt.submit(typed('And a third.'))
+    expect(asked).toEqual([FAST, FAST])
+    expect(contexts.map(c => c.join(''))).toEqual([1, 2, 3].map(() => expect.stringContaining('did not finish')))
   })
 
   test('on: past 30 seconds the prompt goes on, saying recall did not finish', { options: { recall: true } }, async ($, on) => {
@@ -150,13 +308,30 @@ describe('automatic recall', () => {
     expect(timeouts).toEqual([30_000])
   })
 
-  test('on: a session gone since the listing costs only itself; the rest of its batch is read', { options: { recall: true } }, async ($, on) => {
-    const { contexts, state } = world(on)
-    await start($)
-    state.isSessionGone = true
-    await $.prompt.submit(typed('Format the file.'))
-    expect(contexts[0]?.join('')).toContain('> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)')
-  })
+  for (const server of ['none', 'up'] as const) {
+    const through = server === 'up' ? 'the local server' : 'the CLI'
+
+    test(`on: a session gone since the listing costs only itself; the rest of its batch is read (through ${through})`, { options: { recall: true } }, async ($, on) => {
+      const { contexts, dirs, state } = world(on)
+      state.server = server
+      await start($)
+      state.isSessionGone = true
+      await $.prompt.submit(typed('Format the file.'))
+      expect(contexts[0]?.join('')).toContain('> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)')
+      expect(dirs.length > 0).toBe(server === 'none')
+    })
+
+    test(`on: a CLI read that fails partway is no history at all (through ${through})`, { options: { recall: true } }, async ($, on) => {
+      const { asked, contexts, dirs, state } = world(on)
+      state.server = server
+      await start($)
+      state.isCliFailing = true
+      await $.prompt.submit(typed('Format the file.'))
+      expect(asked).toEqual([])
+      expect(contexts[0]?.join('')).toContain('did not finish')
+      expect(dirs.length > 0).toBe(server === 'none')
+    })
+  }
 
   test('on: a project with no transcripts yet finds nothing', { options: { recall: true } }, async ($, on) => {
     const { asked, contexts, state } = world(on)
@@ -177,13 +352,145 @@ describe('automatic recall', () => {
     expect(new Set(dirs)).toEqual(new Set(['/tmp/project']))
   })
 
-  test('on: a CLI read that fails partway is no history at all', { options: { recall: true } }, async ($, on) => {
-    const { asked, contexts, state } = world(on)
+})
+
+describe('the local server', () => {
+  test('reads for recall when it runs: no CLI starts, and it reads the project the session started in', { options: { recall: true } }, async ($, on) => {
+    const { asked, contexts, dirs, logs, served, state } = world(on)
+    state.server = 'up'
+    on('session.cwd', async () => ({ value: '/tmp/project/notes' }))
     await start($)
-    state.isCliFailing = true
     await $.prompt.submit(typed('Format the file.'))
-    expect(asked).toEqual([])
+    await $.prompt.submit(typed('And the other one.'))
+    expect(asked).toEqual([FAST, FAST])
+    expect(contexts[1]?.join('')).toContain('> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)')
+    expect(dirs).toEqual([])
+    const reads = ['sessions -n 500 --brief', 'outline abcd1234 feed0001 --replies --no-agents --clip 0']
+    expect(served.map(s => s.argv.join(' '))).toEqual([...reads, ...reads])
+    expect(new Set(served.map(s => `${s.socket} ${s.cwd} ${s.sessionId} ${s.isWarm}`))).toEqual(new Set([`${SOCKET} /tmp/project ${SESSION} false`]))
+    // Started once, then known.
+    expect(state.ensures).toBe(1)
+    expect(logs).toContainEqual(expect.stringMatching(/^hive recall: read 2 sessions in \d+ ms$/))
+    expect(logs).toContainEqual(expect.stringMatching(/^hive recall: gpt-6\.1-sol-fast answered in \d+ ms/))
+  })
+
+  test('a server that fails is started again and asked once more; then the CLI reads, for the rest of the recall', { options: { recall: true } }, async ($, on) => {
+    const { contexts, dirs, served, state } = world(on)
+    state.server = 'down'
+    await start($)
+    await $.prompt.submit(typed('Format the file.'))
+    expect(contexts[0]?.join('')).toContain('Always use tabs')
+    expect(served.map(s => s.argv[0])).toEqual(['sessions', 'sessions'])
+    expect(state.ensures).toBe(2)
+    expect(dirs).toHaveLength(2)
+  })
+
+  test('a server with no answer in 5 seconds: the CLI reads instead, and the next recall starts it again', { options: { recall: true } }, async ($, on) => {
+    const { clock, contexts, dirs, served, state, timeouts } = world(on)
+    state.server = 'stuck'
+    await start($)
+    const submitted = $.prompt.submit(typed('Format the file.'))
+    await clock.advance(5_000)
+    await submitted
+    expect(contexts[0]?.join('')).toContain('Always use tabs')
+    expect(timeouts).toEqual([25_000])
+    expect(served).toHaveLength(1)
+    expect(dirs).toHaveLength(2)
+
+    state.server = 'up'
+    await $.prompt.submit(typed('And the other one.'))
+    expect(state.ensures).toBe(2)
+    expect(served).toHaveLength(3)
+    expect(dirs).toHaveLength(2)
+  })
+
+  test('warms after the session starts and after each main turn, reading what recall will; never through the CLI', { options: { recall: true } }, async ($, on) => {
+    const { clock, dirs, served, state } = world(on)
+    state.server = 'up'
+    await start($)
+    await settle()
+    await clock.advance(1)
+    await settle()
+    // It reads as recall does, as warm reads, which name no session.
+    expect(served.map(s => [...s.argv.slice(0, 4), s.isWarm, s.sessionId])).toEqual([
+      ['sessions', '-n', '500', '--brief', true, null],
+      ['outline', 'abcd1234', 'feed0001', '--replies', true, null],
+    ])
+
+    await $.prompt.submit(typed('Format the file.'))
+    served.length = 0
+    await $.turn.complete({ reason: 'end', agentId: 'child' } as never)
+    await settle()
+    await clock.advance(1)
+    await settle()
+    expect(served).toEqual([])
+
+    // A later one reads the listing anew, and the sessions in it now.
+    state.isSessionNew = true
+    await $.turn.complete({ reason: 'end' } as never)
+    await settle()
+    await clock.advance(1)
+    await settle()
+    expect(served.map(s => [...s.argv.slice(0, 4), s.isWarm, s.sessionId])).toEqual([
+      ['sessions', '-n', '500', '--brief', true, null],
+      ['outline', 'abcd1234', 'beef0001', 'feed0001', true, null],
+    ])
+    expect(dirs).toEqual([])
+  })
+
+  test('a warm read with no answer in 5 seconds stops the warm, and the server stays known', { options: { recall: true } }, async ($, on) => {
+    const { asked, clock, logs, served, state } = world(on)
+    state.server = 'up'
+    state.held = 1
+    await start($)
+    await settle()
+    await clock.advance(1)
+    await settle()
+    await clock.advance(5_000)
+    await settle()
+    expect(served).toHaveLength(1)
+    expect(logs).toContain('hive local server: no answer in 5000 ms; warm stopped')
+
+    await $.prompt.submit(typed('Format the file.'))
+    expect(asked).toEqual([FAST])
+    expect(served.map(s => s.argv[0])).toEqual(['sessions', 'sessions', 'outline'])
+    expect(state.ensures).toBe(1)
+  })
+
+  test('a recall stops a warm at once, and none starts during one', { options: { recall: true } }, async ($, on) => {
+    const { clock, contexts, served, state } = world(on)
+    state.server = 'up'
+    state.held = 1
+    await start($)
+    await settle()
+    await clock.advance(1)
+    await settle()
+    expect(served).toHaveLength(1)
+
+    // The model call runs to the time limit: a turn's end meanwhile warms nothing.
+    state.hold = true
+    const submitted = $.prompt.submit(typed('Format the file.'))
+    await settle()
+    expect(served.map(s => s.argv[0])).toEqual(['sessions', 'sessions', 'outline'])
+    await $.turn.complete({ reason: 'end' } as never)
+    await settle()
+    await clock.advance(1)
+    await settle()
+    expect(served).toHaveLength(3)
+    await clock.advance(31_000)
+    await submitted
     expect(contexts[0]?.join('')).toContain('did not finish')
+  })
+
+  test('without one, a warm reads nothing', { options: { recall: true } }, async ($, on) => {
+    const { clock, dirs, served, state } = world(on)
+    await start($)
+    await settle()
+    await clock.advance(1)
+    await settle()
+    expect(state.ensures).toBe(1)
+    expect(served).toEqual([])
+    expect(dirs).toEqual([])
   })
 })
 

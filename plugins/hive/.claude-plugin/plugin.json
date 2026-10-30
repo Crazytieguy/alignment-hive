@@ -13,8 +13,8 @@
     "recallModel": {
       "type": "string",
       "title": "Automatic recall model",
-      "description": "auto: GPT-6.1 Sol when model-router provides it, else Sonnet (finds less, and adds about 5% to your Claude usage)",
-      "options": ["auto", "sonnet", "gpt-6.1-sol"],
+      "description": "auto: GPT-6.1 Sol's fast tier, then standard Sol, when model-router provides them, else Sonnet (finds less, and adds about 5% to your Claude usage)",
+      "options": ["auto", "sonnet", "gpt-6.1-sol", "gpt-6.1-sol-fast"],
       "default": "auto"
     }
   }

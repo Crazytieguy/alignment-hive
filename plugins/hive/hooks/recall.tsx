@@ -1,9 +1,10 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Hook, RenderElement, RenderInput } from 'claude-code'
 
-import { CliFailed, hiveRows } from './cli'
+import { CliFailed, localReads } from './cli'
+import type { Read } from './cli'
 import { FAILED, INSTRUCTIONS, budgetFor, entries, history, promptBlocks, recalledIn, reportOf, sessionsFor } from './recall-text'
-import type { Listed, Row } from './recall-text'
+import type { History, Listed, Row, Session } from './recall-text'
 import type { HiveRecalled } from '../types'
 
 // Automatic recall (beta, opt-in through the `recall` option): before the main agent starts on a prompt the user
@@ -11,12 +12,21 @@ import type { HiveRecalled } from '../types'
 // with the prompt.
 
 const SOL = 'gpt-6.1-sol'
+// Sol on Codex's priority tier (model-router's `-fast` twin): about 1.6 times as fast, for 2.5 times the usage.
+const SOL_FAST = 'gpt-6.1-sol-fast'
 const FALLBACK = 'sonnet'
 // The whole step, CLI reads included; past it the prompt goes on with a note that recall did not finish.
 const TIMEOUT_MS = 30_000
+// Standard Sol after the fast tier failed, only with this much left: its answers to recall took 11–40 s (median 26 s),
+// and after the fast tier it starts cold, as the tiers share no prompt cache.
+const STANDARD_MIN_MS = 25_000
 
-// `auto` tries Sol (through model-router) first; a process without it uses FALLBACK from then on.
-let isSolMissing = false
+// The models this process found missing, not asked again: Sol without model-router, its fast tier without a router
+// that serves it.
+const missing = new Set<string>()
+
+/** The models a recall asks, in turn: `auto` tries Sol's fast tier, then standard Sol, then FALLBACK. */
+const modelsFor = (choice: string) => (choice === 'auto' ? [SOL_FAST, SOL, FALLBACK] : [choice]).filter(model => !missing.has(model))
 
 // What recall gave each prompt, by its transcript row, shown under the prompt in the ctrl+o transcript.
 const recalled = atom({ plugin: 'hive', key: 'recalled' } as const, null as HiveRecalled)
@@ -35,8 +45,53 @@ const restored = new Set<string>()
  * report, so those prompts stay unknown.
  */
 async function restore($: EngineInterface, sessionId: string) {
-  const rows = (await hiveRows($, ['local', 'outline', sessionId, '--uuids', '--no-agents', '--clip', '0'])) as Array<Row>
+  const rows = (await localReads($)(['local', 'outline', sessionId, '--uuids', '--no-agents', '--clip', '0'])) as Array<Row>
   await Promise.all(recalledIn(rows).map(([requestId, shown]) => update($, memberOf(recalled, { requestId }), was => was ?? shown)))
+}
+
+const LISTING = ['local', 'sessions', '-n', '500', '--brief']
+
+/**
+ * Sessions' outlines, read in one call. A session gone since the listing fails its whole batch before a row prints: the
+ * batch is read again one session at a time, without the ones that fail.
+ */
+function outlinesOf(read: Read) {
+  const outlineOf = (locs: Array<string>) => read(['local', 'outline', ...locs, '--replies', '--no-agents', '--clip', '0']) as Promise<Array<Row>>
+  return (locs: Array<string>) =>
+    outlineOf(locs).catch(async (error: unknown) => {
+      if (!(error instanceof CliFailed) || error.hasRows || locs.length === 1) throw error
+      const rows: Array<Row> = []
+      for (const loc of locs) rows.push(...(await outlineOf([loc]).catch((e: unknown) => (e instanceof CliFailed && !e.hasRows ? [] : Promise.reject(e)))))
+      return rows
+    })
+}
+
+/** What recall reads: the project's sessions newest first, each with its outline, while they can reach a window of `budget`. */
+async function readRecallSessions(read: Read, budget: number): Promise<Array<Session>> {
+  return sessionsFor((await read(LISTING)) as Array<Listed>, outlinesOf(read), budget)
+}
+
+// The warm running, which a recall stops; and the recalls running, during which no warm starts.
+let warming: AbortController | null = null
+let recalls = 0
+
+/**
+ * Fills the local server with what the next recall reads, so that recall finds it parsed (register.tsx: once the
+ * session starts and after each of its turns, while recall is on). It reads as recall does, as warm reads: behind
+ * prompts' reads. One at a time and never during a recall, which stops one running; never through the CLI, as a CLI
+ * run keeps nothing.
+ */
+export async function warm($: EngineInterface, choice: string) {
+  const model = modelsFor(choice)[0]
+  if (warming || recalls > 0 || !model) return
+  const stop = (warming = new AbortController())
+  try {
+    await readRecallSessions(localReads($, stop.signal, true), budgetFor(model))
+  } catch {
+    // Stopped, or the server did not serve: the next recall reads on its own.
+  } finally {
+    warming = null
+  }
 }
 
 /** What recall gave a prompt: the report the main agent reads with it (none when nothing was found), and what the person sees. */
@@ -44,45 +99,58 @@ type Outcome = { context?: string; shown: Shown }
 const NOTHING: Outcome = { shown: 'none' }
 const FAILURE: Outcome = { context: FAILED, shown: 'failed' }
 
+type Completed = Awaited<ReturnType<EngineInterface['model']['complete']>> | undefined
+
+/** How a model call ended, for the debug log. */
+const endOf = (r: Completed) => (!r ? 'refused' : r.isAnswered ? 'answered' : r.reason === 'api-error' ? `api-error ${r.status}` : r.reason)
+
 /** Recall for `prompt`, until `deadline` (the clock's time): past it, `signal` aborts and nothing new starts. */
 async function recall($: EngineInterface, choice: string, prompt: string, deadline: number, signal: AbortSignal): Promise<Outcome> {
   const session = (await $.session.id()).slice(0, 8)
-  const models = choice === 'auto' ? (isSolMissing ? [FALLBACK] : [SOL, FALLBACK]) : [choice]
-  const listed = (await hiveRows($, ['local', 'sessions', '-n', '500', '--brief'], signal)) as Array<Listed>
-  const outlineOf = (locs: Array<string>) =>
-    hiveRows($, ['local', 'outline', ...locs, '--replies', '--no-agents', '--clip', '0'], signal) as Promise<Array<Row>>
-  // A session gone since the listing fails its whole batch before a row prints: the batch is read again one session
-  // at a time, without the ones that fail.
-  const outline = (locs: Array<string>) =>
-    outlineOf(locs).catch(async (error: unknown) => {
-      if (!(error instanceof CliFailed) || error.hasRows || locs.length === 1) throw error
-      const rows: Array<Row> = []
-      for (const loc of locs) rows.push(...(await outlineOf([loc]).catch((e: unknown) => (e instanceof CliFailed && !e.hasRows ? [] : Promise.reject(e)))))
-      return rows
-    })
-  const sessions = await sessionsFor(listed, outline, budgetFor(models[0]!))
-  for (const model of models) {
+  const models = modelsFor(choice)
+  // A model chosen by name and found missing: no call could answer.
+  if (!models.length) return FAILURE
+  const started = await $.clock.now()
+  const sessions = await readRecallSessions(localReads($, signal), budgetFor(models[0]!))
+  $.ui.log(`hive recall: read ${sessions.length} sessions in ${(await $.clock.now()) - started} ms`, { to: 'debug' })
+  const histories = new Map<number, History>()
+  for (const [i, model] of models.entries()) {
     const now = await $.clock.now()
-    const h = history(sessions, now, budgetFor(model), session)
+    const budget = budgetFor(model)
+    let h = histories.get(budget)
+    if (!h) {
+      h = history(sessions, now, budget, session)
+      histories.set(budget, h)
+    }
     // Nothing the main agent lacks (a new project, say): no entry could come of a call.
     if (![...h.seen.keys()].some(h.isNew)) return NOTHING
     // A call with under a second left could not answer.
     const left = Math.ceil(deadline - now)
     if (left < 1000) return FAILURE
-    const r = await $.model
+    const asked = await $.clock.now()
+    const r: Completed = await $.model
       .complete(
         { model, system: INSTRUCTIONS, prompt: promptBlocks(h, session, prompt, model.startsWith('gpt-')), effort: 'low', maxTokens: 4000, timeoutMs: left },
         { signal },
       )
       .catch(() => undefined)
+    const ended = await $.clock.now()
+    $.ui.log(`hive recall: ${model} ${endOf(r)} in ${ended - asked} ms, after ${asked - now} ms of history`, { to: 'debug' })
     if (r?.isAnswered) {
       const found = entries(r.text, h)
       return found.length ? { context: reportOf(found, h.from), shown: { entries: found, from: h.from } } : NOTHING
     }
-    // Not there to ask (Sol without model-router): the request was refused, or a 4xx other than a rate limit.
+    // Not there to ask: the request was refused, or a 4xx other than a rate limit. FALLBACK is always there, so its
+    // 4xx fails only this recall.
     const isMissing = !r || (r.reason === 'api-error' && r.status !== null && r.status >= 400 && r.status < 500 && r.status !== 429)
-    if (!isMissing) return FAILURE
-    if (model === SOL) isSolMissing = true
+    if (isMissing) {
+      if (model !== FALLBACK) missing.add(model)
+      continue
+    }
+    // Any other failure (a rate limit, a server error, no answer in time) can move on only to another non-fallback
+    // model with enough time to answer. FALLBACK is only for a process without the earlier models.
+    const next = models[i + 1]
+    if (!next || next === FALLBACK || deadline - ended < STANDARD_MIN_MS) return FAILURE
   }
   return FAILURE
 }
@@ -98,7 +166,12 @@ export async function submitWithRecall($: EngineInterface, e: Submit[1], next: S
   const stop = new AbortController()
   const deadline = (await $.clock.now()) + TIMEOUT_MS
   const expired = $.clock.sleep(TIMEOUT_MS, { signal: stop.signal }).then(() => FAILURE)
-  const { context, shown } = await Promise.race([recall($, choice, e.text, deadline, stop.signal), expired]).catch(() => FAILURE)
+  // Recall's reads go before a warm's.
+  recalls++
+  warming?.abort()
+  const { context, shown } = await Promise.race([recall($, choice, e.text, deadline, stop.signal), expired])
+    .catch(() => FAILURE)
+    .finally(() => recalls--)
   stop.abort()
   $.ui.status(undefined)
   const waiting = { prompt: e.text, shown }

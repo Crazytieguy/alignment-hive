@@ -97,10 +97,11 @@ older() {
 # not whichever version was downloaded last. It never moves back to an older version, though,
 # as a session still running an older plugin would have it: the retrieval and debrief skills
 # run the `hive` on the PATH, and older CLIs can number a transcript's entries differently.
-# So a release that pins an older CLI to roll back leaves the PATH on the newer one.
+# So a release that pins an older CLI to roll back leaves the PATH on the newer one. A link
+# already at this version is left as it is.
 LINKED=$(readlink "$HOME/.local/bin/hive" 2>/dev/null || true)
-if ! { [ -x "$LINKED" ] && [[ "$LINKED" == "$CACHE_BASE"/v*/hive ]] && [[ "$LINKED" =~ /v([^/]+)/hive$ ]] &&
-  older "$VERSION" "${BASH_REMATCH[1]}"; }; then
+if [ "$LINKED" != "$BINARY" ] && ! { [ -x "$LINKED" ] && [[ "$LINKED" == "$CACHE_BASE"/v*/hive ]] &&
+  [[ "$LINKED" =~ /v([^/]+)/hive$ ]] && older "$VERSION" "${BASH_REMATCH[1]}"; }; then
   mkdir -p "$HOME/.local/bin"
   ln -sf "$BINARY" "$HOME/.local/bin/hive"
 fi

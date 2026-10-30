@@ -7,7 +7,7 @@ import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 import { cli, hive } from './cli'
 import { noticeBand, noticeLabel } from './notice-band'
 import type { Notice, NoticeAction } from './notice-band'
-import { drawRecalled, onPromptStored, submitWithRecall } from './recall'
+import { drawRecalled, onPromptStored, submitWithRecall, warm } from './recall'
 import type { HiveBusy, HiveFolded, HiveNotices } from '../types'
 
 // `when`: which phase of the session shows the row (packages/hive-cli/src/commands/notices.ts).
@@ -184,18 +184,26 @@ function quoted(text: string): string {
   return `'${text.replaceAll("'", `'\\''`)}'`
 }
 
+/** Has the local server read what the next recall will (recall.tsx's warm), from a timer: outside the hook's dispatch. */
+function warmLater($: EngineInterface, recallModel: string): void {
+  $.clock.after(0, () => void warm($, recallModel))
+}
+
 export const register: Register = (on, options) => {
+  const recallModel = String(options.recallModel ?? 'auto')
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     cli.projectDir = await $.session.root()
-    inBackground(refresh($))
+    // While recall is on, a warm follows the notices: its CLI call waits for theirs, which may download the CLI first.
+    inBackground(refresh($).finally(() => options.recall === true && warmLater($, recallModel)))
     return started
   })
 
   on('prompt.submit', async ($, e, next) => {
     const [sessionId, prompted] = await Promise.all([$.session.id(), read($, promptedSession)])
     if (prompted !== sessionId) await update($, promptedSession, () => sessionId)
-    return options.recall === true ? submitWithRecall($, e, next, String(options.recallModel ?? 'auto')) : next(e)
+    return options.recall === true ? submitWithRecall($, e, next, recallModel) : next(e)
   })
 
   // What recall gave a prompt shows under it (recall.tsx); the prompt's stored row names it.
@@ -225,6 +233,8 @@ export const register: Register = (on, options) => {
   // (the desktop's fold: the terminal never reads it); a subagent's end is not the person's turn.
   on('turn.complete', async ($, e, next) => {
     if (await isRefreshNeeded($)) inBackground(refresh($))
+    // The person may type next.
+    if (options.recall === true && e.agentId === undefined) warmLater($, recallModel)
     const visible = e.agentId === undefined ? await visibleRows($, 'desktop') : null
     if (visible?.canFold && !visible.hasFolded && visible.band.some(isInfo)) await fold($, visible.sessionId, false)
     return next(e)
