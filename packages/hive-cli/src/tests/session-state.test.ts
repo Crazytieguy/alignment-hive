@@ -1,5 +1,15 @@
 import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -129,6 +139,75 @@ describe('discoverSessions', () => {
     const later = new Date(Date.now() + 60_000);
     utimesSync(join(transcriptsDir, 'user-only.jsonl'), later, later);
     expect(await ids()).toContain('user-only');
+  });
+});
+
+// A cwd inside one of the project's checkouts belongs without asking git; one that git could
+// resolve elsewhere (a nested repository, a symlink) is still asked.
+describe('discoverSessions: cwds inside the project', () => {
+  let base: string;
+  let projectRepo: string;
+  let worktree: string;
+  let transcriptsDir: string;
+  let gitLog: string;
+  let path: string | undefined;
+
+  function writeSession(name: string, cwd: string): void {
+    const lines = [{ type: 'user', cwd, sessionId: name }, { type: 'assistant', message: { content: 'hi' } }];
+    writeFileSync(join(transcriptsDir, `${name}.jsonl`), lines.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  }
+
+  beforeAll(() => {
+    // Physical paths, as Claude Code records them (the temp dir is a symlink on macOS).
+    base = realpathSync(mkdtempSync(join(tmpdir(), 'hive-session-inside-')));
+    projectRepo = join(base, 'proj');
+    worktree = join(projectRepo, '.claude', 'worktrees', 'wt');
+    const foreignRepo = join(base, 'other');
+    transcriptsDir = join(base, 'transcripts');
+    for (const dir of [projectRepo, foreignRepo, transcriptsDir]) mkdirSync(dir);
+    execSync('git init -q && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init', { cwd: projectRepo });
+    execSync(`git worktree add -q ${JSON.stringify(worktree)}`, { cwd: projectRepo });
+    execSync('git init -q', { cwd: foreignRepo });
+    const nested = join(projectRepo, 'vendor', 'nested');
+    for (const dir of [join(projectRepo, 'packages', 'web'), join(worktree, 'src'), join(nested, 'sub'), join(foreignRepo, 'lib')]) {
+      mkdirSync(dir, { recursive: true });
+    }
+    execSync('git init -q', { cwd: nested });
+    symlinkSync(join(foreignRepo, 'lib'), join(projectRepo, 'ext'));
+
+    writeSession('project-subdir', join(projectRepo, 'packages', 'web'));
+    writeSession('worktree-subdir', join(worktree, 'src'));
+    writeSession('nested-repo', nested);
+    writeSession('nested-repo-subdir', join(nested, 'sub'));
+    writeSession('symlink-to-foreign', join(projectRepo, 'ext'));
+
+    // A git first on PATH that records where it runs.
+    const bin = join(base, 'bin');
+    gitLog = join(base, 'git.log');
+    mkdirSync(bin);
+    const realGit = execSync('command -v git', { encoding: 'utf-8' }).trim();
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\npwd -P >> ${JSON.stringify(gitLog)}\nexec ${JSON.stringify(realGit)} "$@"\n`, {
+      mode: 0o755,
+    });
+    path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+  });
+
+  afterAll(() => {
+    process.env.PATH = path;
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  test('keeps subdirectories of the checkout and its worktrees without asking git', async () => {
+    writeFileSync(gitLog, '');
+    const ids = (await discoverSessions([transcriptsDir], projectRepo)).map((s) => s.sessionId).sort();
+    expect(ids).toEqual(['project-subdir', 'worktree-subdir']);
+    const asked = readFileSync(gitLog, 'utf-8');
+    // The stub ran: the nested repository and the symlink's target were asked.
+    expect(asked).toContain(join(projectRepo, 'vendor', 'nested', 'sub'));
+    expect(asked).toContain(join(base, 'other', 'lib'));
+    expect(asked).not.toContain(join(projectRepo, 'packages'));
+    expect(asked).not.toContain(join(worktree, 'src'));
   });
 });
 

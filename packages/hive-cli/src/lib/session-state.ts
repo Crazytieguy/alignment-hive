@@ -3,9 +3,9 @@
 // and the status that follows (computeSessionStatus). Exclusion goes through excludeSessionChecked alone.
 
 import { randomUUID } from 'node:crypto';
-import { constants, createReadStream } from 'node:fs';
+import { constants, createReadStream, existsSync, realpathSync } from 'node:fs';
 import { access, appendFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { canExclude, isInConsentWindow } from '@alignment-hive/session-data';
 import { z } from 'zod';
@@ -77,8 +77,32 @@ export function makeProjectSessionFilter(projectCwd: string): (filePath: string)
 }
 
 /**
- * makeProjectSessionFilter for an already-read session cwd; git is asked once per distinct cwd
- * that is not one of the project's own worktrees.
+ * Whether git, run in `cwd`, would find the repository of one of the `own` checkouts: `cwd` is a
+ * physical path (no symlink, which git would resolve) strictly inside one, and no directory on the
+ * way up to it holds `.git` or looks like a bare repository. A cwd that is gone is checked by its
+ * path alone, as git cannot run there either.
+ */
+function isInsideCheckout(cwd: string, own: Set<string>): boolean {
+  try {
+    if (realpathSync(cwd) !== cwd) return false;
+  } catch {
+    // gone or unreadable
+  }
+  for (let dir = cwd; ; ) {
+    const parent = dirname(dir);
+    if (parent === dir) return false;
+    if (existsSync(join(dir, '.git')) || (existsSync(join(dir, 'HEAD')) && existsSync(join(dir, 'objects')))) {
+      return false;
+    }
+    if (own.has(parent)) return true;
+    dir = parent;
+  }
+}
+
+/**
+ * makeProjectSessionFilter for an already-read session cwd. A cwd inside one of the project's own
+ * checkouts (isInsideCheckout) belongs without asking git; for any other, git is asked once per
+ * distinct cwd, which takes tens of ms where the cwd exists.
  */
 function makeProjectCwdFilter(projectCwd: string): (sessionCwd: string | null) => boolean {
   const worktrees = listWorktreePaths(projectCwd);
@@ -86,7 +110,7 @@ function makeProjectCwdFilter(projectCwd: string): (sessionCwd: string | null) =
   const own = new Set([...worktrees, projectCwd]);
   const mainCache = new Map<string, string | null>();
   return (sessionCwd) => {
-    if (!sessionCwd || own.has(sessionCwd)) return true;
+    if (!sessionCwd || own.has(sessionCwd) || isInsideCheckout(sessionCwd, own)) return true;
     let main = mainCache.get(sessionCwd);
     if (main === undefined) {
       main = getMainWorktreePath(sessionCwd);

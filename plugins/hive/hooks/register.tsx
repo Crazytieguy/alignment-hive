@@ -27,7 +27,7 @@ const isReviewing = atom({ plugin: 'hive', key: 'isReviewing' } as const, false)
 // they folded in this session (a /clear starts a new one, open again).
 const folded = atom({ plugin: 'hive', key: 'folded' } as const, null as HiveFolded | null)
 
-// Each `hive notices` costs a few seconds of CPU and a backend call, so a turn refreshes only when
+// Each `hive notices` costs up to a second of CPU and a backend call, so a turn refreshes only when
 // something can have changed: a new session id, a session the CLI has not discovered yet, or rows
 // older than this (the pending count and its countdown drift slowly).
 const REFRESH_MS = 15 * 60 * 1000
