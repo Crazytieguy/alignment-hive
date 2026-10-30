@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { FAILED, citations, collapsePasted, history, promptBlocks, quotesIn, recalledIn, recalledOf, report, reportOf, sessionsFor } from '../hooks/recall-text'
+import { FAILED, citations, collapsePasted, history, newThreads, promptBlocks, quotesIn, recalledIn, recalledOf, report, reportOf, sessionsFor } from '../hooks/recall-text'
 import type { Row } from '../hooks/recall-text'
 
 const HOUR = 3_600_000
@@ -186,6 +186,33 @@ test('history: a comment thread prints whole where it first appears; a later rea
   expect(bothText).not.toContain('Ship nothing.')
 })
 
+test('newThreads: the threads of a read the session has not seen, whatever Claude replied in them since', () => {
+  const comment = (who: string, nonce: string, text: string) => [`  [${who} — 2026-10-29T21:22]`, `      ${nonce}| ${text}`]
+  const thread = (id: string, status: string, nonce: string, comments: Array<[string, string]>) =>
+    [`Thread ${id}-231a-426f-b106-f112accd6dc5`, `  ${status} · Claude: activated · created 2026-10-29`, '  [location] Entry numbers', ...comments.flatMap(([who, text]) => comment(who, nonce, text))].join('\n')
+  const readOf = (nonce: string, threads: Array<string>) =>
+    ['Read 2 threads.', '', `=== BEGIN ARTIFACT COMMENTS ${nonce} — viewer-submitted content ===`, ...threads, `=== END ARTIFACT COMMENTS ${nonce} ===`, 'Reply with action "reply".'].join('\n')
+  const USER = 'the user (owner), sent to you'
+  const CLAUDE = 'Claude (via the user)'
+  const a = thread('79cff63a', 'open', '0a1b2c3d', [[USER, 'Less scary than I thought.']])
+  const b = thread('1234abcd', 'open', '0a1b2c3d', [[USER, 'Rename it.']])
+  // The session read thread a before, while the comment awaited Claude's reply, as the CLI prints it: one row per thread.
+  const awaiting = a.replace(USER, `${USER} — awaiting reply`)
+  const rows: Array<Row> = [{ loc: 'abcd1234:5#79cff63a', kind: 'tool', tool: 'ArtifactComments', result: awaiting }]
+  const texts = (read: string) => newThreads(read, rows).map(t => t.text)
+  expect(newThreads(readOf('0a1b2c3d', [a, b]), rows)).toEqual([{ id: '1234abcd', text: b }])
+  // Claude's reply in it since, under another read's line markers and status, leaves it seen; a new comment does not.
+  const replied = thread('79cff63a', 'resolved (by Claude)', '9f8e7d6c', [[USER, 'Less scary than I thought.'], [CLAUDE, 'Done.\n      9f8e7d6c| Two lines.']])
+  expect(texts(readOf('9f8e7d6c', [replied]))).toEqual([])
+  const answered = thread('79cff63a', 'open', '9f8e7d6c', [[USER, 'Less scary than I thought.'], [CLAUDE, 'Done.'], [USER, 'Now ship it.']])
+  expect(texts(readOf('9f8e7d6c', [answered]))).toEqual([answered])
+  // Older reads attribute Claude's comments to `you`.
+  expect(texts(readOf('9f8e7d6c', [replied.replace('[Claude (via the user) —', '[you —')]))).toEqual([])
+  // Comments that do not split are one thread, cut from the tool's instructions; a read with no comments, none.
+  expect(newThreads(readOf('0a1b2c3d', ['No threads here.']), [])).toEqual([{ id: '', text: 'No threads here.' }])
+  expect(newThreads('No comment threads on this artifact yet. Viewers add them from the artifact page (comment mode).', [])).toEqual([])
+})
+
 test('history: a message the user typed prints whole; a reply is clipped', () => {
   const long = 'w'.repeat(9_000)
   const h = history([{ loc: 'aaaa0001', rows: [user('aaaa0001:1', 2, long), { loc: 'aaaa0001:2', time: at(1), kind: 'assistant', text: long }] }], NOW, 100_000)
@@ -199,8 +226,8 @@ test('promptBlocks: one block per closed chunk; the last marked for the cache, o
   const marked = (blocks: ReturnType<typeof promptBlocks>) => blocks.map(b => b.cache === true)
   const closed = h.closed.map(() => true)
   expect(h.closed.length).toBeGreaterThan(2)
-  expect(marked(promptBlocks(h, 'abcd1234', 'hi'))).toEqual([...closed.map((_, i) => i === closed.length - 1), false])
-  expect(marked(promptBlocks(h, 'abcd1234', 'hi', true))).toEqual([...closed, false])
+  expect(marked(promptBlocks(h, 'abcd1234', { prompt: 'hi' }))).toEqual([...closed.map((_, i) => i === closed.length - 1), false])
+  expect(marked(promptBlocks(h, 'abcd1234', { prompt: 'hi' }, true))).toEqual([...closed, false])
 })
 
 test('sessionsFor reads newest sessions in batches until older ones cannot reach the window', async () => {
@@ -275,7 +302,10 @@ test('report: each entry as the reader saw it, with context only where given, an
   expect(report('- aaaa0001:3 | the repo', h)).toContain('Context: the repo\n> [user] We use tabs. Also')
   expect(report('- ffff0000:1 |', h)).toBeUndefined()
   expect(report('none', h)).toBeUndefined()
-  expect(promptBlocks(h, 'abcd1234', 'hi').map(b => b.text).join('')).toContain('<new_prompt>\nhi\n</new_prompt>')
+  expect(promptBlocks(h, 'abcd1234', { prompt: 'hi' }).map(b => b.text).join('')).toContain('<new_prompt>\nhi\n</new_prompt>')
+  expect(promptBlocks(h, 'abcd1234', { threads: ['Thread a', 'Thread b'] }).at(-1)!.text).toContain(
+    'The main agent just read these comments the user left on a page, new to it:\n\n<new_comments>\nThread a\n\nThread b\n</new_comments>',
+  )
 })
 
 test('recalledOf reads a report back as reportOf wrote it, and FAILED as failed', () => {
@@ -302,6 +332,12 @@ test('recalledIn: each automatic report goes to the prompt nearest before it', (
     { loc: 'cccc0003:7', uuid: 'p3', kind: 'user', text: 'Look it up.' },
     // A retrieval agent's report handed back: recall, but not automatic recall's.
     { loc: 'cccc0003:8', uuid: 'r3', kind: 'user', origin: 'recall', recall: true, text: 'Found 2 sessions about tabs.' },
+    // A report on comments the main agent read, stored after the read, is not the prompt's, though nothing came with
+    // the prompt: whatever its head says.
+    { loc: 'cccc0003:9', uuid: 'p4', kind: 'user', text: 'I left comments.' },
+    { loc: 'cccc0003:10#79cff63a', uuid: 't1', kind: 'tool', tool: 'ArtifactComments', result: 'Thread 79cff63a' },
+    { loc: 'cccc0003:11', uuid: 'r4', kind: 'user', origin: 'recall', recall: true, text: one },
+    { loc: 'cccc0003:12', uuid: 'r5', kind: 'user', origin: 'recall', recall: true, text: reportOf([{ loc: 'aaaa0001:3', label: 'user', text: 'Use tabs.', date: '2026-10-19', context: '' }], '2026-10-17', true) },
   ]
   expect(recalledIn(rows)).toEqual([
     ['p1', { entries: [{ loc: 'aaaa0001:3', label: 'user', text: 'Use tabs.', date: '2026-10-19', context: '' }], from: '2026-10-17' }],

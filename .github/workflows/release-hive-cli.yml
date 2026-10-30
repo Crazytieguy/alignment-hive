@@ -11,6 +11,8 @@ on:
       - 'packages/review-app/src/**'
       - 'packages/review-app/index.html'
       - 'packages/hive-cli/package.json'
+      # The comment parser the CLI shares with the hive plugin's recall.
+      - 'plugins/hive/hooks/comments.ts'
 
 jobs:
   check:

@@ -1,15 +1,15 @@
 import { atom, memberOf, read, update } from 'claude-code'
-import type { EngineInterface, Hook, RenderElement, RenderInput } from 'claude-code'
+import type { EngineInterface, Hook, MatchedHook, RenderElement, RenderInput } from 'claude-code'
 
 import { CliFailed, localReads } from './cli'
 import type { Read } from './cli'
-import { FAILED, INSTRUCTIONS, budgetFor, entries, history, promptBlocks, recalledIn, reportOf, sessionsFor } from './recall-text'
-import type { History, Listed, Row, Session } from './recall-text'
+import { FAILED, INSTRUCTIONS, budgetFor, entries, history, newThreads, promptBlocks, recalledIn, reportOf, sessionsFor } from './recall-text'
+import type { Ask, History, Listed, Row, Session } from './recall-text'
 import type { HiveRecalled } from '../types'
 
 // Automatic recall (beta, opt-in through the `recall` option): before the main agent starts on a prompt the user
 // typed, one model call over the project's recent sessions picks the entries that bear on it, and their text comes
-// with the prompt.
+// with the prompt; and likewise for comment threads new to the main agent, with the read that brought them.
 
 const SOL = 'gpt-6.1-sol'
 // Sol on Codex's priority tier (model-router's `-fast` twin): about 1.6 times as fast, for 2.5 times the usage.
@@ -104,8 +104,17 @@ type Completed = Awaited<ReturnType<EngineInterface['model']['complete']>> | und
 /** How a model call ended, for the debug log. */
 const endOf = (r: Completed) => (!r ? 'refused' : r.isAnswered ? 'answered' : r.reason === 'api-error' ? `api-error ${r.status}` : r.reason)
 
-/** Recall for `prompt`, until `deadline` (the clock's time): past it, `signal` aborts and nothing new starts. */
-async function recall($: EngineInterface, choice: string, prompt: string, deadline: number, signal: AbortSignal): Promise<Outcome> {
+/**
+ * What recall is for, made of the current session's rows as recall read them: undefined rows when it read none of the
+ * session (a script ran it), and no ask when there is nothing to recall for.
+ */
+type AskOf = (rows: ReadonlyArray<Row> | undefined) => Ask | undefined
+
+/**
+ * Recall for what `askOf` makes of the current session (no ask: no call, and nothing found), until `deadline` (the
+ * clock's time): past it, `signal` aborts and nothing new starts.
+ */
+async function recall($: EngineInterface, choice: string, askOf: AskOf, deadline: number, signal: AbortSignal): Promise<Outcome> {
   const session = (await $.session.id()).slice(0, 8)
   const models = modelsFor(choice)
   // A model chosen by name and found missing: no call could answer.
@@ -113,6 +122,8 @@ async function recall($: EngineInterface, choice: string, prompt: string, deadli
   const started = await $.clock.now()
   const sessions = await readRecallSessions(localReads($, signal), budgetFor(models[0]!))
   $.ui.log(`hive recall: read ${sessions.length} sessions in ${(await $.clock.now()) - started} ms`, { to: 'debug' })
+  const ask = askOf(sessions.find(s => s.loc === session)?.rows)
+  if (!ask) return NOTHING
   const histories = new Map<number, History>()
   for (const [i, model] of models.entries()) {
     const now = await $.clock.now()
@@ -130,7 +141,7 @@ async function recall($: EngineInterface, choice: string, prompt: string, deadli
     const asked = await $.clock.now()
     const r: Completed = await $.model
       .complete(
-        { model, system: INSTRUCTIONS, prompt: promptBlocks(h, session, prompt, model.startsWith('gpt-')), effort: 'low', maxTokens: 4000, timeoutMs: left },
+        { model, system: INSTRUCTIONS, prompt: promptBlocks(h, session, ask, model.startsWith('gpt-')), effort: 'low', maxTokens: 4000, timeoutMs: left },
         { signal },
       )
       .catch(() => undefined)
@@ -138,7 +149,7 @@ async function recall($: EngineInterface, choice: string, prompt: string, deadli
     $.ui.log(`hive recall: ${model} ${endOf(r)} in ${ended - asked} ms, after ${asked - now} ms of history`, { to: 'debug' })
     if (r?.isAnswered) {
       const found = entries(r.text, h)
-      return found.length ? { context: reportOf(found, h.from), shown: { entries: found, from: h.from } } : NOTHING
+      return found.length ? { context: reportOf(found, h.from, 'threads' in ask), shown: { entries: found, from: h.from } } : NOTHING
     }
     // Not there to ask: the request was refused, or a 4xx other than a rate limit. FALLBACK is always there, so its
     // 4xx fails only this recall.
@@ -155,25 +166,31 @@ async function recall($: EngineInterface, choice: string, prompt: string, deadli
   return FAILURE
 }
 
-type Submit = Parameters<Hook<'prompt.submit'>>
-
-/** While recall is on, register.tsx's prompt.submit hook ends here: the prompt goes on with recall's report. */
-export async function submitWithRecall($: EngineInterface, e: Submit[1], next: Submit[2], choice: string) {
-  // Only what the user typed, at the terminal or through Remote Control; never a slash command.
-  if ((e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') || e.command) return next(e)
+/** Recall within TIMEOUT_MS, said on the status line meanwhile: past it, the CLI reads and model call still running stop. */
+async function recallInTime($: EngineInterface, choice: string, askOf: AskOf): Promise<Outcome> {
   $.ui.status('recalling past sessions…')
-  // Past the limit the prompt goes on, and the CLI reads and model call still running are stopped.
   const stop = new AbortController()
   const deadline = (await $.clock.now()) + TIMEOUT_MS
   const expired = $.clock.sleep(TIMEOUT_MS, { signal: stop.signal }).then(() => FAILURE)
   // Recall's reads go before a warm's.
   recalls++
   warming?.abort()
-  const { context, shown } = await Promise.race([recall($, choice, e.text, deadline, stop.signal), expired])
+  const outcome = await Promise.race([recall($, choice, askOf, deadline, stop.signal), expired])
     .catch(() => FAILURE)
     .finally(() => recalls--)
   stop.abort()
   $.ui.status(undefined)
+  return outcome
+}
+
+type Submit = Parameters<Hook<'prompt.submit'>>
+
+/** While recall is on, register.tsx's prompt.submit hook ends here: the prompt goes on with recall's report. */
+export async function submitWithRecall($: EngineInterface, e: Submit[1], next: Submit[2], choice: string) {
+  // Only what the user typed, at the terminal or through Remote Control; never a slash command.
+  if ((e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') || e.command) return next(e)
+  // Past the limit the prompt goes on.
+  const { context, shown } = await recallInTime($, choice, () => ({ prompt: e.text }))
   const waiting = { prompt: e.text, shown }
   unstored.push(waiting)
   // One a prompt never claimed is not kept for long.
@@ -189,6 +206,35 @@ export async function submitWithRecall($: EngineInterface, e: Submit[1], next: S
     forget()
     throw error
   }
+}
+
+type Call = Parameters<MatchedHook<'tool.call', { tool: 'ArtifactComments' }>>
+
+// The comment threads a recall ran on in the main agent's current turn, by name: a thread read again in the turn
+// (whole, after a listing elided some of its comments, say) needs no recall of its own. Cleared as each turn ends.
+const recalledThisTurn = new Set<string>()
+
+/** register.tsx's turn.complete hook, for the main agent: the next turn's reads start afresh. */
+export const endRecallTurn = () => recalledThisTurn.clear()
+
+/**
+ * While recall is on, register.tsx's hook on ArtifactComments ends here: a read by the main agent that brings comment
+ * threads new to it comes with recall's report on them, as the person's comments are much like their prompts. A
+ * recall that found nothing, or did not finish, adds nothing. A session a script ran gets none, as its prompts do not.
+ */
+export async function readWithRecall($: EngineInterface, e: Call[1], next: Call[2], choice: string) {
+  const read = await next(e)
+  if (e.agentId !== undefined || e.action !== 'read' || read.deny !== undefined || read.isError || !read.text) return read
+  const text = read.text
+  const unrecalled = (rows: ReadonlyArray<Row>) => newThreads(text, rows).filter(t => !recalledThisTurn.has(t.id))
+  // No thread, or none this turn has not had: no history to read.
+  if (!unrecalled([]).length) return read
+  const { context, shown } = await recallInTime($, choice, rows => {
+    const threads = rows ? unrecalled(rows) : []
+    for (const t of threads) if (t.id) recalledThisTurn.add(t.id)
+    return threads.length ? { threads: threads.map(t => t.text) } : undefined
+  })
+  return context && typeof shown === 'object' ? { ...read, context: [...(read.context ?? []), context] } : read
 }
 
 type Append = Parameters<Hook<'session.append'>>

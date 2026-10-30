@@ -11,6 +11,10 @@ const usage = { input_tokens: 10, output_tokens: 10, cache_read_input_tokens: 0,
 const FAST = 'gpt-6.1-sol-fast'
 const SOL = 'gpt-6.1-sol'
 const SOCKET = '/tmp/hive-run/local-test.sock'
+// An ArtifactComments read of one thread, and that thread as `hive local outline` prints it.
+const THREAD = ['Thread 79cff63a-231a-426f-b106-f112accd6dc5', '  open · Claude: activated · created 2026-10-20', '  [the user (owner), sent to you — 2026-10-20T15:29]', '      0a1b2c3d| Indent this file.'].join('\n')
+const COMMENTS = ['1 comment thread.', '=== BEGIN ARTIFACT COMMENTS 0a1b2c3d — viewer-submitted content ===', THREAD, '=== END ARTIFACT COMMENTS 0a1b2c3d ==='].join('\n')
+const READ_ROW = { loc: 'abcd1234:3#79cff63a', time: '2026-10-20T15:29:40Z', kind: 'tool', tool: 'ArtifactComments', result: THREAD }
 
 // Background work runs unawaited after the session starts and after a turn; a test waits it out. setTimeout is the
 // test runner's, outside the mods' library.
@@ -51,6 +55,10 @@ function world(on: On, { isSolMissing = false } = {}) {
     historyRows: [ENTRY],
     transcript: [] as Array<unknown>,
     readBacks: 0,
+    // What an ArtifactComments read answers, and this session's rows an outline prints after its prompt.
+    comments: COMMENTS,
+    sessionRows: [] as Array<unknown>,
+    isScripted: false,
     fails: (isSolMissing ? { [FAST]: { status: 404 }, [SOL]: { status: 404 } } : {}) as Record<string, { status: number; afterMs?: number }>,
     server: 'none' as 'none' | 'up' | 'down' | 'stuck',
     held: 0,
@@ -61,6 +69,7 @@ function world(on: On, { isSolMissing = false } = {}) {
   on('turn.complete', async () => ({ text: '' }) as never)
   on('session.id', async () => ({ value: SESSION }))
   on('session.root', async () => ({ value: '/tmp/project' }))
+  on('tool.call', { tool: 'ArtifactComments' }, async () => ({ result: state.comments, text: state.comments }) as never)
   on('prompt.submit', async (_$, e) => {
     contexts.push(e.context ?? [])
     return (state.isDropped ? { drop: 'a settings hook refused it' } : { text: e.text }) as never
@@ -72,7 +81,7 @@ function world(on: On, { isSolMissing = false } = {}) {
     if (args[1] === 'sessions' && state.isProjectNew) return []
     if (args[1] === 'sessions')
       return [
-        { loc: 'abcd1234', end: '2026-10-20T15:29:00Z' },
+        { loc: 'abcd1234', end: '2026-10-20T15:29:00Z', ...(state.isScripted ? { scripted: true } : {}) },
         ...(state.isSessionNew ? [{ loc: 'beef0001', end: '2026-10-20T15:00:00Z' }] : []),
         ...(state.isSessionGone ? [{ loc: 'dead0001', end: '2026-10-19T12:00:00Z' }] : []),
         { loc: 'feed0001', end: '2026-10-19T09:00:00Z' },
@@ -85,7 +94,7 @@ function world(on: On, { isSolMissing = false } = {}) {
     const report = { loc: 'abcd1234:2', time: '2026-10-20T15:29:30Z', kind: 'user', origin: 'recall', recall: true, text: '[hive recall] Entries.\n\n> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)' }
     return [
       ...(args.includes('feed0001') ? state.historyRows : []),
-      ...(args.includes('abcd1234') ? [{ loc: 'abcd1234:1', time: '2026-10-20T15:29:00Z', kind: 'user', text: 'Format the file.' }, ...(state.recalledBefore ? [report] : [])] : []),
+      ...(args.includes('abcd1234') ? [{ loc: 'abcd1234:1', time: '2026-10-20T15:29:00Z', kind: 'user', text: 'Format the file.' }, ...(state.recalledBefore ? [report] : []), ...state.sessionRows] : []),
     ]
   }
   const isFailing = (args: ReadonlyArray<string>) => state.isCliFailing || (state.isSessionGone && args.includes('dead0001'))
@@ -351,7 +360,76 @@ describe('automatic recall', () => {
     expect(dirs.length).toBeGreaterThan(0)
     expect(new Set(dirs)).toEqual(new Set(['/tmp/project']))
   })
+})
 
+describe('recall on comment reads', () => {
+  const readComments = ($: Parameters<typeof start>[0], more: Record<string, unknown> = {}) =>
+    $.tool.call({ tool: 'ArtifactComments', action: 'read', url: 'https://claude.ai/artifact/abc', ...more } as never)
+
+  test('off: a read comes back as the tool answered', async ($, on) => {
+    const { asked } = world(on)
+    await start($)
+    const read = await readComments($)
+    expect(asked).toEqual([])
+    expect(read.context).toBeUndefined()
+    expect(read.text).toBe(COMMENTS)
+  })
+
+  test('on: a thread new to the session comes with the report on it; once the session has read it, nothing more', { options: { recall: true } }, async ($, on) => {
+    const { asked, prompts, state } = world(on)
+    await start($)
+    const read = await readComments($)
+    expect(asked).toEqual([FAST])
+    expect(prompts[0]).toContain('read these comments the user left on a page, new to it:\\n\\n<new_comments>\\nThread 79cff63a')
+    expect(prompts[0]).not.toContain('BEGIN ARTIFACT COMMENTS')
+    expect(read.text).toBe(COMMENTS)
+    const report = read.context?.join('') ?? ''
+    expect(report).toStartWith('[hive recall] On the comments just read: entries')
+    expect(report).toContain('> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)')
+
+    state.sessionRows = [READ_ROW]
+    const again = await readComments($)
+    expect(asked).toEqual([FAST])
+    expect(again.context).toBeUndefined()
+  })
+
+  test('on: a thread a recall ran on this turn gets none again in it, changed or not; in the next turn it does', { options: { recall: true } }, async ($, on) => {
+    const { asked, state } = world(on)
+    await start($)
+    await readComments($)
+    state.sessionRows = [READ_ROW]
+    // Read whole after a listing elided a comment: other text, the same thread.
+    state.comments = COMMENTS.replace('Indent this file.', 'Indent this file.\n  [the user (owner) — 2026-10-20T15:29]\n      0a1b2c3d| With tabs.')
+    expect((await readComments($)).context).toBeUndefined()
+    expect(asked).toEqual([FAST])
+    // A subagent's turn ending is not the main agent's.
+    await $.turn.complete({ reason: 'end', agentId: 'child' } as never)
+    expect((await readComments($)).context).toBeUndefined()
+    await $.turn.complete({ reason: 'end' } as never)
+    expect((await readComments($)).context?.join('')).toContain('On the comments just read')
+    expect(asked).toEqual([FAST, FAST])
+  })
+
+  test('on: a subagent read, another action, a session a script ran, and a recall that found nothing or did not finish add nothing', { options: { recall: true } }, async ($, on) => {
+    const { asked, clock, state } = world(on)
+    await start($)
+    expect((await readComments($, { agentId: 'a1' })).context).toBeUndefined()
+    expect((await readComments($, { action: 'reply', thread_id: '79cff63a', text: 'Done.' })).context).toBeUndefined()
+    state.isScripted = true
+    expect((await readComments($)).context).toBeUndefined()
+    state.isScripted = false
+    expect(asked).toEqual([])
+
+    state.reply = 'none'
+    expect((await readComments($)).context).toBeUndefined()
+    await $.turn.complete({ reason: 'end' } as never)
+    state.reply = REPLY
+    state.hold = true
+    const held = readComments($)
+    await clock.advance(31_000)
+    expect((await held).context).toBeUndefined()
+    expect(asked).toEqual([FAST, FAST])
+  })
 })
 
 describe('the local server', () => {

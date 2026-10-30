@@ -40,7 +40,7 @@ const results: Record<string, Array<Call>> = {};
 const histories = prompts.map((p) => {
   const now = Date.parse(p.time);
   const h = history(sessionsAt(now, 'all'), now, budgetArg ? Number(budgetArg) : budgetFor('claude'));
-  return { p, h, tail: promptBlocks(h, p.session, p.text).at(-1)!.text.length };
+  return { p, h, tail: promptBlocks(h, p.session, { prompt: p.text }).at(-1)!.text.length };
 });
 for (const [ttlName, ttl] of Object.entries(TTLS)) {
   const cache = new Map<string, number>(); // prefix key -> expiry

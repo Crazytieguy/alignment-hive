@@ -82,7 +82,7 @@ async function runOne(c: (typeof index)[number], name: string, v: Variant): Prom
   const sessions = await sessionsFor(listed, async (locs) => (await hive(['outline', ...locs, '--replies', '--clip', '0'])) as Array<Row>, budget);
   const h = history(sessions, now, budget, session);
   const prompt = readFileSync(join(BENCH, 'cases', c.id, 'prompt.txt'), 'utf8');
-  const text = promptBlocks(h, session, prompt).map((b) => b.text).join('');
+  const text = promptBlocks(h, session, { prompt }).map((b) => b.text).join('');
   const t0 = performance.now();
   const r = await run(
     'claude',

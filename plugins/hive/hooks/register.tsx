@@ -7,7 +7,7 @@ import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 import { cli, hive } from './cli'
 import { noticeBand, noticeLabel } from './notice-band'
 import type { Notice, NoticeAction } from './notice-band'
-import { drawRecalled, onPromptStored, submitWithRecall, warm } from './recall'
+import { drawRecalled, endRecallTurn, onPromptStored, readWithRecall, submitWithRecall, warm } from './recall'
 import type { HiveBusy, HiveFolded, HiveNotices } from '../types'
 
 // `when`: which phase of the session shows the row (packages/hive-cli/src/commands/notices.ts).
@@ -206,10 +206,12 @@ export const register: Register = (on, options) => {
     return options.recall === true ? submitWithRecall($, e, next, recallModel) : next(e)
   })
 
-  // What recall gave a prompt shows under it (recall.tsx); the prompt's stored row names it.
+  // What recall gave a prompt shows under it (recall.tsx); the prompt's stored row names it. A comments read gets
+  // recall too.
   if (options.recall === true) {
     on('session.append', { door: ['prompt', 'delivery'] }, onPromptStored)
     on('ui.render', { component: 'UserMessage' }, drawRecalled)
+    on('tool.call', { tool: 'ArtifactComments' }, ($, e, next) => readWithRecall($, e, next, recallModel))
   }
 
   // The CLI discovers a session once it holds an assistant reply: the first reply row stored in
@@ -234,7 +236,10 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     if (await isRefreshNeeded($)) inBackground(refresh($))
     // The person may type next.
-    if (options.recall === true && e.agentId === undefined) warmLater($, recallModel)
+    if (options.recall === true && e.agentId === undefined) {
+      endRecallTurn()
+      warmLater($, recallModel)
+    }
     const visible = e.agentId === undefined ? await visibleRows($, 'desktop') : null
     if (visible?.canFold && !visible.hasFolded && visible.band.some(isInfo)) await fold($, visible.sessionId, false)
     return next(e)
