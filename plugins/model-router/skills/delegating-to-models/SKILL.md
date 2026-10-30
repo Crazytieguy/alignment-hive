@@ -20,7 +20,8 @@ dollar, OpenAI's Pro plans are more generous and Plus is about
 comparable. The Codex allowance roughly
 tracks token price, so it stretches much further on the smaller GPT
 models. An install on an OpenAI API key pays per token instead, so volume
-costs money directly. Within the Claude family, Fable use is
+costs money directly. A `-fast` route spends 2.5x its model's
+subscription usage, or about twice its API price. Within the Claude family, Fable use is
 capped at a share of the weekly limit (currently up to ~50%); the other
 Claude models draw on the whole limit.
 
@@ -239,6 +240,10 @@ Grok and Muse families have per-user agents that setup creates, named for
 the route: a `grok-4.7` or `muse-wonder-1.0` agent, and
 `{model: 'muse-wonder-1.0', effort: 'medium'}` in Workflow, work the same
 way.
+
+Each of the four GPT models has a `-fast` twin on Codex's fast tier, as an
+agent and a Workflow model (`gpt-6.1-sol-fast`): 1.5–2x faster for 2.5x
+the usage. Use one when someone is waiting on the result.
 
 Consider setting the Agent tool's `effort` parameter when delegating,
 Claude models included. Without it, the GPT, Grok, Muse and open-weights

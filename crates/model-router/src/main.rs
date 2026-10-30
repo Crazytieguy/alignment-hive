@@ -89,6 +89,9 @@ enum SettingsCommand {
     /// Bring the /model picker in ~/.claude/settings.json up to the shipped
     /// GPT routes (a report, unless --apply).
     Models {
+        /// Add optional Fast twins after their existing base rows instead.
+        #[arg(long)]
+        fast: bool,
         /// Make the change rather than report it.
         #[arg(long)]
         apply: bool,
@@ -332,13 +335,22 @@ fn settings(
         None => std::env::current_dir(),
     };
     match command {
-        SettingsCommand::Models { apply, project_dir } => {
+        SettingsCommand::Models {
+            fast,
+            apply,
+            project_dir,
+        } => {
             let home = home.context("HOME is not set")?;
             let project = project(project_dir)?;
             settings_edit::models(
                 &home,
                 &project,
                 config.as_ref().map_err(String::as_str),
+                if fast {
+                    settings_edit::Migration::FastTwins
+                } else {
+                    settings_edit::Migration::Shipped
+                },
                 claude_version,
                 apply.then_some(lock.as_path()),
             )

@@ -85,20 +85,29 @@ if [ -n "$HEALTH" ]; then
   # service is on another version (so session start never waits on a binary
   # download). Its button runs `settings <operation> --apply`
   # (hooks/register.tsx); until then, a row each session, unless dismissed for
-  # this plugin version.
+  # its version or offered routes.
   ROWS=""
   # Whether `settings $1` needs a change, its report left in OUT.
   needed() {
     [ "$RUNNING_VERSION" = "$PLUGIN_VERSION" ] &&
-      OUT=$(bash "$BOOTSTRAP" settings "$1" --project-dir "$PROJECT" 2>/dev/null) &&
+      OUT=$(bash "$BOOTSTRAP" settings "$@" --project-dir "$PROJECT" 2>/dev/null) &&
       printf '%s' "$OUT" | grep -q '"needed":true'
   }
+  # One compact JSON list field from OUT; the binary's lists contain strings.
+  json_list() {
+    printf '%s' "$OUT" | sed -n 's/.*"'"$1"'":\[\([^]]*\)\].*/\1/p'
+  }
+  # "GPT-6.1 Terra" or "GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna".
+  format_labels() {
+    json_list labels | sed 's/","/, /g; s/"//g; s/\(.*\), /\1 and /'
+  }
   # Adds the row for OUT: id, text, and the button's action id and label,
-  # offered with Customize when the binary can apply it, else Run setup. A
-  # dismissal holds until the plugin's next version, or until $5 changes.
+  # offered with Customize (or $6) when the binary can apply it, else Run setup.
+  # A dismissal holds until the plugin's next version, or until $5 changes.
   add_row() {
     if printf '%s' "$OUT" | grep -q '"canApply":true'; then
-      ACTIONS='{"id": "'"$3"'", "label": "'"$4"'", "kind": "plugin"}, {"id": "customize", "label": "Customize", "kind": "command", "command": "/model-router:setup"}'
+      SECONDARY=${6:-'{"id": "customize", "label": "Customize", "kind": "command", "command": "/model-router:setup"}'}
+      ACTIONS='{"id": "'"$3"'", "label": "'"$4"'", "kind": "plugin"}, '"$SECONDARY"
     else
       ACTIONS='{"id": "setup", "label": "Run setup", "kind": "command", "command": "/model-router:setup"}'
     fi
@@ -112,13 +121,26 @@ if [ -n "$HEALTH" ]; then
   ADDS=""
   if needed models; then
     [ "${NEW_MODEL_DISMISSED:-}" = "$PLUGIN_VERSION" ] ||
-      ADDS=$(printf '%s' "$OUT" | sed -n 's/.*"adds":\[\([^]]*\)\].*/\1/p' | tr -d '"')
-    # "GPT-6.1 Terra" or "GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna".
-    LABELS=$(printf '%s' "$OUT" | sed -n 's/.*"labels":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g; s/\(.*\), /\1 and /')
+      ADDS=$(json_list adds | tr -d '"')
+    LABELS=$(format_labels)
     if [ -n "$LABELS" ]; then
       add_row new-model "$LABELS can be added to /model" add-models "Add to /model"
     else
       add_row new-model "/model still lists retired GPT models" add-models "Update /model"
+    fi
+  fi
+  # Optional Fast picker rows: a decline holds for good; Dismiss holds until
+  # the offered twins change. Their windows stay with this row only while it shows.
+  if [ "${FAST_MODELS_DISMISSED:-}" != declined ] && needed models --fast &&
+    printf '%s' "$OUT" | grep -q '"canApply":true'; then
+    FAST_ADDS=$(json_list adds | tr -d '"')
+    FAST_VERSION="fast:$FAST_ADDS"
+    if [ "${FAST_MODELS_DISMISSED:-}" != "$FAST_VERSION" ]; then
+      ADDS="${ADDS:+$ADDS,}$FAST_ADDS"
+      LABELS=$(format_labels)
+      add_row fast-models "$LABELS can be added to /model: 1.5–2x faster for 2.5x the usage" \
+        add-fast-models "Add to /model" "$FAST_VERSION" \
+        "{\"id\": \"decline-fast-models\", \"label\": \"Don't add\", \"kind\": \"plugin\"}"
     fi
   fi
   # The next session's context windows are not setup's: the old setup's single
@@ -126,7 +148,7 @@ if [ -n "$HEALTH" ]; then
   # compaction window, or one still at a Codex default that has since moved
   # (`updates`).
   if needed windows; then
-    ALL_ROUTES=$(printf '%s' "$OUT" | sed -n 's/.*"routes":\[\([^]]*\)\].*/\1/p' | tr -d '"')
+    ALL_ROUTES=$(json_list routes | tr -d '"')
     ROUTES=""
     for ROUTE in $(printf '%s' "$ALL_ROUTES" | tr ',' ' '); do
       case ",$ADDS," in
@@ -134,7 +156,7 @@ if [ -n "$HEALTH" ]; then
         *) ROUTES="${ROUTES:+$ROUTES, }$ROUTE" ;;
       esac
     done
-    UPDATES=$(printf '%s' "$OUT" | sed -n 's/.*"updates":\[\([^]]*\)\].*/\1/p' | sed 's/","/, /g; s/"//g')
+    UPDATES=$(json_list updates | sed 's/","/, /g; s/"//g')
     if printf '%s' "$OUT" | grep -q '"legacy":true'; then
       add_row windows "context windows are still set the old way" windows "Migrate"
     elif [ -n "$ROUTES" ] && [ -n "$UPDATES" ]; then

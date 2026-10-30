@@ -138,7 +138,9 @@ here works until the binary resolves.
    adds the shipped GPT routes' rows with their `modelSettings` windows,
    drops retired GPT rows (GPT-6 Sol, GPT-5.6), keeps every other row, and
    replaces an earlier install's `ANTHROPIC_CUSTOM_MODEL_OPTION` pair. When
-   it prints `"applied": false`, its `reason` says what needs the user. Add
+   it prints `"applied": false`, its `reason` says what needs the user.
+   `--fast` adds the optional Fast twins' rows (1.5–2x faster, 2.5x the usage),
+   also offered by the band; add them in setup only when the user asks. Add
    a row per configured Grok, Muse or open-weights route (`routed-models`
    in `$ROUTER doctor`; Muse: per `references/muse.md`, no Full row while
    `muse-plan` warns) by hand, and drop a row when its route goes: rows are

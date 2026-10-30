@@ -1,10 +1,10 @@
 //! The TOML config and its sibling `secrets.toml`: schema, loading,
 //! validation, and the commented template. Every construction path must end
 //! in [`Config::prepare`], which rebuilds the generated routes (built-in Grok
-//! and Muse, one per `[[openai-providers]]` model) and enforces the safety
-//! invariants, such as loopback-only binding, a loopback external upstream
-//! (the GPT credential boundary) and Muse's Standard mode. The built-in
-//! routes live in [`catalog`].
+//! and Muse, one per `[[openai-providers]]` model, the `-fast` twins) and
+//! enforces the safety invariants, such as loopback-only binding, a loopback
+//! external upstream (the GPT credential boundary) and Muse's Standard mode.
+//! The built-in routes live in [`catalog`].
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
@@ -22,13 +22,14 @@ mod catalog;
 pub(crate) use catalog::GPT_CONTEXT_WINDOW;
 pub(crate) use catalog::{
     CODEX_DEFAULT_CONTEXT_WINDOW, MUSE_WONDER_FULL, SHIPPED_GPT_ROUTES, codex_default_window,
-    forces_text_on_compaction, is_built_in_route, is_codex_native_model, is_muse_contributor_model,
-    is_retired_gpt_route, names_auto_model, names_muse_model, names_muse_wonder_full,
-    overflow_dialect, shipped_picker_rows, superseded_codex_windows,
+    fast_twin_base, fast_twin_id, forces_text_on_compaction, has_fast_tier, is_built_in_route,
+    is_codex_native_model, is_muse_contributor_model, is_retired_gpt_route, names_auto_model,
+    names_muse_model, names_muse_wonder_full, overflow_dialect, shipped_picker_rows,
+    superseded_codex_windows,
 };
 use catalog::{
     GROK_CONTEXT_WINDOW, GROK_MODELS, MUSE_CONTEXT_WINDOW, MUSE_CONTRIBUTOR_SUFFIX, MUSE_MODELS,
-    built_in_routes, default_models,
+    built_in_routes, default_models, fast_twins,
 };
 
 /// The single supported upstream name: the managed/external `CLIProxyAPI`
@@ -282,8 +283,9 @@ pub struct Config {
     pub declared_adopted: bool,
 
     /// Routes the router generates rather than reads: the built-in Grok and
-    /// Muse families when enabled, plus one per `[[openai-providers]]`
-    /// model entry. Rebuilt by [`Config::prepare`], never read from TOML.
+    /// Muse families when enabled, one per `[[openai-providers]]` model
+    /// entry, and the `-fast` twins of `models`. Rebuilt by
+    /// [`Config::prepare`], never read from TOML.
     ///
     /// Deliberately not merged into `models`: that field carries a serde
     /// default, which a single user-written `[[models]]` block replaces
@@ -559,6 +561,11 @@ pub struct ModelRoute {
     /// See [`ProviderModel::pinned_providers`]; generated routes only.
     #[serde(skip)]
     pub pinned_providers: Option<Vec<String>>,
+
+    /// Set on the generated `-fast` twins only, which ask for Codex's
+    /// priority tier ([`crate::service_tier`]); never read from TOML.
+    #[serde(skip)]
+    pub fast_tier: bool,
 }
 
 impl ModelRoute {
@@ -919,7 +926,8 @@ impl Config {
     }
 
     /// Every route the router serves: configured `[[models]]` plus the
-    /// generated ones (built-in Grok and Muse, `[[openai-providers]]`).
+    /// generated ones (built-in Grok and Muse, `[[openai-providers]]`, the
+    /// `-fast` twins).
     pub fn effective_models(&self) -> impl Iterator<Item = &ModelRoute> {
         self.models.iter().chain(self.generated_models.iter())
     }
@@ -962,6 +970,7 @@ impl Config {
 
     /// Rebuilds every generated route. The Grok and Muse families contribute
     /// nothing when disabled, so a config that never opts in is unchanged.
+    /// The `-fast` twins come last, so any other route can claim their IDs.
     fn rebuild_generated_models(&mut self) {
         let derived = self.openai_providers.iter().flat_map(|provider| {
             provider.models.iter().map(|model| ModelRoute {
@@ -1002,7 +1011,20 @@ impl Config {
                 routes
             }
         };
-        self.generated_models = grok.into_iter().chain(muse).chain(derived).collect();
+        let mut generated: Vec<ModelRoute> = grok.into_iter().chain(muse).chain(derived).collect();
+        // A route the user wrote or another generated route under a twin's ID wins.
+        let twins = fast_twins(&self.models)
+            .into_iter()
+            .filter(|twin| {
+                !self
+                    .models
+                    .iter()
+                    .chain(&generated)
+                    .any(|route| route.routing_id == twin.routing_id)
+            })
+            .collect::<Vec<_>>();
+        generated.extend(twins);
+        self.generated_models = generated;
     }
 
     /// Validates loopback binding, upstream URLs, and routing entries.
@@ -1335,6 +1357,7 @@ impl Config {
 # GPT routing is exact-match only. Requests for every other model go to
 # Anthropic. By default the built-in GPT routes below are enabled; writing
 # any [[models]] entry replaces the whole default list.
+# Each GPT route with a priority tier also gets a <routing-id>-fast twin.
 {models}
 # Claude Code implements its WebSearch tool as a side call that runs the
 # server-side web_search tool on the session model. The router matches the
@@ -1909,7 +1932,11 @@ mod tests {
     #[test]
     fn provider_models_become_derived_routes_with_namespaced_aliases() {
         let config = parse_and_prepare(&provider_toml(KIMI_MODEL));
-        assert_eq!(config.generated_models.len(), 1);
+        assert_eq!(
+            config.generated_models.len(),
+            1 + SHIPPED_GPT_ROUTES.len(),
+            "the route and the -fast twins"
+        );
         let route = &config.generated_models[0];
         assert_eq!(route.routing_id, "kimi-k2.7");
         assert_eq!(route.upstream, "cliproxy");
@@ -2304,7 +2331,7 @@ mod tests {
         let both = parse_and_prepare("[grok]\nenabled = true\n[muse]\nenabled = true\n");
         assert_eq!(
             both.generated_models.len(),
-            GROK_MODELS.len() + MUSE_MODELS.len()
+            GROK_MODELS.len() + MUSE_MODELS.len() + SHIPPED_GPT_ROUTES.len()
         );
     }
 
@@ -2635,5 +2662,142 @@ mod tests {
             );
         }
         assert!(!template.contains("-contributor ("), "{template}");
+    }
+
+    // ---- `-fast` twins ----
+
+    /// The `-fast` twins `config` serves, by routing ID.
+    fn twins(config: &Config) -> Vec<&str> {
+        config
+            .effective_models()
+            .filter(|route| route.fast_tier)
+            .map(|route| route.routing_id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn every_shipped_codex_route_gets_a_twin_that_copies_it() {
+        let config = parse_and_prepare("");
+        assert_eq!(
+            twins(&config),
+            [
+                "gpt-6.1-sol-fast",
+                "gpt-6.1-terra-fast",
+                "gpt-6-astra-fast",
+                "gpt-6-luna-fast"
+            ]
+        );
+        for model in SHIPPED_GPT_ROUTES {
+            let base = route(&config, model);
+            let twin = route(&config, &format!("{model}-fast"));
+            assert!(!base.fast_tier, "{model}");
+            assert_eq!(
+                ModelRoute {
+                    routing_id: model.to_string(),
+                    fast_tier: false,
+                    ..twin.clone()
+                },
+                *base
+            );
+            assert!(is_codex_native_model(model), "{model}");
+        }
+        // Retired models list the tier too, but get no twin.
+        for model in ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-luna"] {
+            assert!(config.route(&format!("{model}-fast")).is_none(), "{model}");
+        }
+    }
+
+    #[test]
+    fn hand_written_codex_routes_get_twins_and_no_other_family_does() {
+        let config = parse_and_prepare(
+            "[grok]\nenabled = true\n[muse]\nenabled = true\n\n\
+             [[models]]\nrouting-id = \"sol\"\nupstream-model = \"gpt-6.1-sol(high)\"\n\
+             display-name = \"Sol\"\n\n\
+             [[models]]\nrouting-id = \"old\"\nupstream-model = \"gpt-6-sol\"\n\
+             display-name = \"Old\"\n\n\
+             [[models]]\nrouting-id = \"elsewhere\"\nupstream-model = \"m\"\n\
+             display-name = \"M\"\n\n\
+             [[models]]\nrouting-id = \"g\"\nupstream-model = \"grok-4.7\"\n\
+             display-name = \"G\"\nfamily = \"grok\"\n\n\
+             [[openai-providers]]\nname = \"p\"\nbase-url = \"https://example.test/v1\"\n\n\
+             [[openai-providers.models]]\nname = \"gpt-6.1-sol\"\nrouting-id = \"kimi\"\n\
+             display-name = \"Kimi\"\n",
+        );
+        assert_eq!(twins(&config), ["sol-fast"]);
+        let twin = route(&config, "sol-fast");
+        assert_eq!(twin.upstream_model, "gpt-6.1-sol(high)");
+        assert_eq!(twin.display_name, "Sol");
+    }
+
+    #[test]
+    fn a_route_already_named_like_a_twin_wins() {
+        let config = parse_and_prepare(
+            "[[models]]\nrouting-id = \"gpt-6.1-sol\"\nupstream-model = \"gpt-6.1-sol\"\n\
+             display-name = \"Sol\"\n\n\
+             [[models]]\nrouting-id = \"gpt-6.1-sol-fast\"\nupstream-model = \"m\"\n\
+             display-name = \"Mine\"\n\n\
+             [[models]]\nrouting-id = \"gpt-6-luna\"\nupstream-model = \"gpt-6-luna\"\n\
+             display-name = \"Luna\"\n\n\
+             [[openai-providers]]\nname = \"p\"\nbase-url = \"https://example.test/v1\"\n\n\
+             [[openai-providers.models]]\nname = \"x\"\nrouting-id = \"gpt-6-luna-fast\"\n\
+             display-name = \"X\"\n",
+        );
+        assert_eq!(twins(&config), [] as [&str; 0]);
+        assert_eq!(route(&config, "gpt-6.1-sol-fast").display_name, "Mine");
+        assert_eq!(
+            route(&config, "gpt-6-luna-fast").family,
+            ModelFamily::OpenAiCompat
+        );
+    }
+
+    #[test]
+    fn managed_api_key_mode_serves_the_twins_at_the_priority_tier() {
+        let config = parse_and_prepare("[gpt]\nauth = \"api-key\"\n");
+        assert!(config.is_managed());
+        assert_eq!(twins(&config).len(), SHIPPED_GPT_ROUTES.len());
+        for model in SHIPPED_GPT_ROUTES {
+            let twin = route(&config, &fast_twin_id(model));
+            assert!(twin.fast_tier, "{model}");
+            assert_eq!(twin.upstream_model, model);
+            let mut body = serde_json::json!({"model": model});
+            crate::service_tier::apply(&mut body, twin.fast_tier);
+            assert_eq!(body["service_tier"], "priority", "{model}");
+        }
+    }
+
+    #[test]
+    fn the_fast_tier_is_never_read_from_toml() {
+        let error = toml::from_str::<Config>(
+            "[[models]]\nrouting-id = \"a\"\nupstream-model = \"m\"\ndisplay-name = \"A\"\n\
+             fast-tier = true\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("fast-tier"), "{error}");
+        let template = Config::template();
+        assert!(!template.contains("fast-tier"), "{template}");
+        assert!(template.contains("<routing-id>-fast twin"), "{template}");
+    }
+
+    #[test]
+    fn built_in_twins_are_known_without_a_config_and_retire_with_their_base() {
+        for model in SHIPPED_GPT_ROUTES {
+            let twin = fast_twin_id(model);
+            for id in [twin.clone(), format!("{twin}(high)")] {
+                assert_eq!(fast_twin_base(&id), Some(model));
+                assert!(is_built_in_route(&id), "{id}");
+                assert!(!is_retired_gpt_route(&id), "{id}");
+            }
+        }
+        for model in ["gpt-6-sol-fast", "sol-fast", "grok-4.7-fast", "gpt-6.1-sol"] {
+            assert_eq!(fast_twin_base(model), None, "{model}");
+        }
+        for model in ["gpt-6-sol", "gpt-6-sol-fast", "gpt-6-sol-fast(high)"] {
+            assert!(is_built_in_route(model), "{model}");
+            assert!(is_retired_gpt_route(model), "{model}");
+        }
+        for model in ["sol-fast", "grok-4.7-fast", "gpt-6.1-sol-fast-fast"] {
+            assert!(!is_built_in_route(model), "{model}");
+            assert!(!is_retired_gpt_route(model), "{model}");
+        }
     }
 }

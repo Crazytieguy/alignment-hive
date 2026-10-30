@@ -18,6 +18,7 @@ When a run finds something, `run.sh` starts a background Claude Code session (`c
 **Live tier:** the install you actually use.
 
 - `doctor --json`.
+- The child's Codex catalog still lists the priority tier for every model with a `-fast` route (no model call).
 - Wire probes over HTTP, on every built-in model the child serves:
   - a streaming and a non-streaming reply per model;
   - on the primary GPT model (`gpt-6-luna`): a two-turn tool round trip that replays the reasoning signature, a prompt-cache hit, an image, a web search that must be answered by the alpha/search backend rather than the fallback (skipped if `[web-search] mode` isn't the default), and request latency against the last two weeks.
@@ -28,7 +29,7 @@ With API-key GPT auth, the live probes bill your OpenAI key each day.
 **Candidate tier:** needs the managed CLIProxyAPI child and a Codex subscription login; other setups skip it.
 
 1. Downloads the release and checks it against the release's `checksums.txt`.
-2. Audits its source against the pinned tag: Codex token refresh behaviour, the config keys the router writes, Codex client identity.
+2. Audits its source against the pinned tag: Codex token refresh behaviour, the config keys the router writes, Codex client identity, the priority-tier mapping.
 3. Starts two sandbox routers with their own XDG dirs and free ports, one on the pinned CLIProxyAPI and one on the candidate, both on the live router binary and a copy of the Codex login.
 4. Runs the same probes (overflow included) and cells against both, interleaved.
 5. Decides what comes next. `claude -p` with no tools reads upstream's release notes from the pin to the candidate and of any release since, the changed Go files and the check results. It answers "repin", "bench" (run the Terminal-Bench subset first), or "wait" when a later release fixes or reverts something the candidate changed that model-router uses. A minor or major release gets the bench unless it waits.

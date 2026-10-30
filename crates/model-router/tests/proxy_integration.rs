@@ -67,7 +67,7 @@ async fn claude_body_is_exact_and_sse_is_streamed() {
             .unwrap();
     });
 
-    let original = br#"{ "model" : "claude-sonnet-4-5", "messages" : [{"role":"user","content":"exact bytes"}], "stream":true }"#;
+    let original = br#"{ "model" : "claude-sonnet-4-5", "speed" : "fast", "messages" : [{"role":"user","content":"exact bytes"}], "stream":true }"#;
     let response = reqwest::Client::new()
         .post(format!(
             "http://{router_address}/v1/messages?beta=true&raw=%2F"
@@ -2535,6 +2535,7 @@ async fn compaction_is_answered_without_tools_only_on_codex_native_gpt_and_grok(
     let app = model_router::proxy::app(config).await.unwrap();
     let cases = [
         ("gpt-6-astra", true),
+        ("gpt-6-astra-fast", true),
         ("grok-4.5", true),
         // A hand-written `gpt` route to a model outside the Codex list.
         ("claude-gpt-test", false),
@@ -2579,30 +2580,31 @@ async fn compaction_is_answered_without_tools_only_on_codex_native_gpt_and_grok(
     }
 }
 
+/// A child whose alpha search is down, so a search sub-call takes the legacy
+/// LLM path, which answers; a turn streams a `WebSearch` tool_use.
+fn alpha_search_down(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+    match parts.uri.path() {
+        "/v1/alpha/search" => {
+            let mut response = Response::new(Body::from("search backend down"));
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        }
+        "/v1/messages" if body_contains(body, "web_search_20250305\"") => plain_message_response(),
+        "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
+        path => panic!("unexpected CPA path {path}"),
+    }
+}
+
 /// A forced WebSearch sub-call from a GPT-origin agent, arriving on the
 /// Claude branch with the caller's full tool set, is forwarded to the GPT
 /// upstream by the legacy path when alpha search fails — with the same
 /// schema rewrite, and without an identity block.
 #[tokio::test]
 async fn gpt_origin_forced_subcall_fallback_drops_patterns_without_identity() {
-    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
-        match parts.uri.path() {
-            "/v1/alpha/search" => {
-                let mut response = Response::new(Body::from("search backend down"));
-                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-                response
-            }
-            "/v1/messages" if body.windows(20).any(|w| w == b"web_search_20250305\"") => {
-                plain_message_response()
-            }
-            "/v1/messages" => sse_response(websearch_tool_use_sse(), true),
-            path => panic!("unexpected CPA path {path}"),
-        }
-    }
     fn anthropic(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
         panic!("Anthropic must not be called, got {}", parts.uri.path());
     }
-    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let (cpa_address, cpa_observed) = spawn_fake(alpha_search_down).await;
     let (anthropic_address, anthropic_observed) = spawn_fake(anthropic).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
@@ -3706,6 +3708,261 @@ async fn api_key_mode_refuses_gpt_while_a_codex_login_lists_its_own_exclusions()
     let restarted = model_router::proxy::app(config()).await.unwrap();
     let (status, body) = send(&restarted, effort_body("gpt"), &[]).await;
     assert_passed_the_gate(status, &body);
+}
+
+// ---- Codex priority tier (`-fast` twins) ----
+
+/// The built-in routes against an external child at `cpa_address`, with
+/// Anthropic at `anthropic_address`.
+fn built_in_config(
+    cpa_address: std::net::SocketAddr,
+    anthropic_address: std::net::SocketAddr,
+) -> Config {
+    Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        upstreams: external_upstreams(format!("http://{cpa_address}")),
+        ..Config::default()
+    }
+}
+
+fn never_called(parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+    panic!("nothing may reach this upstream, got {}", parts.uri.path());
+}
+
+/// A `-fast` twin forwards its base's upstream model with Codex's priority
+/// tier and nothing else changed: the same identity block and the same
+/// prompt-cache identity. The base route never asks for the tier, whatever
+/// the request carried.
+#[tokio::test]
+async fn a_fast_twin_forwards_its_base_model_at_the_priority_tier() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(never_called).await;
+    let app = model_router::proxy::app(built_in_config(cpa_address, anthropic_address))
+        .await
+        .unwrap();
+
+    for (model, session) in [
+        ("gpt-6.1-sol-fast", "session-a"),
+        ("gpt-6.1-sol", "session-b"),
+    ] {
+        let body = serde_json::json!({
+            "model": model, "max_tokens": 16, "system": "shared agent prompt",
+            "speed": "fast", "service_tier": "priority",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        .to_string();
+        let (status, response) = send(&app, body, &[("x-claude-code-session-id", session)]).await;
+        assert_eq!(status, StatusCode::OK, "{model}: {response}");
+    }
+
+    assert!(anthropic_observed.lock().await.is_empty());
+    let forwarded = cpa_observed.lock().await;
+    let [twin, base] = forwarded.as_slice() else {
+        panic!("expected two forwards, got {}", forwarded.len());
+    };
+    let twin_body: serde_json::Value = serde_json::from_slice(&twin.body).unwrap();
+    let base_body: serde_json::Value = serde_json::from_slice(&base.body).unwrap();
+    assert_eq!(twin_body["model"], "gpt-6.1-sol");
+    assert_eq!(twin_body["service_tier"], "priority");
+    assert!(twin_body.get("speed").is_none(), "{twin_body}");
+    assert_eq!(base_body["model"], "gpt-6.1-sol");
+    assert!(base_body.get("service_tier").is_none(), "{base_body}");
+    assert!(base_body.get("speed").is_none(), "{base_body}");
+    assert_eq!(twin_body["system"], base_body["system"]);
+    assert!(
+        twin_body["system"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("GPT-6.1 Sol")
+    );
+    let key = &twin.headers["x-claude-code-session-id"];
+    assert!(key.to_str().unwrap().starts_with("prefix-"), "{key:?}");
+    assert_eq!(base.headers["x-claude-code-session-id"], key);
+}
+
+/// Off a twin, `speed` and `service_tier` never reach the child, in any
+/// family: it would turn either into the priority tier.
+#[tokio::test]
+async fn inbound_tier_fields_never_reach_the_child_off_a_twin() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let auth = muse_auth_dir();
+    let mut config = muse_config(cpa_address, Some(auth.path()));
+    config.models.push(ModelRoute {
+        routing_id: "kimi-k3".to_string(),
+        upstream: "cliproxy".to_string(),
+        upstream_model: "openai-compat--kimi-k3".to_string(),
+        display_name: "Kimi K3".to_string(),
+        family: model_router::config::ModelFamily::OpenAiCompat,
+        ..Default::default()
+    });
+    let app = model_router::proxy::app(config).await.unwrap();
+    let models = ["claude-gpt-test", "grok-4.5", "muse-wonder-1.0", "kimi-k3"];
+    for model in models {
+        let body = serde_json::json!({
+            "model": model, "max_tokens": 16, "speed": "fast", "service_tier": "priority",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        .to_string();
+        let (status, response) = send(&app, body, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{model}: {response}");
+    }
+    let forwarded = cpa_observed.lock().await;
+    assert_eq!(forwarded.len(), models.len());
+    for (model, request) in models.iter().zip(forwarded.iter()) {
+        let document: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(document.get("speed").is_none(), "{model}: {document}");
+        assert!(
+            document.get("service_tier").is_none(),
+            "{model}: {document}"
+        );
+    }
+}
+
+/// A twin-origin `WebSearch` sub-call carried on the Claude branch keeps the
+/// origin's tier on the LLM fallback, and loses the Claude `speed` field.
+#[tokio::test]
+async fn a_twin_origin_search_fallback_keeps_the_priority_tier() {
+    let (cpa_address, cpa_observed) = spawn_fake(alpha_search_down).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(never_called).await;
+    let app = model_router::proxy::app(built_in_config(cpa_address, anthropic_address))
+        .await
+        .unwrap();
+
+    let gpt_turn = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(websearch_declaring_body("gpt-6.1-sol-fast")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gpt_turn.status(), StatusCode::OK);
+    let mut gpt_stream = gpt_turn.into_body().into_data_stream();
+    read_until(&mut gpt_stream, "content_block_stop").await;
+
+    let mut subcall_body: serde_json::Value =
+        serde_json::from_str(&origin_subcall_body("claude-sonnet-4-5")).unwrap();
+    subcall_body["speed"] = serde_json::json!("fast");
+    let (status, body) = send(&app, subcall_body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    assert!(anthropic_observed.lock().await.is_empty());
+    let cpa_requests = cpa_observed.lock().await;
+    assert_eq!(
+        cpa_requests
+            .iter()
+            .map(|request| request.uri.as_str())
+            .collect::<Vec<_>>(),
+        ["/v1/messages", "/v1/alpha/search", "/v1/messages"]
+    );
+    for request in [&cpa_requests[0], &cpa_requests[2]] {
+        let document: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(document["model"], "gpt-6.1-sol");
+        assert_eq!(document["service_tier"], "priority", "{document}");
+        assert!(document.get("speed").is_none(), "{document}");
+    }
+}
+
+/// [`alpha_search_down`], and the legacy path's buffered request fails too,
+/// so the sub-call is forwarded as it came.
+fn alpha_and_legacy_search_down(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+    if parts.uri.path() == "/v1/messages" && body_contains(body, "web_search_20250305\"") {
+        if body_contains(body, r#""stream":false"#) {
+            let mut response = Response::new(Body::from("overloaded"));
+            *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+            return response;
+        }
+        return sse_response(websearch_tool_use_sse(), false);
+    }
+    alpha_search_down(parts, body)
+}
+
+/// The `service_tier` of each LLM request a search sub-call sends behind
+/// `cpa` after a turn on `origin` asked for it and `carrier` carried it: the
+/// legacy path's, and the forward's when that fails too.
+async fn carried_search_tiers(
+    cpa: fn(&axum::http::request::Parts, &Bytes) -> Response,
+    origin: &str,
+    carrier: &str,
+) -> Vec<Option<String>> {
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let (anthropic_address, _) = spawn_fake(never_called).await;
+    let config = Config {
+        grok: model_router::config::GrokConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        ..built_in_config(cpa_address, anthropic_address)
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    turn_then_subcall(app, origin, carrier).await;
+    let cpa_requests = cpa_observed.lock().await;
+    assert_eq!(cpa_requests[1].uri, "/v1/alpha/search");
+    cpa_requests[2..]
+        .iter()
+        .map(|request| {
+            assert_eq!(request.uri, "/v1/messages");
+            let document: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            // The carrier's model, which a twin shares with its base (Grok's
+            // carries the request's effort as a suffix).
+            let model = document["model"].as_str().unwrap();
+            assert_eq!(
+                model.split('(').next(),
+                Some(carrier.trim_end_matches("-fast"))
+            );
+            document["service_tier"].as_str().map(str::to_string)
+        })
+        .collect()
+}
+
+/// A search carried by a GPT route runs at the asking agent's tier, not the
+/// carrier's: a standard agent's search on a `-fast` main loop spends no
+/// priority, and a twin's on a standard main loop keeps it, on the legacy
+/// path and on the forward after it. A carrier with no priority tier (Grok
+/// here) never asks for it.
+#[tokio::test]
+async fn a_gpt_carried_search_runs_at_the_origins_tier() {
+    let priority = || Some("priority".to_string());
+    assert_eq!(
+        carried_search_tiers(alpha_search_down, "gpt-6.1-sol", "gpt-6.1-sol-fast").await,
+        [None]
+    );
+    assert_eq!(
+        carried_search_tiers(alpha_search_down, "gpt-6.1-sol-fast", "gpt-6.1-sol").await,
+        [priority()]
+    );
+    assert_eq!(
+        carried_search_tiers(
+            alpha_and_legacy_search_down,
+            "gpt-6.1-sol",
+            "gpt-6.1-sol-fast"
+        )
+        .await,
+        [None, None]
+    );
+    assert_eq!(
+        carried_search_tiers(
+            alpha_and_legacy_search_down,
+            "gpt-6.1-sol-fast",
+            "gpt-6.1-sol"
+        )
+        .await,
+        [priority(), priority()]
+    );
+    assert_eq!(
+        carried_search_tiers(alpha_and_legacy_search_down, "gpt-6.1-sol-fast", "grok-4.7").await,
+        [None, None]
+    );
 }
 
 /// The HTTPS-proxy front: a CONNECT to api.anthropic.com carrying the

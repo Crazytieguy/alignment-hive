@@ -257,34 +257,38 @@ function linesAround(files: Array<GoFile>, re: RegExp, before = 0, after = 0): A
   return out.sort();
 }
 
+/** An audit anchor: the func `goFunc` finds, normalized; undefined when there is none. */
+function funcAnchor(files: Array<GoFile>, decl: RegExp): string | undefined {
+  const body = goFunc(files, decl);
+  return body === undefined ? undefined : normalizeGo(body).join('\n');
+}
+
+/** An audit anchor: every match of `linesAround`; undefined when there are none. */
+function linesAnchor(files: Array<GoFile>, re: RegExp, before = 0, after = 0): string | undefined {
+  const xs = linesAround(files, re, before, after);
+  return xs.length ? xs.join('\n') : undefined;
+}
+
 /** What decides when a Codex login refreshes: lead constants, the due-time functions, the auto-refresh start. */
 export function refreshAnchors(files: Array<GoFile>): Record<string, string | undefined> {
-  const fn = (decl: RegExp): string | undefined => {
-    const body = goFunc(files, decl);
-    return body === undefined ? undefined : normalizeGo(body).join('\n');
-  };
-  const lines = (re: RegExp, before = 0): string | undefined => {
-    const xs = linesAround(files, re, before);
-    return xs.length ? xs.join('\n') : undefined;
-  };
-  const siwc = fn(/^func CodexSIWCNeedsRefresh\(/m)?.split('\n');
+  const siwc = funcAnchor(files, /^func CodexSIWCNeedsRefresh\(/m)?.split('\n');
   const guardEnd = siwc?.findIndex((l) => l.includes('len(siwcMap) == 0')) ?? -1;
   return {
     // sdk/cliproxy/auth/types.go: 96h before the nominal JWT expiry (8.0.34).
-    CodexOuterRefreshLead: lines(/^\s*(const\s+)?CodexOuterRefreshLead\s*=/),
-    CodexSIWCRefreshLead: lines(/^\s*(const\s+)?(Codex)?SIWCRefreshLead\s*=/),
-    CodexOuterNeedsRefresh: fn(/^func CodexOuterNeedsRefresh\(/m),
+    CodexOuterRefreshLead: linesAnchor(files, /^\s*(const\s+)?CodexOuterRefreshLead\s*=/),
+    CodexSIWCRefreshLead: linesAnchor(files, /^\s*(const\s+)?(Codex)?SIWCRefreshLead\s*=/),
+    CodexOuterNeedsRefresh: funcAnchor(files, /^func CodexOuterNeedsRefresh\(/m),
     // shouldRefresh asks the SIWC function first for every login; its opening lines return for a login without a
     // `siwc` section, so only they must hold for such a login. The rest is SIWC-only (SIWC_ONLY).
     'CodexSIWCNeedsRefresh guard': siwc && guardEnd >= 0 ? siwc.slice(0, guardEnd + 3).join('\n') : undefined,
     CodexSIWCNeedsRefresh: siwc?.join('\n'),
-    shouldRefresh: fn(/^func \(\w+ \*Manager\) shouldRefresh\(/m),
-    authPreferredInterval: fn(/^func authPreferredInterval\(/m),
-    StartAutoRefresh: fn(/^func \(\w+ \*Manager\) StartAutoRefresh\(/m),
-    'CodexAuthenticator.RefreshLead': fn(/^func \(\w+ \*?CodexAuthenticator\) RefreshLead\(/m),
+    shouldRefresh: funcAnchor(files, /^func \(\w+ \*Manager\) shouldRefresh\(/m),
+    authPreferredInterval: funcAnchor(files, /^func authPreferredInterval\(/m),
+    StartAutoRefresh: funcAnchor(files, /^func \(\w+ \*Manager\) StartAutoRefresh\(/m),
+    'CodexAuthenticator.RefreshLead': funcAnchor(files, /^func \(\w+ \*?CodexAuthenticator\) RefreshLead\(/m),
     // service_lifecycle.go starts the loop on every service start (interval 15m in 8.0.34); the call and the lines
     // before it show the interval and any new refresh-on-start step.
-    'StartAutoRefresh call': lines(/\.StartAutoRefresh\(/, 2),
+    'StartAutoRefresh call': linesAnchor(files, /\.StartAutoRefresh\(/, 2),
   };
 }
 
@@ -295,6 +299,20 @@ export const SIWC_ONLY = new Set(['CodexSIWCRefreshLead', 'CodexSIWCNeedsRefresh
 export function codexIdentityLines(files: Array<GoFile>): Array<string> {
   const codex = files.filter((f) => /^codex_.*\.go$/.test(basename(f.path)));
   return linesAround(codex, /originator|user-?agent|x-codex|codex-tui|codex_cli_rs|"version"|client-?version/i);
+}
+
+/**
+ * What turns the router's `service_tier: "priority"` into Codex's priority tier (8.0.34): the Claude translator's
+ * tier normalization and its `speed` mapping, and the routing hint the Codex executor derives from the final body.
+ */
+export function serviceTierAnchors(files: Array<GoFile>): Record<string, string | undefined> {
+  // The OpenAI chat translator has its own normalizeCodexServiceTier; the router's requests take the Claude one.
+  const claude = files.filter((f) => f.path.includes('translator/codex/claude/'));
+  return {
+    normalizeCodexServiceTier: funcAnchor(claude, /^func normalizeCodexServiceTier\(/m),
+    'speed mapping': linesAnchor(claude, /Get\("speed"\)/, 1, 3),
+    applyCodexRoutingHint: funcAnchor(files, /^func applyCodexRoutingHint\(/m),
+  };
 }
 
 /** The code around each read of a login's own `excluded_models` (8.0.33 made a nonempty one replace the global list). */
@@ -352,12 +370,19 @@ function lineDiff(a: Array<string>, b: Array<string>): { added: Array<string>; r
   return { added, removed };
 }
 
+/** Missing pinned anchors, changed anchors and the pinned count, in the pinned anchors' order. */
+function anchorChanges(a: Record<string, string | undefined>, b: Record<string, string | undefined>) {
+  const keys = Object.keys(a);
+  return { stale: keys.filter((k) => a[k] === undefined), changed: keys.filter((k) => a[k] !== b[k]), count: keys.length };
+}
+
 const clip = (s: string, n = 200): string => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
 /**
  * Compare the candidate's source with the pin's where a change would hurt model-router: Codex refresh timing (a
  * sandbox copy of the login could rotate the live refresh token), the config keys the router writes, the Codex
- * identity (load-shedding history), and per-login exclusions. Returns the checks it recorded.
+ * identity (load-shedding history), the priority tier the `-fast` routes ask for, and per-login exclusions. Returns
+ * the checks it recorded.
  */
 export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, repo = REPO): Array<Check> {
   const base = { tier: 'candidate' as const, target: 'candidate' };
@@ -374,12 +399,9 @@ export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, r
 
   const checks = [
     timed('refresh-lead', () => {
-      const a = refreshAnchors(pinned);
-      const b = refreshAnchors(cand);
-      const stale = Object.keys(a).filter((k) => a[k] === undefined);
+      const { stale, changed, count } = anchorChanges(refreshAnchors(pinned), refreshAnchors(cand));
       if (stale.length) return { status: 'fail', detail: clip(`audit anchors not found in the pinned source (${stale.join(', ')}); update upstream.ts refreshAnchors — review refresh behavior by hand`) };
-      const changed = Object.keys(a).filter((k) => a[k] !== b[k]);
-      if (!changed.length) return { status: 'pass', detail: `unchanged (${Object.keys(a).length} anchors)` };
+      if (!changed.length) return { status: 'pass', detail: `unchanged (${count} anchors)` };
       const hard = changed.filter((k) => !SIWC_ONLY.has(k));
       if (!hard.length) return { status: 'warn', detail: clip(`only the SIWC refresh path changed (${changed.join(', ')}); a login without a siwc section returns before it, and the precheck refuses SIWC logins`) };
       return { status: 'fail', detail: clip(`refresh behavior changed; credential copies could rotate the live login — review by hand (${hard.join(', ')})`) };
@@ -403,6 +425,12 @@ export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, r
       if (!added.length && !removed.length) return { status: 'pass', detail: `unchanged (${a.length} lines)` };
       const sample = added[0] ?? `removed: ${removed[0]}`;
       return { status: 'warn', detail: clip(`Codex identity code changed (+${added.length} −${removed.length}); first: ${sample}`), metrics: { added: added.length, removed: removed.length } };
+    }),
+    timed('service-tier', () => {
+      const { stale, changed, count } = anchorChanges(serviceTierAnchors(pinned), serviceTierAnchors(cand));
+      if (stale.length) return { status: 'warn', detail: clip(`service-tier anchors not found in the pinned source (${stale.join(', ')}); update upstream.ts serviceTierAnchors`) };
+      if (!changed.length) return { status: 'pass', detail: `unchanged (${count} anchors)` };
+      return { status: 'warn', detail: clip(`priority-tier handling changed (${changed.join(', ')}); recheck that a -fast route still reaches Codex as service_tier priority (service_tier.rs)`) };
     }),
     timed('excluded-models', () => {
       const a = excludedModelsLines(pinned);

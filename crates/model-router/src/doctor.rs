@@ -757,9 +757,9 @@ fn muse_plan_check(muse_routes: &[&ModelRoute], logins: Option<&Walk>) -> Option
 /// change.
 ///
 /// Split from the transport so every outcome is unit-testable.
-// Routing IDs the plugin's shipped agents (the two reviewers included)
-// name in their `model:` line.
-use crate::config::SHIPPED_GPT_ROUTES as SHIPPED_AGENT_ROUTES;
+// The routes the plugin's shipped agents name (reviewers included), each with
+// its `-fast` twin.
+use crate::config::{SHIPPED_GPT_ROUTES as SHIPPED_AGENT_ROUTES, fast_twin_id};
 
 /// A hand-written `[[models]]` block replaces the built-in routes wholesale,
 /// so a list written before a route existed keeps the shipped agents that
@@ -771,28 +771,47 @@ fn shipped_agent_routes_check(config: &Config) -> Check {
         .effective_models()
         .map(|route| route.routing_id.as_str())
         .collect();
-    let missing: Vec<&str> = SHIPPED_AGENT_ROUTES
+    let (present, missing): (Vec<&str>, Vec<&str>) = SHIPPED_AGENT_ROUTES
         .into_iter()
-        .filter(|route| !served.contains(route))
+        .partition(|route| served.contains(route));
+    // A served route gets no twin when it isn't a gpt route to a shipped model.
+    let twinless: Vec<&str> = present
+        .into_iter()
+        .filter(|route| !served.contains(fast_twin_id(route).as_str()))
         .collect();
-    if missing.is_empty() {
+    if missing.is_empty() && twinless.is_empty() {
         return Check {
             warn: false,
             name: "shipped-agent-routes",
             ok: true,
-            detail: SHIPPED_AGENT_ROUTES.join(", "),
+            detail: format!("{} and their -fast twins", SHIPPED_AGENT_ROUTES.join(", ")),
         };
+    }
+    let mut problems = Vec::new();
+    if !missing.is_empty() {
+        problems.push(format!(
+            "the [[models]] list in the config lacks {}, which the shipped agents need — add \
+             a [[models]] entry per missing route (`model-router config-template` shows the \
+             built-in ones) or delete the whole block to get the built-in routes back",
+            missing.join(", ")
+        ));
+    }
+    if !twinless.is_empty() {
+        let twins: Vec<String> = twinless.iter().map(|route| fast_twin_id(route)).collect();
+        problems.push(format!(
+            "{} get no -fast twin, which the shipped -fast agents need ({}): only a gpt route \
+             to a shipped GPT model gets one, so point their [[models]] entries at one",
+            twinless.join(", "),
+            twins.join(", ")
+        ));
     }
     Check {
         warn: false,
         name: "shipped-agent-routes",
         ok: false,
         detail: format!(
-            "the [[models]] list in the config lacks {}, which the shipped agents need — add \
-             a [[models]] entry per missing route (`model-router config-template` shows the \
-             built-in ones) or delete the whole block to get the built-in routes back, then \
-             `model-router service restart`",
-            missing.join(", ")
+            "{}, then `model-router service restart`",
+            problems.join("; ")
         ),
     }
 }
@@ -1278,6 +1297,23 @@ mod tests {
             "{}",
             check.detail
         );
+    }
+
+    #[test]
+    fn a_shipped_route_pointed_at_a_model_without_a_fast_tier_names_its_twin() {
+        let source = models_toml(&["gpt-6-astra", "gpt-6.1-terra", "gpt-6-luna"])
+            + "[[models]]\nrouting-id = \"gpt-6.1-sol\"\nupstream-model = \"gpt-6-sol\"\n\
+               display-name = \"Sol\"\n";
+        let check = shipped_agent_routes_check(&config(&source));
+        assert!(!check.ok);
+        assert!(
+            check
+                .detail
+                .starts_with("gpt-6.1-sol get no -fast twin, which the shipped -fast agents need (gpt-6.1-sol-fast)"),
+            "{}",
+            check.detail
+        );
+        assert!(!check.detail.contains("lacks"), "{}", check.detail);
     }
 
     #[test]

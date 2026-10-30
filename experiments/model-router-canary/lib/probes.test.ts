@@ -20,9 +20,11 @@ import {
   judgeToolTurn1,
   judgeToolTurn2,
   judgeWebsearch,
+  judgeFastTiers,
   parseCatalog,
   parseMiniToml,
   parseModelList,
+  parseServiceTiers,
   parseSse,
   solidPng,
   toReply,
@@ -174,7 +176,14 @@ describe('catalog and config', () => {
     expect(() => parseCatalog(src.replace('GROK_MODELS: [', 'GROK_LIST: ['))).toThrow('GROK_MODELS');
   });
 
-  const cat = { gpt: ['gpt-a', 'gpt-b'], grok: ['grok-x'], muse: ['muse-y'] };
+  test('the -fast models are the shipped Codex models, and none before the twins existed', () => {
+    const cat = parseCatalog(src);
+    expect(cat.fast).toContain('gpt-6.1-sol');
+    for (const id of cat.fast) expect(cat.gpt).toContain(id);
+    expect(parseCatalog(src.replace(/const FAST_SUFFIX\b/, 'const TWIN_SUFFIX')).fast).toEqual([]);
+  });
+
+  const cat = { gpt: ['gpt-a', 'gpt-b'], grok: ['grok-x'], muse: ['muse-y'], fast: ['gpt-a'] };
 
   test('defaults: the Codex list, no Grok or Muse', () => {
     const r = configuredRoutes(cat, parseMiniToml('# nothing\n[grok]\n#enabled = true\n'));
@@ -197,6 +206,25 @@ describe('catalog and config', () => {
     const t = parseMiniToml('port = 8787\ningress-token = "abc#def"\n[upstreams.cliproxy]\nport = 8317\nmode = "managed"\n');
     expect(t.top).toEqual({ port: 8787, 'ingress-token': 'abc#def' });
     expect(t.sections['upstreams.cliproxy']).toEqual({ port: 8317, mode: 'managed' });
+  });
+
+  test('the Codex catalog check reads service_tiers, never additional_speed_tiers', () => {
+    const tiers = parseServiceTiers(
+      JSON.stringify({
+        models: [
+          { slug: 'gpt-a', service_tiers: [{ id: 'priority', name: 'Fast' }], additional_speed_tiers: ['fast'] },
+          { slug: 'gpt-b', service_tiers: [], additional_speed_tiers: ['fast'] },
+          { slug: 'grok-x', additional_speed_tiers: ['fast'] },
+        ],
+      }),
+    );
+    expect([...tiers]).toEqual([['gpt-a', ['priority']], ['gpt-b', []], ['grok-x', []]]);
+    expect(() => parseServiceTiers('{"data":[]}')).toThrow('not a model list');
+    expect(judgeFastTiers(['gpt-a'], tiers).status).toBe('pass');
+    const withdrawn = judgeFastTiers(['gpt-a', 'gpt-b'], tiers);
+    expect(withdrawn.status).toBe('fail');
+    expect(withdrawn.detail).toContain('no priority tier for gpt-b');
+    expect(judgeFastTiers(['gpt-a', 'gpt-c'], tiers)).toEqual({ status: 'warn', detail: "not in the child's Codex catalog: gpt-c" });
   });
 
   test('model list parsing', () => {

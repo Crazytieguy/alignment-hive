@@ -9,7 +9,7 @@ import type { Notice, NoticeAction } from './notice-band'
 
 const PLUGIN = 'model-router'
 const notices = atom({ plugin: 'model-router', key: 'notices' } as const, [] as Notice[])
-// Rows dismissed this session; a row with a `version` stays dismissed in the store until the next.
+// Rows dismissed this session; a versioned row stays dismissed in the store until its version changes.
 const dismissed = atom({ plugin: 'model-router', key: 'dismissed' } as const, [] as string[])
 // A row whose Try again is running: its buttons give way to "restarting…" until the check settles.
 const retrying = atom({ plugin: 'model-router', key: 'retrying' } as const, null as string | null)
@@ -20,17 +20,21 @@ let projectDir = ''
 /**
  * Runs the plugin's check and keeps its rows; none when it fails. The check reads the wiring
  * (ANTHROPIC_BASE_URL, or HTTPS_PROXY) from the environment Claude Code passes on, settings'
- * `env` included, and restarts a stopped router. It is told the version the new-model row is
- * dismissed for: while that row shows, the windows row leaves out the routes it adds.
+ * `env` included, and restarts a stopped router. It is told the picker rows' dismissals and the
+ * permanent Fast-row decline: while a picker row shows, the windows row leaves out its adds.
  */
 async function check($: EngineInterface): Promise<void> {
   try {
-    const newModelDismissed = await $.store.get('dismissed:new-model')
+    const [newModelDismissed, fastModelsDismissed] = await Promise.all([
+      $.store.get('dismissed:new-model'),
+      $.store.get('dismissed:fast-models'),
+    ])
     const { exitCode, stdout } = await $.process.run(['bash', `${$.plugin.root}/scripts/check.sh`], {
       env: {
         CLAUDE_PLUGIN_ROOT: $.plugin.root,
         CLAUDE_PROJECT_DIR: projectDir,
         NEW_MODEL_DISMISSED: typeof newModelDismissed === 'string' ? newModelDismissed : '',
+        FAST_MODELS_DISMISSED: typeof fastModelsDismissed === 'string' ? fastModelsDismissed : '',
       },
     })
     const found = exitCode === 0 && stdout.trim() ? (JSON.parse(stdout) as { notices: Notice[] }).notices : []
@@ -76,6 +80,13 @@ export function fitsToast(text: string): boolean {
 /** The first of `texts` that fits in a toast, else the last. */
 const firstFitting = (...texts: string[]): string => texts.find(fitsToast) ?? texts.at(-1)!
 
+const SETTINGS_ARGS = new Map<string, readonly string[]>([
+  ['add-models', ['models', '--apply']],
+  ['add-fast-models', ['models', '--fast', '--apply']],
+  ['windows', ['windows', '--apply']],
+  ['bypass', ['bypass']],
+])
+
 /**
  * A settings edit by the binary (`model-router settings`, the setup skill's own), as the toast
  * that says what it did. The edits take effect when Claude Code next starts.
@@ -83,8 +94,8 @@ const firstFitting = (...texts: string[]): string => texts.find(fitsToast) ?? te
  * A toast shows 3 lines of 40 columns and cuts the rest, so what to do comes first, and the files
  * edited only where they fit.
  */
-async function editSettings($: EngineInterface, operation: 'models' | 'windows' | 'bypass'): Promise<string> {
-  const args = operation === 'bypass' ? ['bypass'] : [operation, '--apply']
+async function editSettings($: EngineInterface, args: readonly string[]): Promise<string> {
+  const operation = args[0]
   const { exitCode, stdout } = await $.process.run(
     ['bash', `${$.plugin.root}/scripts/bootstrap.sh`, 'settings', ...args, '--project-dir', projectDir],
     { env: { CLAUDE_PLUGIN_ROOT: $.plugin.root } },
@@ -117,7 +128,8 @@ async function editSettings($: EngineInterface, operation: 'models' | 'windows' 
     // Only retired rows dropped: nothing added to name.
     if (!result.added?.length) return 'Updated /model. Restart Claude Code to see it.'
     const compacts = Object.keys(added).length ? ` Compacts ${compactsAt(added)}.` : ''
-    return `Added to /model; restart Claude Code to pick.${compacts}`
+    const withCompacts = `Added to /model; restart Claude Code to pick.${compacts}`
+    return firstFitting(withCompacts, 'Added to /model; restart Claude Code to pick.')
   }
   if (operation === 'windows') {
     if (!result.applied) return `Not changed, run /model-router:setup: ${result.reason ?? 'no reason given'}`
@@ -182,28 +194,31 @@ export const register: Register = on => {
       // The settings edits take effect at the next start: the row's work is done this session.
       // One edit can do another row's work (adding a route to /model sets its window), so the
       // rows are checked again after it.
-      if (action.id === 'add-models' || action.id === 'windows' || action.id === 'bypass') {
-        const operation = action.id === 'add-models' ? 'models' : action.id
-        const said = await editSettings($, operation).catch(
-          () => 'Could not edit your settings: run /model-router:setup',
-        )
+      const args = SETTINGS_ARGS.get(action.id)
+      let said: string
+      if (args) {
+        said = await editSettings($, args).catch(() => 'Could not edit your settings: run /model-router:setup')
+      } else if (action.id === 'decline-fast-models') {
+        await $.store.set('dismissed:fast-models', 'declined')
+        said = 'Not added to /model; /model-router:setup can add them later.'
+      } else {
+        // Running setup (or Customize) dismisses the row for this session; the next session's
+        // check decides whether it comes back.
         await dismiss(notice)
-        $.ui.toast(said)
-        if (operation !== 'bypass') await check($)
+        if (action.kind === 'command' && action.command) {
+          await $.command.run({ command: action.command.slice(1) }).catch(() => $.ui.toast(`Could not run ${action.command}`))
+        }
         return
       }
-      // Running setup (or Customize) dismisses the row for this session; the next session's
-      // check decides whether it comes back.
       await dismiss(notice)
-      if (action.kind === 'command' && action.command) {
-        await $.command.run({ command: action.command.slice(1) }).catch(() => $.ui.toast(`Could not run ${action.command}`))
-      }
+      $.ui.toast(said)
+      if (args?.[0] !== 'bypass') await check($)
     }
     const onDismiss = async (notice: Notice) => {
       await dismiss(notice)
       if (notice.version !== undefined) await $.store.set(`dismissed:${notice.id}`, notice.version)
-      // The windows row takes back the routes the new-model row would have added.
-      if (notice.id === 'new-model') await check($)
+      // The windows row takes back the routes the picker row would have added.
+      if (notice.id === 'new-model' || notice.id === 'fast-models') await check($)
     }
 
     const ui = $.ui.resolve(e)

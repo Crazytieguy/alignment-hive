@@ -1,7 +1,7 @@
 //! The built-in routes: the GPT, Grok and Muse models the router serves by
 //! default (Grok and Muse only when enabled), which of them the `/model`
-//! picker ships, the context windows assumed for them, and the model-ID
-//! predicates config validation keys off.
+//! picker ships, their `-fast` twins, the context windows assumed for them,
+//! and the model-ID predicates config validation keys off.
 
 use super::{CLIPROXY_UPSTREAM, ModelFamily, ModelRoute, split_effort_suffix};
 
@@ -66,9 +66,9 @@ const CODEX_NATIVE_MODELS: [(&str, &str); 8] = [
 
 /// The shipped GPT routes, in `/model` picker order: `model-router settings
 /// models` lists them in the picker (labelled with their display names
-/// above), and the plugin's shipped agents name them in their `model:` line
-/// (keep in step with `plugins/model-router/agents/`). The other built-in GPT
-/// routes are retired: still served, off the picker.
+/// above), and the plugin ships agents for them and their `-fast` twins
+/// ([`fast_twins`]; keep in step with `plugins/model-router/agents/`). The
+/// other built-in GPT routes are retired: still served, off the picker.
 pub(crate) const SHIPPED_GPT_ROUTES: [&str; 4] =
     ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"];
 
@@ -84,9 +84,60 @@ pub(crate) fn shipped_picker_rows() -> impl Iterator<Item = (&'static str, &'sta
 }
 
 /// A built-in GPT route that is no longer shipped (see [`SHIPPED_GPT_ROUTES`]).
+/// A retired route's `-fast` twin is retired too, and no longer served.
 #[must_use]
 pub(crate) fn is_retired_gpt_route(model: &str) -> bool {
-    is_codex_native_model(model) && !SHIPPED_GPT_ROUTES.contains(&split_effort_suffix(model).0)
+    let base = fast_route_base(model).unwrap_or(split_effort_suffix(model).0);
+    is_codex_native_model(base) && !SHIPPED_GPT_ROUTES.contains(&base)
+}
+
+/// What a `-fast` twin's routing ID adds to its route's.
+const FAST_SUFFIX: &str = "-fast";
+
+/// Whether `route` gets a `-fast` twin: a `gpt` route to a shipped model
+/// ([`SHIPPED_GPT_ROUTES`]). Each listed Codex's `priority` service tier
+/// (Codex's `/fast`) in the child's `/v1/models?client_version=` catalog
+/// (2026-10-29); the backend accepts the tier on models that list none, so
+/// only the canary checks that catalog. The child forwards `service_tier` to
+/// xAI and Meta untouched, with nothing saying what it does there, and
+/// openai-compat hosts have no such tier.
+///
+/// Matched exhaustively on purpose: a new family must decide.
+pub(crate) fn has_fast_tier(route: &ModelRoute) -> bool {
+    match route.family {
+        ModelFamily::Gpt => SHIPPED_GPT_ROUTES.contains(&route.split_upstream_model().0),
+        ModelFamily::Grok | ModelFamily::Muse | ModelFamily::OpenAiCompat => false,
+    }
+}
+
+pub(crate) fn fast_twin_id(routing_id: &str) -> String {
+    format!("{routing_id}{FAST_SUFFIX}")
+}
+
+/// The `-fast` twin of each route in `routes` that has one
+/// ([`has_fast_tier`]): a copy under `<routing-id>-fast` that asks for
+/// Codex's priority tier ([`crate::service_tier`]).
+pub(super) fn fast_twins(routes: &[ModelRoute]) -> Vec<ModelRoute> {
+    routes
+        .iter()
+        .filter(|route| has_fast_tier(route))
+        .map(|route| ModelRoute {
+            routing_id: fast_twin_id(&route.routing_id),
+            fast_tier: true,
+            ..route.clone()
+        })
+        .collect()
+}
+
+/// A routing ID without its effort and `-fast` suffixes, if it has the latter.
+fn fast_route_base(routing_id: &str) -> Option<&str> {
+    split_effort_suffix(routing_id).0.strip_suffix(FAST_SUFFIX)
+}
+
+/// The shipped GPT route whose `-fast` twin `routing_id` is, if it is one.
+/// Config-free, like [`is_built_in_route`].
+pub(crate) fn fast_twin_base(routing_id: &str) -> Option<&str> {
+    fast_route_base(routing_id).filter(|base| SHIPPED_GPT_ROUTES.contains(base))
 }
 
 /// Whether `upstream_model` is served by the Codex backend. Derived aliases
@@ -142,18 +193,16 @@ pub(crate) fn forces_text_on_compaction(route: &ModelRoute) -> bool {
 }
 
 /// Whether `model` is one of the router's built-in routes in any family,
-/// enabled or not. Config-free on purpose: `settings bypass` runs when the
-/// router is down or its config is broken, and must still recognise a
-/// default `model` that only the router can serve.
+/// enabled or not, or a `-fast` twin of one. Config-free on purpose:
+/// `settings bypass` runs when the router is down or its config is broken,
+/// and must still recognise a default `model` that only the router can
+/// serve.
 #[must_use]
 pub(crate) fn is_built_in_route(model: &str) -> bool {
-    [
-        CODEX_NATIVE_MODELS.as_slice(),
-        GROK_MODELS.as_slice(),
-        MUSE_MODELS.as_slice(),
-    ]
-    .into_iter()
-    .any(|table| is_built_in(table, model))
+    is_codex_native_model(fast_route_base(model).unwrap_or(model))
+        || [GROK_MODELS.as_slice(), MUSE_MODELS.as_slice()]
+            .into_iter()
+            .any(|table| is_built_in(table, model))
 }
 
 /// The xAI-native upstream model IDs behind the built-in Grok routes, with

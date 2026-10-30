@@ -19,8 +19,8 @@ use crate::client_window::{
     client_context_window, next_compaction, next_session, resolve_compaction,
 };
 use crate::config::{
-    Config, ModelRoute, SHIPPED_GPT_ROUTES, is_built_in_route, is_retired_gpt_route,
-    shipped_picker_rows,
+    Config, ModelRoute, SHIPPED_GPT_ROUTES, fast_twin_base, fast_twin_id, is_built_in_route,
+    is_retired_gpt_route, shipped_picker_rows,
 };
 use crate::context_check::{self, is_superseded_default, recommended_entry};
 
@@ -78,9 +78,9 @@ fn picker_row(model: &str, label: &str) -> Doc {
 }
 
 /// The picker rows of the shipped routes among `ids`, in picker order.
-fn shipped_rows(ids: &[&str]) -> Vec<Doc> {
+fn shipped_rows(ids: &[String]) -> Vec<Doc> {
     shipped_picker_rows()
-        .filter(|(id, _)| ids.contains(id))
+        .filter(|(id, _)| ids.iter().any(|added| added == id))
         .map(|(id, label)| picker_row(id, label))
         .collect()
 }
@@ -91,19 +91,69 @@ enum Plan {
     Current,
     /// A change is due that needs the person (`adds` are the rows it would
     /// add).
-    Blocked {
-        adds: Vec<&'static str>,
-        reason: String,
-    },
+    Blocked { adds: Vec<String>, reason: String },
     /// The user file as it would be written.
     Ready {
-        adds: Vec<&'static str>,
+        adds: Vec<String>,
         path: PathBuf,
         /// The text the plan was made from.
         original: String,
         doc: Doc,
         windows: BTreeMap<String, u64>,
     },
+}
+
+/// Which `/model` picker migration to run.
+#[derive(Clone, Copy)]
+pub enum Migration {
+    /// Replace retired GPT rows with the shipped routes.
+    Shipped,
+    /// Add the optional `-fast` twins of existing shipped rows.
+    FastTwins,
+}
+
+impl Migration {
+    fn plan(
+        self,
+        home: &Path,
+        project: &Path,
+        config: Result<&Config, &str>,
+        version: Option<Version>,
+    ) -> Plan {
+        match self {
+            Self::Shipped => plan_models(home, project, config, version),
+            Self::FastTwins => plan_fast_models(home, config, version),
+        }
+    }
+}
+
+/// The picker options and their trimmed model IDs, shared by both migrations.
+struct Picker<'a> {
+    options: &'a [Doc],
+    models: Vec<&'a str>,
+}
+
+fn picker_model(row: &Doc) -> Option<&str> {
+    row.str_at(&["model"]).map(str::trim)
+}
+
+fn read_picker(doc: &Doc) -> Result<Option<Picker<'_>>, String> {
+    let Some(picker) = doc.get("modelPicker") else {
+        return Ok(None);
+    };
+    let options = match picker.get("options") {
+        None => Some(&[][..]),
+        Some(options) => options.items(),
+    };
+    let Some(options) = options.filter(|_| matches!(picker, Doc::Object(_))) else {
+        return Err(format!(
+            "modelPicker in {USER_SETTINGS_DISPLAY} is not an options list"
+        ));
+    };
+    Ok(Some(Picker {
+        options,
+        models: options.iter().filter_map(picker_model).collect(),
+    }))
 }
 
 /// The picker migration the setup skill describes: the user file (the only
@@ -128,34 +178,34 @@ fn plan_models(
         }
         Read::Found(original, doc) => (original, doc),
     };
+    let picker = match read_picker(&doc) {
+        Ok(picker) => picker,
+        Err(reason) => {
+            return Plan::Blocked {
+                adds: Vec::new(),
+                reason,
+            };
+        }
+    };
     let settings = settings_by_precedence(Some(home), project);
     let wired = wired_file(&settings).map(Path::to_path_buf);
     let project_wired = wired.as_ref().filter(|file| !same_file(file, &path));
-    let blocked = |adds: Vec<&'static str>, reason: String| Plan::Blocked { adds, reason };
+    let blocked = |adds: Vec<String>, reason: String| Plan::Blocked { adds, reason };
 
     let mut edited = doc.clone();
-    let adds: Vec<&'static str>;
-    if let Some(picker) = doc.get("modelPicker") {
-        let options = match picker.get("options") {
-            None => Some(&[][..]),
-            Some(options) => options.items(),
-        };
-        let Some(options) = options.filter(|_| matches!(picker, Doc::Object(_))) else {
-            let reason = format!("modelPicker in {USER_SETTINGS_DISPLAY} is not an options list");
-            return blocked(Vec::new(), reason);
-        };
-        let model = |row: &Doc| row.str_at(&["model"]).map(str::trim).map(str::to_owned);
-        let models: Vec<String> = options.iter().filter_map(model).collect();
+    let adds: Vec<String>;
+    if let Some(Picker { options, models }) = picker {
         adds = SHIPPED_GPT_ROUTES
             .into_iter()
-            .filter(|id| !models.iter().any(|model| model == id))
+            .filter(|id| !models.contains(id))
+            .map(str::to_owned)
             .collect();
         if adds.is_empty() && !models.iter().any(|model| is_retired_gpt_route(model)) {
             return Plan::Current;
         }
         let rows = options
             .iter()
-            .filter(|row| !model(row).is_some_and(|model| is_retired_gpt_route(&model)))
+            .filter(|row| !picker_model(row).is_some_and(is_retired_gpt_route))
             .cloned()
             .chain(shipped_rows(&adds))
             .collect();
@@ -165,6 +215,7 @@ fn plan_models(
         adds = SHIPPED_GPT_ROUTES
             .into_iter()
             .filter(|id| *id != option)
+            .map(str::to_owned)
             .collect();
         if let Some(file) = project_wired {
             return blocked(
@@ -176,7 +227,7 @@ fn plan_models(
                 ),
             );
         }
-        let mut rows = shipped_rows(&SHIPPED_GPT_ROUTES);
+        let mut rows = shipped_rows(&SHIPPED_GPT_ROUTES.map(str::to_owned));
         // A single-slot route of another family (Grok, open weights) keeps
         // its place as a row.
         if !SHIPPED_GPT_ROUTES.contains(&option) && !is_retired_gpt_route(option) {
@@ -202,7 +253,7 @@ fn plan_models(
             _ => Plan::Current,
         };
     } else if wired.is_some() {
-        adds = SHIPPED_GPT_ROUTES.to_vec();
+        adds = SHIPPED_GPT_ROUTES.map(str::to_owned).to_vec();
         let rows = shipped_rows(&adds);
         edited.set("modelPicker", Doc::object([("options", Doc::Array(rows))]));
     } else {
@@ -211,16 +262,59 @@ fn plan_models(
     add_windows(adds, (path, original), edited, config, version)
 }
 
+/// Adds only missing twins whose base row is already in the picker, each
+/// immediately after its base. The base migration handles absent or malformed pickers.
+fn plan_fast_models(home: &Path, config: Result<&Config, &str>, version: Option<Version>) -> Plan {
+    let path = user_settings_file(home);
+    let Read::Found(original, doc) = read(&path) else {
+        return Plan::Current;
+    };
+    let Ok(Some(Picker { options, models })) = read_picker(&doc) else {
+        return Plan::Current;
+    };
+    // Catalog order keeps the offer stable when picker rows move.
+    let adds: Vec<String> = SHIPPED_GPT_ROUTES
+        .into_iter()
+        .filter(|id| models.contains(id))
+        .map(fast_twin_id)
+        .filter(|twin| !models.contains(&twin.as_str()))
+        .collect();
+    if adds.is_empty() {
+        return Plan::Current;
+    }
+    let mut pending: BTreeSet<&str> = adds.iter().map(String::as_str).collect();
+    let mut rows = Vec::new();
+    for row in options {
+        rows.push(row.clone());
+        let Some(base) = picker_model(row) else {
+            continue;
+        };
+        let twin = fast_twin_id(base);
+        if pending.remove(twin.as_str()) {
+            rows.push(picker_row(
+                &twin,
+                &picker_label(&twin).expect("a shipped twin"),
+            ));
+        }
+    }
+    let mut edited = doc.clone();
+    edited
+        .get_mut("modelPicker")
+        .expect("read above")
+        .set("options", Doc::Array(rows));
+    add_windows(adds, (path, original), edited, config, version)
+}
+
 /// Finishes a picker edit: each added route gets the `modelSettings` window
 /// doctor recommends, unless it has one.
 fn add_windows(
-    adds: Vec<&'static str>,
+    adds: Vec<String>,
     (path, original): (PathBuf, String),
     mut edited: Doc,
     config: Result<&Config, &str>,
     version: Option<Version>,
 ) -> Plan {
-    let blocked = |adds: Vec<&'static str>, reason: String| Plan::Blocked { adds, reason };
+    let blocked = |adds: Vec<String>, reason: String| Plan::Blocked { adds, reason };
     let config = match config {
         Ok(config) => config,
         Err(error) => {
@@ -244,7 +338,7 @@ fn add_windows(
             .is_none()
             && let Some(window) = recommended_entry(route)
         {
-            windows.push(((*id).to_string(), window));
+            windows.push((id.clone(), window));
         }
     }
     if set_windows(&mut edited, &windows).is_err() {
@@ -266,11 +360,14 @@ fn add_windows(
     }
 }
 
-fn labels(adds: &[&str]) -> Vec<&'static str> {
-    shipped_picker_rows()
-        .filter(|(id, _)| adds.contains(id))
-        .map(|(_, label)| label)
-        .collect()
+fn picker_label(id: &str) -> Option<String> {
+    let base = fast_twin_base(id);
+    let (_, label) = shipped_picker_rows().find(|(model, _)| *model == base.unwrap_or(id))?;
+    Some(base.map_or_else(|| label.to_owned(), |_| format!("{label} Fast")))
+}
+
+fn labels(adds: &[String]) -> Vec<String> {
+    adds.iter().filter_map(|id| picker_label(id)).collect()
 }
 
 /// `settings models`: reports the picker migration, or with `apply`
@@ -285,10 +382,19 @@ pub fn models(
     home: &Path,
     project: &Path,
     config: Result<&Config, &str>,
+    migration: Migration,
     claude_version: impl FnOnce() -> Option<Version>,
     apply: Option<&Path>,
 ) -> anyhow::Result<Value> {
-    models_with(home, project, config, claude_version, apply, &mut || {})
+    models_with(
+        home,
+        project,
+        config,
+        migration,
+        claude_version,
+        apply,
+        &mut || {},
+    )
 }
 
 /// [`models`], with `before_commit` passed to [`write`].
@@ -296,12 +402,19 @@ fn models_with(
     home: &Path,
     project: &Path,
     config: Result<&Config, &str>,
+    migration: Migration,
     claude_version: impl FnOnce() -> Option<Version>,
     apply: Option<&Path>,
     before_commit: &mut dyn FnMut(),
 ) -> anyhow::Result<Value> {
     let Some(lock_path) = apply else {
-        return Ok(report_models(home, project, config, claude_version));
+        return Ok(report_models(
+            home,
+            project,
+            config,
+            migration,
+            claude_version,
+        ));
     };
     // Before any read, so the slow version call never sits between a read
     // and its write.
@@ -309,7 +422,7 @@ fn models_with(
     let _lock = lock(lock_path)?;
     // A file someone else wrote since it was read is planned again, once.
     for _ in 0..2 {
-        match plan_models(home, project, config, version) {
+        match migration.plan(home, project, config, version) {
             // Already as the edit would leave it: done since the report, by another session or
             // by setup.
             Plan::Current => return Ok(json!({"applied": true, "unchanged": true})),
@@ -335,11 +448,12 @@ fn report_models(
     home: &Path,
     project: &Path,
     config: Result<&Config, &str>,
+    migration: Migration,
     claude_version: impl FnOnce() -> Option<Version>,
 ) -> Value {
     // Ask for the version only when it decides.
-    let plan = match plan_models(home, project, config, None) {
-        Plan::Ready { .. } => plan_models(home, project, config, claude_version()),
+    let plan = match migration.plan(home, project, config, None) {
+        Plan::Ready { .. } => migration.plan(home, project, config, claude_version()),
         plan => plan,
     };
     match plan {
@@ -1085,6 +1199,7 @@ mod tests {
                 self.home.path(),
                 self.project.path(),
                 Ok(&config),
+                Migration::Shipped,
                 || version,
                 apply.then_some(lock.as_path()),
             )
@@ -1102,6 +1217,269 @@ mod tests {
     }
 
     const CURRENT: Option<Version> = Some(MIN_CLAUDE_CODE);
+
+    fn fast_models(
+        dirs: &Dirs,
+        config: Result<&Config, &str>,
+        version: Option<Version>,
+        apply: bool,
+    ) -> Value {
+        models(
+            dirs.home.path(),
+            dirs.project.path(),
+            config,
+            Migration::FastTwins,
+            || version,
+            apply.then_some(dirs.lock()).as_deref(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fast_rows_follow_each_base_with_their_labels_and_windows() {
+        let dirs = Dirs::new();
+        let config = crate::config::parse_and_prepare("");
+        let bases: Vec<Value> = SHIPPED_GPT_ROUTES
+            .iter()
+            .map(|id| {
+                json!({
+                    "model": id, "label": "my label", "description": "keep me"
+                })
+            })
+            .collect();
+        let before = json!({"theme": "dark", "modelPicker": {"other": true, "options": bases}});
+        dirs.user(&before.to_string());
+        let twins: Vec<String> = SHIPPED_GPT_ROUTES.into_iter().map(fast_twin_id).collect();
+        assert_eq!(
+            fast_models(&dirs, Ok(&config), CURRENT, false),
+            json!({
+                "needed": true, "canApply": true, "adds": twins,
+                "labels": ["GPT-6 Astra Fast", "GPT-6.1 Sol Fast", "GPT-6.1 Terra Fast", "GPT-6 Luna Fast"]
+            })
+        );
+        assert_eq!(dirs.user_text(), before.to_string());
+        assert_eq!(
+            fast_models(&dirs, Ok(&config), CURRENT, true),
+            json!({
+                "applied": true, "added": twins,
+                "windows": {"gpt-6-astra-fast": 258_400, "gpt-6.1-sol-fast": 475_000,
+                            "gpt-6.1-terra-fast": 475_000, "gpt-6-luna-fast": 258_400}
+            })
+        );
+        let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
+        assert_eq!(written["theme"], "dark");
+        assert_eq!(written["modelPicker"]["other"], true);
+        let rows = written["modelPicker"]["options"].as_array().unwrap();
+        assert_eq!(rows.len(), 8);
+        for (at, (base, label)) in shipped_picker_rows().enumerate() {
+            assert_eq!(rows[at * 2], bases[at]);
+            assert_eq!(
+                rows[at * 2 + 1],
+                json!({"model": fast_twin_id(base), "label": format!("{label} Fast")})
+            );
+        }
+        assert_eq!(
+            fast_models(&dirs, Ok(&config), CURRENT, false)["needed"],
+            false
+        );
+        assert_eq!(
+            fast_models(&dirs, Ok(&config), CURRENT, true),
+            json!({"applied": true, "unchanged": true})
+        );
+        assert_eq!(dirs.models(CURRENT, false)["needed"], false);
+    }
+
+    #[test]
+    fn fast_offers_keep_catalog_order_when_picker_rows_move() {
+        let dirs = Dirs::new();
+        let config = crate::config::parse_and_prepare("");
+        dirs.user(
+            r#"{"modelPicker":{"options":[{"model":"gpt-6-luna"},{"model":"gpt-6.1-sol"}]}}"#,
+        );
+        assert_eq!(
+            fast_models(&dirs, Ok(&config), CURRENT, false)["adds"],
+            json!(["gpt-6.1-sol-fast", "gpt-6-luna-fast"])
+        );
+        assert_eq!(
+            fast_models(&dirs, Ok(&config), CURRENT, true)["applied"],
+            true
+        );
+        let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
+        let rows = &written["modelPicker"]["options"];
+        assert_eq!(rows[0]["model"], "gpt-6-luna");
+        assert_eq!(rows[1]["model"], "gpt-6-luna-fast");
+        assert_eq!(rows[2]["model"], "gpt-6.1-sol");
+        assert_eq!(rows[3]["model"], "gpt-6.1-sol-fast");
+    }
+
+    #[test]
+    fn fast_rows_leave_existing_rows_and_windows_alone_and_require_a_base() {
+        let dirs = Dirs::new();
+        let config = crate::config::parse_and_prepare("");
+        let before = json!({
+            "modelPicker": {"options": [
+                {"model": " gpt-6-astra-fast ", "label": "mine"},
+                {"model": "gpt-6-astra"}, 3, {"model": " gpt-6.1-sol "},
+                {"model": "gpt-6.1-sol"}, {"model": "gpt-6-sol"}, {"model": "custom"}
+            ]},
+            "modelSettings": {"gpt-6.1-sol-fast": {"autoCompactWindow": 600_000, "effortLevel": "high"}}
+        });
+        dirs.user(&before.to_string());
+        let applied = fast_models(&dirs, Ok(&config), CURRENT, true);
+        assert_eq!(
+            applied,
+            json!({"applied": true, "added": ["gpt-6.1-sol-fast"], "windows": {}})
+        );
+        let mut expected = before;
+        expected["modelPicker"]["options"]
+            .as_array_mut()
+            .unwrap()
+            .insert(
+                4,
+                json!({"model": "gpt-6.1-sol-fast", "label": "GPT-6.1 Sol Fast"}),
+            );
+        let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
+        assert_eq!(written, expected);
+    }
+
+    #[test]
+    fn fast_models_leave_absent_and_malformed_pickers_to_the_base_migration() {
+        let dirs = Dirs::new();
+        assert_eq!(
+            fast_models(&dirs, Err("unused"), CURRENT, false)["needed"],
+            false
+        );
+        for before in [
+            "{ not json",
+            "[]",
+            "{}",
+            r#"{"modelPicker":null}"#,
+            r#"{"modelPicker":[]}"#,
+            r#"{"modelPicker":{"options":{}}}"#,
+            r#"{"modelPicker":{}}"#,
+            r#"{"modelPicker":{"options":[]}}"#,
+            r#"{"env":{"ANTHROPIC_CUSTOM_MODEL_OPTION":"gpt-6.1-sol"}}"#,
+        ] {
+            dirs.user(before);
+            let report = models(
+                dirs.home.path(),
+                dirs.project.path(),
+                Err("unused"),
+                Migration::FastTwins,
+                || panic!("no version needed"),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                report,
+                json!({"needed": false, "canApply": false, "adds": [], "labels": []}),
+                "{before}"
+            );
+            assert_eq!(
+                fast_models(&dirs, Err("unused"), CURRENT, true),
+                json!({"applied": true, "unchanged": true})
+            );
+            assert_eq!(dirs.user_text(), before);
+        }
+    }
+
+    #[test]
+    fn fast_models_share_the_base_migrations_blocked_reasons() {
+        let dirs = Dirs::new();
+        let config = crate::config::parse_and_prepare("");
+        let missing = crate::config::parse_and_prepare(
+            r#"
+            [[models]]
+            routing-id = "gpt-6-astra"
+            upstream-model = "gpt-6-astra"
+            display-name = "GPT-6 Astra"
+        "#,
+        );
+        for (config, version, extra, reason) in [
+            (
+                Err("bad config"),
+                CURRENT,
+                json!({}),
+                "config does not load",
+            ),
+            (
+                Ok(&missing),
+                CURRENT,
+                json!({}),
+                "does not serve gpt-6.1-sol-fast",
+            ),
+            (
+                Ok(&config),
+                Some(Version(2, 1, 287)),
+                json!({}),
+                "predates per-model windows",
+            ),
+            (
+                Ok(&config),
+                CURRENT,
+                json!({"modelSettings": []}),
+                "not an object of objects",
+            ),
+        ] {
+            let mut before = extra;
+            before["modelPicker"] = json!({"options": [{"model": "gpt-6.1-sol"}]});
+            dirs.user(&before.to_string());
+            let report = fast_models(&dirs, config, version, false);
+            assert_eq!(report["needed"], true, "{report}");
+            assert_eq!(report["canApply"], false, "{report}");
+            assert_eq!(report["adds"], json!(["gpt-6.1-sol-fast"]));
+            assert_eq!(report["labels"], json!(["GPT-6.1 Sol Fast"]));
+            assert!(
+                report["reason"].as_str().unwrap().contains(reason),
+                "{report}"
+            );
+            assert_eq!(fast_models(&dirs, config, version, true)["applied"], false);
+            assert_eq!(dirs.user_text(), before.to_string());
+        }
+    }
+
+    #[test]
+    fn the_base_migration_drops_retired_twins_but_keeps_shipped_twins() {
+        let dirs = Dirs::new();
+        let mut rows: Vec<Value> = SHIPPED_GPT_ROUTES
+            .into_iter()
+            .map(|id| json!({"model": id}))
+            .collect();
+        rows.extend([
+            json!({"model": "gpt-6-sol-fast(high)"}),
+            json!({"model": "gpt-6.1-sol-fast"}),
+        ]);
+        dirs.user(&json!({"modelPicker": {"options": rows}}).to_string());
+        assert_eq!(
+            dirs.models(CURRENT, true),
+            json!({"applied": true, "added": [], "windows": {}})
+        );
+        rows.remove(4);
+        let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
+        assert_eq!(written["modelPicker"]["options"], json!(rows));
+
+        dirs.user(&format!(
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{OPTION}":"gpt-6-sol-fast"}}}}"#
+        ));
+        assert_eq!(dirs.models(CURRENT, true)["applied"], true);
+        let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
+        assert_eq!(
+            written["modelPicker"]["options"].as_array().unwrap().len(),
+            4
+        );
+
+        dirs.user("{}");
+        dirs.project(
+            "settings.local.json",
+            &format!(r#"{{"env":{{"{BASE_URL}":"{URL}","{OPTION}":"gpt-6-sol-fast"}}}}"#),
+        );
+        assert!(
+            dirs.models(CURRENT, false)["reason"]
+                .as_str()
+                .unwrap()
+                .contains("retired gpt-6-sol-fast")
+        );
+    }
 
     #[test]
     fn the_picker_loses_retired_rows_gains_shipped_ones_and_keeps_its_order() {
@@ -1304,6 +1682,7 @@ mod tests {
             dirs.home.path(),
             dirs.project.path(),
             Ok(&config),
+            Migration::Shipped,
             || CURRENT,
             None,
         )
@@ -1377,7 +1756,12 @@ mod tests {
     fn bypass_clears_a_built_in_default_of_any_family_without_a_picker_row() {
         // Only the router serves these, whether or not their family is
         // enabled: left behind, the default would fail against Anthropic.
-        for model in ["muse-wonder-full-1.0", "grok-4.7", "gpt-5.6-luna"] {
+        for model in [
+            "muse-wonder-full-1.0",
+            "grok-4.7",
+            "gpt-5.6-luna",
+            "gpt-6-sol-fast",
+        ] {
             let dirs = Dirs::new();
             dirs.user(&format!(r#"{{"env":{{"{BASE_URL}":"{URL}"}}}}"#));
             dirs.project("settings.local.json", &format!(r#"{{"model":"{model}"}}"#));
@@ -1448,6 +1832,7 @@ mod tests {
             dirs.home.path(),
             dirs.project.path(),
             Ok(&config),
+            Migration::Shipped,
             || CURRENT,
             Some(&dirs.lock()),
             before_write,
@@ -1642,8 +2027,8 @@ mod tests {
         assert_eq!(mode(&path), 0o600);
     }
 
-    /// Every built-in GPT route, in route order.
-    const GPT_ROUTES: [&str; 8] = [
+    /// Every built-in GPT route, then their `-fast` twins, in route order.
+    const GPT_ROUTES: [&str; 12] = [
         "gpt-6.1-sol",
         "gpt-6.1-terra",
         "gpt-6-astra",
@@ -1652,11 +2037,21 @@ mod tests {
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
+        "gpt-6.1-sol-fast",
+        "gpt-6.1-terra-fast",
+        "gpt-6-astra-fast",
+        "gpt-6-luna-fast",
     ];
+
+    /// Codex's default window for built-in GPT route `id`, a twin's being
+    /// its base's.
+    fn codex_default(id: &str) -> u64 {
+        crate::config::codex_default_window(fast_twin_base(id).unwrap_or(id))
+    }
 
     /// `modelSettings` with every built-in GPT route at Codex's default.
     fn gpt_entries() -> String {
-        entries_at(crate::config::codex_default_window)
+        entries_at(codex_default)
     }
 
     /// `modelSettings` with every built-in GPT route at `window(id)`.
@@ -1675,7 +2070,7 @@ mod tests {
             if id == "gpt-6.1-sol" {
                 258_400
             } else {
-                crate::config::codex_default_window(id)
+                codex_default(id)
             }
         })
     }
@@ -1812,6 +2207,38 @@ mod tests {
         );
     }
 
+    /// The `-fast` twins get windows in subscription and API-key mode.
+    #[test]
+    fn the_fast_twins_need_windows_in_every_auth_mode() {
+        let dirs = Dirs::new();
+        let entries = GPT_ROUTES[..8]
+            .iter()
+            .map(|id| format!(r#""{id}":{{"autoCompactWindow":{}}}"#, codex_default(id)))
+            .collect::<Vec<_>>()
+            .join(",");
+        dirs.user(&format!(
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000"}},"modelSettings":{{{entries}}}}}"#
+        ));
+        let report = windows_of(&dirs, "", CURRENT, false);
+        assert_eq!(report["routes"], json!(GPT_ROUTES[8..]), "{report}");
+        let applied = windows_of(&dirs, "", CURRENT, true);
+        assert_eq!(
+            applied["windows"],
+            json!({"gpt-6.1-sol-fast": 475_000, "gpt-6.1-terra-fast": 475_000,
+                   "gpt-6-astra-fast": 258_400, "gpt-6-luna-fast": 258_400}),
+            "{applied}"
+        );
+
+        dirs.user(&format!(
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000"}},"modelSettings":{{{entries}}}}}"#
+        ));
+        let api_key = "[gpt]\nauth = \"api-key\"\n";
+        assert_eq!(
+            windows_of(&dirs, api_key, CURRENT, false)["routes"],
+            json!(GPT_ROUTES[8..])
+        );
+    }
+
     #[test]
     fn a_missing_window_under_the_new_declaration_is_due_but_not_legacy() {
         let dirs = Dirs::new();
@@ -1872,7 +2299,7 @@ mod tests {
             if id == "gpt-6.1-sol" {
                 300_000
             } else {
-                crate::config::codex_default_window(id)
+                codex_default(id)
             }
         });
         dirs.user(&format!(
@@ -1889,7 +2316,8 @@ mod tests {
         let dirs = Dirs::new();
         dirs.user(&format!(
             r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000"}},
-                "modelSettings":{{"sol":{{"autoCompactWindow":258400}}}}}}"#
+                "modelSettings":{{"sol":{{"autoCompactWindow":258400}},
+                                  "sol-fast":{{"autoCompactWindow":258400}}}}}}"#
         ));
         let source = "[[models]]\nrouting-id = \"sol\"\nupstream-model = \"gpt-6.1-sol\"\n\
                       display-name = \"Sol\"\n";

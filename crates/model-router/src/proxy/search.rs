@@ -78,11 +78,13 @@ pub(super) async fn gpt_origin_on_claude_branch(
     }
     // A forced search may carry the caller's full tool set alongside
     // `web_search` (see `websearch::detect`), and `legacy_websearch` forwards
-    // it, so this GPT-bound body needs the tool rewrites too — identity it
-    // does not: the side call's own system prompt is not a conversation.
+    // it, so this GPT-bound body needs the tool rewrites too, and the origin's
+    // service tier — identity it does not: the side call's own system prompt
+    // is not a conversation.
     match (route, gpt_forward_target(&state.cliproxy_upstream)) {
         (Some(route), Some(target)) => match substitute_model(&body, &route.upstream_model)
             .and_then(|body| crate::tool_changes::portable_tools_in_body(&body, route.family))
+            .and_then(|body| at_tier(&body, route.fast_tier))
         {
             Ok(rewritten) => {
                 match gpt_backend_answer(
@@ -118,6 +120,12 @@ pub(super) async fn gpt_origin_on_claude_branch(
 /// origin's own backend, else through the alpha/scrape ladder, else
 /// forwarded to the GPT upstream. With search `off`, only the vendor-native
 /// answer remains; everything else is forwarded untouched.
+///
+/// The scrape path and the forward run at a GPT origin's service tier, not
+/// the carrier's, so a standard agent's search on a `-fast` carrier spends
+/// no priority and a twin's search keeps it; the model and attribution stay
+/// the carrier's. A Claude or unrecorded origin keeps the carrier's tier,
+/// and `off` records no GPT origin, so its forward stays the carrier's.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn gpt_branch_subcall(
     state: &AppState,
@@ -150,6 +158,21 @@ pub(super) async fn gpt_branch_subcall(
     if let Some((route, native)) = native_search_route {
         return native_websearch_response(state, &rewritten, route, native, subcall, capture).await;
     }
+    // Dropping the tier is always safe; asking for it only on a carrier that
+    // has one (never Grok, Muse or an openai-compat host).
+    let fast = match &origin {
+        Some(websearch::Origin::Gpt { routing_id }) => state.config.route(routing_id),
+        _ => None,
+    }
+    .map_or(route.fast_tier, |origin| {
+        origin.fast_tier && crate::config::has_fast_tier(route)
+    });
+    let rewritten = if fast == route.fast_tier {
+        rewritten
+    } else {
+        // `rewrite_gpt_body` wrote it, so it parses.
+        at_tier(&rewritten, fast).map_or(rewritten, Bytes::from)
+    };
     // Past the native arm no origin searches natively, so only `[web-search]
     // mode` decides, as `AppState::intercepts` would for any origin.
     if state.config.web_search.mode != WebSearchMode::Off
@@ -711,6 +734,14 @@ async fn alpha_search(
         "alpha search returned neither links nor output"
     );
     Ok((links, output))
+}
+
+/// `body` at the requested service tier ([`crate::service_tier`]): a search
+/// sub-call runs at the tier of the agent that asked for it.
+fn at_tier(body: &[u8], fast: bool) -> anyhow::Result<Vec<u8>> {
+    let mut document = serde_json::from_slice::<serde_json::Value>(body)?;
+    crate::service_tier::apply(&mut document, fast);
+    Ok(serde_json::to_vec(&document)?)
 }
 
 /// Forwards the sub-call to the LLM upstream with streaming disabled and

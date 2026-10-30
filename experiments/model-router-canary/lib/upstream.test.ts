@@ -16,6 +16,7 @@ import {
   pickCandidate,
   pinnedVersion,
   routerYamlKeys,
+  serviceTierAnchors,
   vendoredChecksums,
 } from './upstream';
 
@@ -102,10 +103,11 @@ test('goFunc takes a gofmt func through its closing brace; normalizeGo drops com
 });
 
 // A minimal source tree holding every refresh anchor, the identity lines, exclusion reads and all router YAML keys.
-function fakeSource(dir: string, edits: { lead?: string; siwcGuard?: string; siwcTail?: string; ua?: string; dropKey?: string } = {}): string {
+function fakeSource(dir: string, edits: { lead?: string; siwcGuard?: string; siwcTail?: string; ua?: string; dropKey?: string; speed?: string } = {}): string {
   const root = join(dir, 'CLIProxyAPI-x');
   mkdirSync(join(root, 'sdk/cliproxy/auth'), { recursive: true });
   mkdirSync(join(root, 'internal/runtime/executor'), { recursive: true });
+  mkdirSync(join(root, 'internal/translator/codex/claude'), { recursive: true });
   writeFileSync(
     join(root, 'sdk/cliproxy/auth/types.go'),
     `package auth
@@ -151,7 +153,31 @@ func authPreferredInterval(a *Auth) time.Duration {
   );
   writeFileSync(
     join(root, 'internal/runtime/executor/codex_executor_request.go'),
-    `package executor\n\nconst codexUserAgent = "${edits.ua ?? 'codex-tui/0.154.0'}"\nconst codexOriginator = "codex-tui"\n`,
+    `package executor\n\nconst codexUserAgent = "${edits.ua ?? 'codex-tui/0.154.0'}"\nconst codexOriginator = "codex-tui"\n\n` +
+      'func applyCodexRoutingHint(headers http.Header, body []byte) {\n\tif tier := gjson.GetBytes(body, "service_tier"); tier.Type == gjson.String {\n\t\theaders.Set(hint, "tier="+tier.String())\n\t}\n}\n',
+  );
+  writeFileSync(
+    join(root, 'internal/translator/codex/claude/codex_claude_request.go'),
+    `package claude
+
+func ConvertClaudeRequestToCodex(rootResult gjson.Result) {
+\tserviceTier := normalizeCodexServiceTier(rootResult.Get("service_tier"))
+\tif speed := rootResult.Get("speed"); speed.Type == gjson.String && speed.String() == "${edits.speed ?? 'fast'}" {
+\t\tserviceTier = "priority"
+\t}
+\tif serviceTier != "" {
+\t\ttemplate, _ = sjson.SetBytes(template, "service_tier", serviceTier)
+\t}
+}
+
+func normalizeCodexServiceTier(result gjson.Result) string {
+\tswitch strings.ToLower(result.String()) {
+\tcase "fast", "priority":
+\t\treturn "priority"
+\t}
+\treturn ""
+}
+`,
   );
   const keys = routerYamlKeys(readFileSync(join(REPO, 'crates/model-router/src/supervisor.rs'), 'utf8')).filter((k) => k !== edits.dropKey);
   writeFileSync(
@@ -175,7 +201,45 @@ function audit(edits: Parameters<typeof fakeSource>[1]): Record<string, { status
 
 test('an unchanged candidate passes every audit check', () => {
   const r = audit({});
-  expect(Object.values(r).map((c) => c.status)).toEqual(['pass', 'pass', 'pass', 'pass']);
+  expect(Object.values(r).map((c) => c.status)).toEqual(['pass', 'pass', 'pass', 'pass', 'pass']);
+  expect(r['refresh-lead']!.detail).toBe('unchanged (10 anchors)');
+  expect(r['service-tier']!.detail).toBe('unchanged (3 anchors)');
+});
+
+test("a change to the Claude translator's speed mapping warns service-tier", () => {
+  const r = audit({ speed: 'priority' });
+  expect(r['service-tier']!.status).toBe('warn');
+  expect(r['service-tier']!.detail).toContain('speed mapping');
+});
+
+test('service-tier anchors read the Claude translator, not the OpenAI one of the same name', () => {
+  const tier = 'func normalizeCodexServiceTier(result gjson.Result) string {\n\treturn ""\n}\n';
+  const files = [
+    { path: 'internal/translator/codex/openai/chat-completions/codex_openai_request.go', text: `package chat\n\n${tier}` },
+    { path: 'internal/translator/codex/claude/codex_claude_request.go', text: `package claude\n\n${tier.replace('""', '"priority"')}` },
+  ];
+  expect(serviceTierAnchors(files).normalizeCodexServiceTier).toContain('return "priority"');
+  expect(serviceTierAnchors(files.slice(0, 1)).normalizeCodexServiceTier).toBeUndefined();
+});
+
+test('missing pinned anchors keep each check’s own verdict', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'canary-upstream-'));
+  try {
+    const pinned = fakeSource(join(dir, 'a'));
+    const cand = fakeSource(join(dir, 'b'));
+    const refresh = join(pinned, 'sdk/cliproxy/auth/types.go');
+    const tier = join(pinned, 'internal/translator/codex/claude/codex_claude_request.go');
+    writeFileSync(refresh, readFileSync(refresh, 'utf8').replace('func CodexOuterNeedsRefresh(', 'func oldRefresh('));
+    writeFileSync(tier, readFileSync(tier, 'utf8').replace('func normalizeCodexServiceTier(', 'func oldTier('));
+    const checks = auditSource(pinned, cand, new Recorder());
+    const byName = Object.fromEntries(checks.map((c) => [c.name, c]));
+    expect(byName['refresh-lead']!.status).toBe('fail');
+    expect(byName['refresh-lead']!.detail).toContain('audit anchors not found in the pinned source (CodexOuterNeedsRefresh)');
+    expect(byName['service-tier']!.status).toBe('warn');
+    expect(byName['service-tier']!.detail).toBe('service-tier anchors not found in the pinned source (normalizeCodexServiceTier); update upstream.ts serviceTierAnchors');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a changed refresh lead fails refresh-lead', () => {

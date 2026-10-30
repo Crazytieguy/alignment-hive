@@ -28,6 +28,11 @@ present themselves as Claude.
   `gpt-6-luna` — usable from any project at any reasoning effort (Claude
   picks it per call; Claude Code 2.1.292+), plus dynamic per-invocation
   model + effort choice in Workflow orchestration.
+- A `-fast` twin of each of those routes (e.g. `gpt-6.1-sol-fast`) on
+  Codex's fast tier, as an agent, a Workflow model and an optional `/model`
+  row: 1.5–2x faster for 2.5x the subscription usage (about twice the
+  per-token price on an API key). Claude Code's own `/fast` doesn't reach
+  GPT routes.
 - Optional open-weights subagents — add Kimi, GLM, or other models from any
   OpenAI-compatible host you have an API key for during `/model-router:setup`.
 - Optional Grok family — grok-4.7 under your own xAI subscription OAuth

@@ -14,6 +14,15 @@ const setup = [{ id: 'setup', label: 'Run setup', kind: 'command', command: '/mo
 const retryAction = { id: 'retry', label: 'Try again', kind: 'plugin' }
 const bypassAction = { id: 'bypass', label: 'Bypass router', kind: 'plugin' }
 const addAction = { id: 'add-models', label: 'Add to /model', kind: 'plugin' }
+const addFastAction = { id: 'add-fast-models', label: 'Add to /model', kind: 'plugin' }
+const declineFastAction = { id: 'decline-fast-models', label: "Don't add", kind: 'plugin' }
+const fastModels = {
+  id: 'fast-models',
+  severity: 'action',
+  text: 'GPT-6.1 Sol Fast can be added to /model: 1.5–2x faster for 2.5x the usage',
+  version: 'fast:gpt-6.1-sol-fast',
+  actions: [addFastAction, declineFastAction],
+}
 
 const customizeAction = { id: 'customize', label: 'Customize', kind: 'command', command: '/model-router:setup' }
 
@@ -46,6 +55,7 @@ async function start($: Engine, on: On, rows: unknown[], stored: Record<string, 
 async function startWithSettings($: Engine, on: On, rows: unknown[], settings: unknown) {
   const toasts: string[] = []
   const settingsCalls: string[][] = []
+  const checks: Record<string, string>[] = []
   const commands: string[] = []
   mock.env(on, { HOME: '/home/me' })
   mock.store(on, {})
@@ -53,6 +63,7 @@ async function startWithSettings($: Engine, on: On, rows: unknown[], settings: u
   on('process.run', async (_$, e) => {
     const isSettings = e.argv[2] === 'settings'
     if (isSettings) settingsCalls.push(e.argv.slice(2))
+    else checks.push(e.init?.env ?? {})
     const stdout = JSON.stringify(isSettings ? settings : { notices: rows })
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -66,7 +77,7 @@ async function startWithSettings($: Engine, on: On, rows: unknown[], settings: u
   })
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
   await $.classic.SessionStart({ source: 'startup', cwd: '/proj' })
-  return { toasts, settingsCalls, commands }
+  return { toasts, settingsCalls, checks, commands }
 }
 
 describe('model-router settings buttons', () => {
@@ -87,6 +98,40 @@ describe('model-router settings buttons', () => {
     await ui.press({ key: 'model-router:new-model:add-models' })
     expect(settingsCalls).toEqual([['settings', 'models', '--apply', '--project-dir', '/proj']])
     expect(toasts[0]).toBe('Added to /model; restart Claude Code to pick. Compacts gpt-6.1-sol at 475K.')
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('the Fast row offers Add to /model and Don’t add, without Customize', async ($, on) => {
+    await start($, on, [fastModels])
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect((await ui.findAll({ type: 'Button' })).map(button => button.key)).toEqual([
+      'model-router:fast-models:add-fast-models',
+      'model-router:fast-models:decline-fast-models',
+      'model-router:fast-models:dismiss',
+    ])
+    await ui.unmount()
+  })
+
+  test('Add to /model on the Fast row applies --fast and says its window', async ($, on) => {
+    const { toasts, settingsCalls } = await startWithSettings($, on, [fastModels], {
+      applied: true, added: ['gpt-6.1-sol-fast'], windows: { 'gpt-6.1-sol-fast': 475000 },
+    })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:fast-models:add-fast-models' })
+    expect(settingsCalls).toEqual([['settings', 'models', '--fast', '--apply', '--project-dir', '/proj']])
+    expect(toasts).toEqual(['Added to /model; restart Claude Code to pick. Compacts gpt-6.1-sol-fast at 475K.'])
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('Don’t add stores a permanent decline without editing settings', async ($, on) => {
+    const { toasts, settingsCalls, checks } = await startWithSettings($, on, [fastModels], {})
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:fast-models:decline-fast-models' })
+    expect(checks.map(env => env.FAST_MODELS_DISMISSED)).toEqual(['', 'declined'])
+    expect(settingsCalls).toEqual([])
+    expect(toasts).toEqual(['Not added to /model; /model-router:setup can add them later.'])
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
     await ui.unmount()
   })
@@ -197,7 +242,12 @@ describe('model-router settings buttons', () => {
     [
       'every shipped model added',
       addAction,
-      { applied: true, added: ['gpt-6-astra', 'gpt-6-luna', 'gpt-6.1-sol'], windows: { 'gpt-6-astra': 258400, 'gpt-6-luna': 258400, 'gpt-6.1-sol': 475000 } },
+      { applied: true, added: ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'], windows: { 'gpt-6-astra': 258400, 'gpt-6.1-sol': 475000, 'gpt-6.1-terra': 475000, 'gpt-6-luna': 258400 } },
+    ],
+    [
+      'every shipped Fast twin added',
+      addFastAction,
+      { applied: true, added: ['gpt-6-astra-fast', 'gpt-6.1-sol-fast', 'gpt-6.1-terra-fast', 'gpt-6-luna-fast'], windows: { 'gpt-6-astra-fast': 258400, 'gpt-6.1-sol-fast': 475000, 'gpt-6.1-terra-fast': 475000, 'gpt-6-luna-fast': 258400 } },
     ],
     [
       'every window set',
@@ -371,10 +421,10 @@ describe('model-router rows that overlap', () => {
   }
 
   /** A session whose check prints what `rows` returns for its env; each check's env is kept. */
-  async function startChecking($: Engine, on: On, rows: (env: Record<string, string>, edited: boolean) => unknown[]) {
+  async function startChecking($: Engine, on: On, rows: (env: Record<string, string>, edited: boolean) => unknown[], stored: Record<string, unknown> = {}) {
     const checks: Record<string, string>[] = []
     let edited = false
-    mock.store(on, {})
+    mock.store(on, stored)
     on('classic.SessionStart', async () => ({}))
     on('process.run', async (_$, e) => {
       const isSettings = e.argv[2] === 'settings'
@@ -390,6 +440,63 @@ describe('model-router rows that overlap', () => {
     await $.classic.SessionStart({ source: 'startup', cwd: '/proj' })
     return checks
   }
+
+  test('the Fast offer keeps its twins out of the windows row until Dismiss', async ($, on) => {
+    const checks = await startChecking($, on, env =>
+      env.FAST_MODELS_DISMISSED === fastModels.version ? [windowsRow] : [fastModels],
+    )
+    expect(checks[0]?.FAST_MODELS_DISMISSED).toBe('')
+    expect(Object.keys(checks[0] ?? {}).sort()).toEqual([
+      'CLAUDE_PLUGIN_ROOT', 'CLAUDE_PROJECT_DIR', 'FAST_MODELS_DISMISSED', 'NEW_MODEL_DISMISSED',
+    ])
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await ui.find({ key: 'model-router:fast-models:add-fast-models' })).toBeDefined()
+    expect(await ui.find({ key: 'model-router:windows:windows' })).toBeUndefined()
+    await ui.press({ key: 'model-router:fast-models:dismiss' })
+    expect(checks.map(env => env.FAST_MODELS_DISMISSED)).toEqual(['', fastModels.version])
+    expect(await ui.find({ key: 'model-router:fast-models:add-fast-models' })).toBeUndefined()
+    expect(await ui.find({ key: 'model-router:windows:windows' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('Don’t add returns the twins to the windows row and stays declined in another project', async ($, on) => {
+    const checks = await startChecking($, on, env => env.FAST_MODELS_DISMISSED === 'declined' ? [windowsRow] : [fastModels])
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:fast-models:decline-fast-models' })
+    expect(checks.map(env => env.FAST_MODELS_DISMISSED)).toEqual(['', 'declined'])
+    expect(await ui.find({ key: 'model-router:windows:windows' })).toBeDefined()
+    await ui.unmount()
+    await $.classic.SessionStart({ source: 'startup', cwd: '/other-project' })
+    expect(checks.at(-1)?.CLAUDE_PROJECT_DIR).toBe('/other-project')
+    expect(checks.at(-1)?.FAST_MODELS_DISMISSED).toBe('declined')
+    const later = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await later.find({ key: 'model-router:fast-models:add-fast-models' })).toBeUndefined()
+    expect(await later.find({ key: 'model-router:windows:windows' })).toBeDefined()
+    await later.unmount()
+  })
+
+  test('a stored permanent Fast dismissal and the base dismissal go to the check', async ($, on) => {
+    const checks = await startChecking($, on, () => [], {
+      'dismissed:fast-models': 'declined',
+      'dismissed:new-model': '0.1.43',
+    })
+    expect(checks[0]?.FAST_MODELS_DISMISSED).toBe('declined')
+    expect(checks[0]?.NEW_MODEL_DISMISSED).toBe('0.1.43')
+  })
+
+  test('a Fast dismissal holds for the offered set, not the plugin version', async ($, on) => {
+    await start($, on, [fastModels], { 'dismissed:fast-models': fastModels.version })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await ui.find({ key: 'model-router:fast-models:add-fast-models' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a changed set of Fast twins is offered after an earlier dismissal', async ($, on) => {
+    await start($, on, [fastModels], { 'dismissed:fast-models': 'fast:gpt-6-astra-fast' })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await ui.find({ key: 'model-router:fast-models:add-fast-models' })).toBeDefined()
+    await ui.unmount()
+  })
 
   test('an edit checks the rows again, so a row the edit did the work of goes', async ($, on) => {
     const checks = await startChecking($, on, (_env, edited) => (edited ? [] : [newModel, windowsRow]))

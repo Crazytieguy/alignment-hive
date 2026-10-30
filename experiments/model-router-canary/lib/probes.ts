@@ -1,5 +1,6 @@
 // Wire probes: small Anthropic Messages requests sent straight to a router over HTTP, one check per behaviour that
-// broke before (reachability, reasoning replay, prompt caching, images, WebSearch backend, latency, overflow).
+// broke before (reachability, reasoning replay, prompt caching, images, WebSearch backend, latency, overflow), and
+// the child's Codex catalog for the priority tier the `-fast` routes rely on.
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -36,16 +37,19 @@ export function parseModelList(body: string): Set<string> {
   return new Set(json.data.map((m) => m.id).filter((id): id is string => typeof id === 'string'));
 }
 
-export type Catalog = { gpt: Array<string>; grok: Array<string>; muse: Array<string> };
+/** `fast`: the models whose routes get a `-fast` twin (empty for a router from before the twins). */
+export type Catalog = { gpt: Array<string>; grok: Array<string>; muse: Array<string>; fast: Array<string> };
 
 /** The built-in routing IDs from catalog.rs; throws when a table moved or emptied, so catalog drift is loud. */
 export function parseCatalog(src: string): Catalog {
   const consts = new Map<string, string>();
   for (const m of src.matchAll(/const\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"([^"]+)"\s*;/g)) consts.set(m[1]!, m[2]!);
+  const body = (name: string): string | undefined =>
+    src.match(new RegExp(`const\\s+${name}\\s*:\\s*\\[[^\\]]*\\]\\s*=\\s*\\[([\\s\\S]*?)\\];`))?.[1];
   const table = (name: string): Array<string> => {
-    const m = src.match(new RegExp(`const\\s+${name}\\s*:\\s*\\[[^\\]]*\\]\\s*=\\s*\\[([\\s\\S]*?)\\];`));
-    if (!m) throw new Error(`catalog.rs: table ${name} not found`);
-    const ids = [...m[1]!.matchAll(/\(\s*(?:"([^"]+)"|([A-Z][A-Z0-9_]*))\s*,/g)].map((e) => {
+    const m = body(name);
+    if (m === undefined) throw new Error(`catalog.rs: table ${name} not found`);
+    const ids = [...m.matchAll(/\(\s*(?:"([^"]+)"|([A-Z][A-Z0-9_]*))\s*,/g)].map((e) => {
       const id = e[1] ?? consts.get(e[2]!);
       if (!id) throw new Error(`catalog.rs: ${name} names unknown constant ${e[2]}`);
       return id;
@@ -53,7 +57,61 @@ export function parseCatalog(src: string): Catalog {
     if (!ids.length) throw new Error(`catalog.rs: table ${name} is empty`);
     return ids;
   };
-  return { gpt: table('CODEX_NATIVE_MODELS'), grok: table('GROK_MODELS'), muse: table('MUSE_MODELS') };
+  // A flat `[&str; N]` list rather than (id, name) pairs.
+  const list = (name: string): Array<string> => [...(body(name) ?? '').matchAll(/"([^"]+)"/g)].map((e) => e[1]!);
+  // Each shipped route gets a twin, but routers from before the twins (FAST_SUFFIX) ship routes too.
+  const fast = /const\s+FAST_SUFFIX\b/.test(src) ? list('SHIPPED_GPT_ROUTES') : [];
+  return { gpt: table('CODEX_NATIVE_MODELS'), grok: table('GROK_MODELS'), muse: table('MUSE_MODELS'), fast };
+}
+
+/** The Codex version the catalog check presents, current when the `-fast` routes shipped (the child shapes entries by it). */
+const CODEX_CLIENT_VERSION = '0.166.0';
+
+/** Model slug -> its `service_tiers[].id`, from the child's Codex-format `GET /v1/models?client_version=`. */
+export async function codexServiceTiers(t: RouterTarget): Promise<Map<string, Array<string>>> {
+  const secret = readFileSync(t.gatewaySecretFile, 'utf8').trim();
+  const r = await http(`http://127.0.0.1:${t.childPort}/v1/models?client_version=${CODEX_CLIENT_VERSION}`, {
+    headers: { authorization: `Bearer ${secret}` },
+    timeoutMs: 10_000,
+  });
+  if (r.status !== 200) throw new Error(`child Codex catalog on :${t.childPort}: ${r.error ?? `HTTP ${r.status}`} ${excerpt(r.body)}`.trim());
+  return parseServiceTiers(r.body);
+}
+
+/**
+ * Reads `service_tiers` only: the child copies `additional_speed_tiers: ["fast"]` onto every entry, Grok and image
+ * models included.
+ */
+export function parseServiceTiers(body: string): Map<string, Array<string>> {
+  const json = JSON.parse(body) as { models?: Array<{ slug?: unknown; service_tiers?: unknown }> };
+  if (!Array.isArray(json.models)) throw new Error(`child Codex catalog is not a model list: ${excerpt(body)}`);
+  const tiers = new Map<string, Array<string>>();
+  for (const m of json.models) {
+    if (typeof m.slug !== 'string') continue;
+    const ids = Array.isArray(m.service_tiers) ? m.service_tiers.map((tier: { id?: unknown }) => tier?.id) : [];
+    tiers.set(m.slug, ids.filter((id): id is string => typeof id === 'string'));
+  }
+  return tiers;
+}
+
+/**
+ * Every model with a `-fast` route must still list Codex's priority tier. The backend accepts the tier on any model
+ * and every response reports `default`, so this catalog is the only place a withdrawn tier shows. The twins are the
+ * shipped routes, so a shipped model that stops listing the tier needs excluding from them in catalog.rs.
+ */
+export function judgeFastTiers(fast: Array<string>, tiers: Map<string, Array<string>>): Result {
+  const withdrawn = fast.filter((m) => tiers.has(m) && !tiers.get(m)!.includes('priority'));
+  const unlisted = fast.filter((m) => !tiers.has(m));
+  if (withdrawn.length) {
+    return { status: 'fail', detail: `the Codex catalog lists no priority tier for ${withdrawn.join(', ')}: their -fast routes spend the fast-tier rate on nothing (twins of SHIPPED_GPT_ROUTES in catalog.rs; exclude these)` };
+  }
+  if (unlisted.length) return { status: 'warn', detail: `not in the child's Codex catalog: ${unlisted.join(', ')}` };
+  return { status: 'pass', detail: `priority tier listed for ${fast.join(', ')}` };
+}
+
+async function probeFastTiers(t: RouterTarget, fast: Array<string>): Promise<Result> {
+  if (!fast.length) return { status: 'skip', detail: 'this router has no -fast routes' };
+  return judgeFastTiers(fast, await codexServiceTiers(t));
 }
 
 type TomlValue = string | number | boolean;
@@ -124,7 +182,7 @@ export function configuredRoutes(cat: Catalog, cfg: MiniToml): { gpt: Map<string
   return { gpt, grok, muse };
 }
 
-type Discovery = { set: ModelSet; missing: Array<string>; catalogFrom: string };
+type Discovery = { set: ModelSet; missing: Array<string>; catalogFrom: string; fast: Array<string> };
 
 function pickPrimary(gpt: Array<string>): string {
   return gpt.includes('gpt-6-luna') ? 'gpt-6-luna' : (gpt[0] ?? '');
@@ -169,7 +227,7 @@ async function discover(t: RouterTarget, repo: string): Promise<Discovery> {
   };
   const gpt = keep(routes.gpt);
   const set = { gpt, grok: keep(routes.grok), muse: keep(routes.muse), primary: pickPrimary(gpt) };
-  return { set, missing, catalogFrom: from };
+  return { set, missing, catalogFrom: from, fast: cat.fast };
 }
 
 /** The target's enabled built-in routes whose upstream ID its child serves (never probe anything else). */
@@ -653,11 +711,13 @@ export function webSearchMode(t: RouterTarget): string {
 export async function runProbes(targets: Array<RouterTarget>, models: ModelSet, opts: { tier: Tier; rec: Recorder; full: boolean }): Promise<void> {
   const { tier, rec } = opts;
   const served = new Map<RouterTarget, Set<string>>();
+  const fast = new Map<RouterTarget, Array<string>>();
   for (const t of targets) {
     await rec.time({ tier, target: t.label, name: 'models' }, async () => {
       const d = await discover(t, REPO);
       const ids = [...d.set.gpt, ...d.set.grok, ...d.set.muse];
       served.set(t, new Set(ids));
+      fast.set(t, d.fast);
       const untagged = d.catalogFrom.startsWith('working tree');
       const detail =
         `${ids.length} routed models served (routes from ${d.catalogFrom})` +
@@ -681,6 +741,10 @@ export async function runProbes(targets: Array<RouterTarget>, models: ModelSet, 
       await rec.time({ tier, target: t.label, name }, () => fn(t));
     }
   };
+  for (const t of targets) {
+    const ids = fast.get(t);
+    if (ids) await rec.time({ tier, target: t.label, name: 'fast-tier-catalog' }, () => probeFastTiers(t, ids));
+  }
   for (const model of [...models.gpt, ...models.grok, ...models.muse]) await each(`reach/${model}`, model, (t) => probeReach(t, model));
   const p = models.primary;
   await each('tool-replay', p, (t) => probeToolReplay(t, p));

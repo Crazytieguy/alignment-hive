@@ -584,7 +584,8 @@ const COMPACTION_HEADER: &str = "x-claude-code-compaction";
 /// The DOM-level rewrites every GPT-branch turn gets, in one parse: the
 /// tools the history adds mid-conversation declared in `tools[]`
 /// ([`crate::tool_changes`]), the identity system block
-/// ([`crate::identity`]), the removal of tool-schema patterns the Codex
+/// ([`crate::identity`]), the service tier the route asks for
+/// ([`crate::service_tier`]), the removal of tool-schema patterns the Codex
 /// validator cannot compile ([`crate::tool_schema`]), and on a compaction
 /// request a text-only reply.
 ///
@@ -615,6 +616,7 @@ fn rewrite_gpt_body(
         &route.display_name,
         route.family.maker(),
     )?;
+    crate::service_tier::apply(&mut document, route.fast_tier);
     if route.family.tool_choice_auto_only() {
         let forced = document.get("tool_choice").is_some_and(|choice| {
             choice.get("type").and_then(serde_json::Value::as_str) != Some("auto")

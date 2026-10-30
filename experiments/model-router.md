@@ -1926,7 +1926,8 @@ play.
 
 Not covered: streaming overflow, tool use on Luna, upstream
 `reasoning.effort` (no child request log), the fast/priority tier and the
-routing-hint header, and credential refresh.
+routing-hint header (since measured: "Codex priority tier" below), and
+credential refresh.
 
 ### Claude Code harness suite (Muse main sessions)
 
@@ -2468,3 +2469,146 @@ catalog; the next canary run passed every Grok check. So the catalog lags
 the cooldown until a request touches the login, and the canary, which skips
 reach probes for models the catalog leaves out, cannot see the recovery on
 its own.
+
+## Codex priority tier: the `-fast` routes (2026-10-29, Codex 0.166.0, CLIProxyAPI 8.0.34, router 0.1.32 + branch)
+
+Why: hive's recall waits on one GPT-6.1 Sol request of about 281K tokens,
+13.1 s median on the standard tier and 7.6 s on priority. Codex's `/fast`
+is that tier. Method: reads of CLIProxyAPI v8.0.34 (e7d4c731) and codex-rs
+0.166.0, about 35 small requests straight to
+`chatgpt.com/backend-api/codex/responses` with the Pro login, and a few
+through the live router. A benchmark was loading the machine and the
+account at the time, so the latencies are indicative.
+
+How the tier travels:
+
+- CLIProxyAPI's Claude → Codex translator: `service_tier` "fast" or
+  "priority" (any case) becomes `"priority"`, and `speed: "fast"` (exact)
+  overrides it to `"priority"`; any other value is dropped silently, so
+  "ultrafast" is out of reach on this path. Nothing else reads `speed`.
+- `applyCodexRoutingHint` then sets `X-Codex-Routing-Hint:
+  model=<slug>;tier=<service_tier>` from the final body, on every Codex
+  transport, except for API-key and SIWC logins. No per-model or per-login
+  gate on the body: an API-key login sends priority to api.openai.com.
+- xAI and Meta go through the same translator and keep `service_tier`;
+  openai-compat ignores `speed`. Usage records read `service_tier` only.
+- Native Codex sends `"priority"` for `/fast`, only for models whose
+  catalog lists the tier, and never reads it back.
+- Before this change the router forwarded both fields untouched: a
+  `speed: "fast"` on a routed ID became priority. Through the live router
+  `gpt-6.1-sol` with `speed: "fast"` and `grok-4.5` with `speed: "fast"`
+  both answered 200.
+
+What the backend shows:
+
+| check | result |
+|---|---|
+| catalog (child `/v1/models?client_version=0.166.0`) | every gpt-6.x and gpt-5.6 model but gpt-6-chat-thinking lists `service_tiers: [{id: "priority", name: "Fast"}]`: 6.1 Sol and Astra "2x speed, increased usage", 6 Sol, 6 Luna and 6.1 Terra "1.5x speed". Grok and image models list none but carry `additional_speed_tiers: ["fast"]`, as every entry does |
+| tier values | `bogus`, `flex`, `scale` → 400 `Unsupported service_tier: X`; `priority`, `ultrafast`, `default` → 200, and `priority` and `ultrafast` also on gpt-6-chat-thinking, which lists no tier |
+| response | `response.completed` reports `service_tier: "default"` on both tiers; every `x-codex-*` header identical; no per-request cost visible (the per-turn estimate endpoint is 403 for this account) |
+| latency, gpt-6.1-sol, effort low, ~255 output tokens, n = 6 per tier, interleaved and randomized | standard 12.55 s, priority 8.24 s (median) |
+| first token | Sol responses carry `x-codex-safety-buffering-enabled: true` and arrive whole: first token ≈ total time (8.24 vs 8.31 s), so streaming gains nothing on Sol |
+| prompt cache, 16.9K-token prefix | two standard calls warm it (the second reads 16,768 cached); the first priority call reads 0, the second 16,768. Same in the other order (n = 1 each) |
+| 429s | `Rate limit exceeded` on every model and both tiers in one four-minute window, inside a longer burst from the benchmark; none specific to priority |
+
+Pricing (OpenAI's docs): priority spends 2.5x included subscription usage
+and 2x purchased credits (ultrafast 8x and 6x, Astra and 6.1 Sol only); on
+an API key it bills about twice the per-token rate, and a request
+downgraded under load is billed and reported as `default`.
+
+What the router does: each `gpt` route to a shipped model (Astra, 6.1
+Sol, 6.1 Terra, 6 Luna) gets a `<routing-id>-fast` twin, a copy that sends
+`service_tier: "priority"` (`service_tier.rs`). Every other GPT-branch
+request loses `speed` and `service_tier`. A `WebSearch` sub-call's LLM
+request runs at the tier of the agent that asked for it, but asks for
+priority only on a carrier that has the tier (never Grok, Muse or an
+openai-compat host). A twin keeps its base's identity block and prompt-cache key;
+the backend keeps the tiers' caches apart anyway. The twins are served in
+managed API-key mode too; on an API key OpenAI bills Fast mode at about
+twice the per-token rate. Agents ship for the twins, and `/model` rows are
+optional (the band offers them). The canary checks
+the catalog's `priority` entries daily and the translator and hint code on
+each candidate.
+
+Claude Code's own `/fast` stays off GPT routes: turning it on for them
+needs `CLAUDE_CODE_MODEL_CAPABILITIES` and, on this account (its org has
+fast mode off), skipping Anthropic's fast-mode org check, after which every
+Opus request carries `speed: "fast"` too.
+
+Rollout: the router and hive ship in one release, hive's push after the
+binary tag's CI. Until an installed router refreshes to the new binary, it
+sends `gpt-6.1-sol-fast` to Anthropic as an unknown model: one 404 per
+Claude Code process, after which recall uses standard Sol.
+
+### Sandbox verification
+
+Sandbox: the branch debug binary on 8897 in external mode against a
+private 8.0.34 child on 8398 (`request-log: true`, a copy of the Codex
+login; a copy of the xAI login only for the two Grok probes), private XDG
+dirs and HOME, all deleted after. Live router and child PIDs, health
+version, plist mtime and the live logins' refresh times were the same
+before and after. Probes were Anthropic-format with `thinking: adaptive`;
+without it the child sends `reasoning.effort: medium` whatever
+`output_config.effort` says. Evidence is the child's request log, reduced
+to tier fields, hashes and usage
+(`~/.claude/jobs/d58c9560/tmp/impl/verify-a/all.logs`).
+
+| check | result |
+|---|---|
+| twin | `gpt-6.1-sol-fast` reaches the child as `gpt-6.1-sol` with `service_tier: "priority"`, and goes upstream with `service_tier: "priority"`, no `speed`, hint `model=gpt-6.1-sol;tier=priority`; the same when it was sent `speed: "normal"` and `service_tier: "default"` |
+| base route | `gpt-6.1-sol` sent `speed: "fast"` (with the fast-mode beta) or `service_tier: "priority"`: neither field reaches the child, and upstream has no `service_tier`, hint `model=gpt-6.1-sol`; the router logs the dropped field at debug |
+| Grok | `grok-4.7` sent `speed: "fast"` or `service_tier: "priority"`: neither reaches `cli-chat-proxy.grok.com` |
+| cache identity | twin and base send the same `prompt_cache_key` and `Session-Id` |
+| latency, uncached 17.2K tokens, effort low, ~190 output tokens, 6 rounds in random order | standard median 15.28 s (14.00–17.68), priority 7.64 s (7.23–9.19) |
+| prompt cache, 17.2K-token prefix, n = 1 per order | standard, standard, priority, priority read 0, 17,152, 0, 17,152 cached; priority first gives the same |
+| recall's request (281,055 tokens, `build.ts`), adaptive thinking at effort low, 85–134 output tokens, in order priority, standard, priority, standard, priority, standard | cold: priority 16.94 s, standard 13.34 s (0 cached each); warm (280,960 cached): priority 8.11 and 11.33 s, standard 10.52 and 8.32 s |
+| quota | the 5-hour window went from 52% to 53% over the 34 requests |
+| API-key mode | twins served at the priority tier; not run live (no API key), covered by `managed_api_key_mode_serves_the_twins_at_the_priority_tier`; OpenAI bills Fast mode at about twice the per-token rate |
+
+So the router side works as designed, and at 17K tokens priority is about
+2x faster. The recall row isn't recall's real shape (next section).
+
+### Recall's real request (2026-10-30, Claude Code 2.1.314)
+
+What `$.model.complete` sends, captured on the wire from a throwaway
+plugin (API key, API key with the first-party base-URL hints, and the real
+OAuth login; the same body each time): `output_config: {effort}` and no
+`thinking` block, no `stream`, `max_tokens` at maxTokens + 2048, and
+`x-claude-code-request-class: auxiliary`.
+
+Finding (no code change): CLIProxyAPI 8.0.34's Claude → Codex translator
+reads `output_config.effort` only under `thinking.type` adaptive or auto
+(`codex_claude_request.go` 383–412); otherwise `reasoning.effort` keeps its
+default, medium (`thinking/apply.go` falls back to it), and the router adds
+no effort suffix for `gpt`. So a side query's effort is ignored on GPT
+routes: hive recall's `effort: 'low'` runs at medium.
+
+Latency on the live router: recall's request rebuilt (285,693 tokens, the
+prefix fully cached on every measured call), one warm-up per tier, then
+calls interleaved in a seeded random order. Streamed, non-streaming (as
+Claude Code sends it) and explicit effort medium send the same upstream
+body, so they are pooled.
+
+| shape | n per tier | standard median (range) | priority median (range) |
+|---|---|---|---|
+| recall's, pooled | 13 | 26.0 s (11.4–40.1) | 16.0 s (12.0–19.7) |
+| recall's with adaptive thinking at effort low, which recall never sends | 3 | 12.8 s (11.6–14.7) | 10.2 s (6.6–10.9) |
+| recall's, newest 70K tokens only | 3 | 19.7 s (14.3–21.7) | 12.4 s (8.7–13.1) |
+
+- Pooled, priority is about 1.6x as fast (ratio 1.62, bootstrap 95% CI
+  1.24–1.91, permutation p ≈ 0.002). Over 30 s, recall's whole-step limit:
+  3 of 13 standard calls, 0 of 13 priority. Over 20 s: 10 of 13 and 0.
+- About 0.098 s per output token on standard and 0.070 s on priority. The
+  first content block arrives 0.1–0.4 s before the end, so streaming
+  gains nothing.
+- The gain is small at adaptive thinking with effort low, which is why the
+  sandbox's recall row (n = 1–2) showed none.
+- Caveats: standard slowed during the run (first-half median 24.5 s,
+  second half 29.4 s) while priority held at about 16 s; a benchmark with
+  its own router and child ran throughout and may share the Codex account;
+  load average 7–8 on 8 cores. Quota couldn't be read: no response carried
+  `x-codex-*-used-percent`. 42 calls, 21 on priority, and one capture
+  probe.
+
+Evidence: `~/.claude/jobs/d58c9560/tmp/measure/` (`results.jsonl`,
+`capture.jsonl`, `analyze.py`).

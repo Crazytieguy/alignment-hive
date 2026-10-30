@@ -29,6 +29,7 @@ pub mod proxy;
 mod reasoning_order;
 mod routing;
 pub mod service;
+mod service_tier;
 pub mod settings_edit;
 mod sse;
 pub mod state;
