@@ -8,6 +8,7 @@ import { reviewRoundMessages as msg } from '../lib/messages';
 import { hashEvidence } from './evidence';
 import { pageSchema, reviewError, sessionIdSchema, itemIdSchema as slug } from './parse';
 import type { ResolvedItem } from './evidence';
+import type { IdKeyed } from './redact';
 import type { PreparedReview } from './render';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -31,6 +32,8 @@ export const manifestSchema = z.strictObject({
   if (Object.keys(manifest.history).length !== manifest.round - 1 || Object.keys(manifest.history).some((round) => Number(round) >= manifest.round)) context.addIssue({ code: 'custom', message: msg.invalidHistory, path: ['history'] });
 });
 export type ReviewManifest = z.infer<typeof manifestSchema>;
+/** The manifest's records keyed by item id: the secret check reads those keys as ids, not names. */
+export const MANIFEST_ID_KEYED: IdKeyed = [['dispositions'], ['history', '*']];
 export type ManifestItem = ReviewManifest['items'][number];
 
 /** Stable object-key ordering; array order remains meaningful to the authored review. */

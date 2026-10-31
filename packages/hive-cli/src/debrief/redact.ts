@@ -47,7 +47,12 @@ function scanText(text: string, replace: boolean): { text: string; found: Array<
   for (const hit of [...found].reverse()) out = out.slice(0, hit.start) + marker(hit.kind) + '\n'.repeat(hit.match.split('\n').length - 1) + out.slice(hit.end);
   return { text: out, found };
 }
-function scanValue(value: unknown, replace: boolean, found: Array<SecretFound>, name?: string): unknown {
+/**
+ * Paths to objects whose keys are ids rather than names (the manifest's records keyed by item id), `*` matching any key:
+ * a string under one of their keys is scanned as text, so an id like `token-printed` never marks its value as a secret.
+ */
+export type IdKeyed = ReadonlyArray<ReadonlyArray<string>>;
+function scanValue(value: unknown, replace: boolean, found: Array<SecretFound>, name?: string, ids: IdKeyed = []): unknown {
   if (typeof value === 'string') {
     const scan = namedScan(name, value);
     if (scan.kind === 'line') {
@@ -64,7 +69,10 @@ function scanValue(value: unknown, replace: boolean, found: Array<SecretFound>, 
     return scanned.text;
   }
   if (Array.isArray(value)) return value.map((item) => scanValue(item, replace, found));
-  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scanValue(item, replace, found, key)]));
+  if (value !== null && typeof value === 'object') {
+    const keyedById = ids.some((path) => path.length === 0);
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scanValue(item, replace, found, keyedById ? undefined : key, ids.filter((path) => path[0] === key || path[0] === '*').map((path) => path.slice(1)))]));
+  }
   return value;
 }
 /** `found` holds what was replaced, for counting; it never leaves the process. */
@@ -77,9 +85,9 @@ export function redactValue<T>(value: T): { value: T; found: Array<SecretFound> 
   return { value: scanValue(value, true, found) as T, found };
 }
 export function findSecrets(text: string): Array<SecretFound> { return scanText(text, false).found; }
-export function findSecretsInValue(value: unknown): Array<SecretFound> {
+export function findSecretsInValue(value: unknown, ids: IdKeyed = []): Array<SecretFound> {
   const found: Array<SecretFound> = [];
-  scanValue(value, false, found);
+  scanValue(value, false, found, undefined, ids);
   return found;
 }
 /** Counts distinct secrets by kind: the same token seen in a command, its output and a diff counts once. */
@@ -99,17 +107,18 @@ export class SecretTally {
 type Node = DefaultTreeAdapterMap['node'];
 /**
  * The last guard: the finished page as a browser reads it. Decoded text, every attribute and each
- * JSON payload (parsed, so names still mark values). Executable scripts and styles are the
- * renderer's own assets, checked by a unit test instead.
+ * JSON payload (parsed, so names still mark values; `ids` gives a payload's id-keyed paths by its element id).
+ * Executable scripts and styles are the renderer's own assets, checked by a unit test instead.
  */
-export function auditPage(html: string): Array<SecretFound> {
+export function auditPage(html: string, ids: ReadonlyMap<string, IdKeyed> = new Map()): Array<SecretFound> {
   const found: Array<SecretFound> = [];
   const walk = (node: Node): void => {
     if ('attrs' in node) for (const attr of node.attrs) found.push(...findSecrets(attr.value));
     if (node.nodeName === '#text' && 'value' in node) found.push(...findSecrets(node.value));
     if (node.nodeName === 'script' || node.nodeName === 'style') {
       const json = node.nodeName === 'script' && 'attrs' in node && node.attrs.some((attr) => attr.name === 'type' && attr.value === 'application/json');
-      if (json && 'childNodes' in node) found.push(...findSecretsInValue(JSON.parse(node.childNodes.map((child) => ('value' in child ? child.value : '')).join('')) as unknown));
+      const id = 'attrs' in node ? node.attrs.find((attr) => attr.name === 'id')?.value : undefined;
+      if (json && 'childNodes' in node) found.push(...findSecretsInValue(JSON.parse(node.childNodes.map((child) => ('value' in child ? child.value : '')).join('')) as unknown, ids.get(id ?? '')));
       return;
     }
     if ('childNodes' in node) for (const child of node.childNodes) walk(child);

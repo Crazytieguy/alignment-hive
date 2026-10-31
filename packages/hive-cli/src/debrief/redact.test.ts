@@ -104,6 +104,21 @@ test('structured headers: a cookie value is secret whole, an authorization crede
   expect(auditPage(`<script type="application/json" id="p">${JSON.stringify({ headers: { cookie: `locale=en; sid=${sid}` } })}</script>`).map((hit) => hit.kind)).toEqual(['cookie']);
 });
 
+test('id-keyed records: an item id is not a name, and what sits under it is still scanned as text', () => {
+  const ids = [['dispositions'], ['history', '*']];
+  const hash = 'a1'.repeat(32);
+  const manifest = { dispositions: { 'db-password-rotated': 'resolved' }, history: { 1: { 'token-printed': hash, 'leaked-api-key-in-log': hash } } };
+  expect(findSecretsInValue(manifest).map((hit) => hit.kind)).toEqual(['value', 'value', 'value']);
+  expect(findSecretsInValue(manifest, ids)).toEqual([]);
+  const json = (id: string) => `<script type="application/json" id="${id}">${JSON.stringify(manifest)}</script>`;
+  expect(auditPage(json('review-manifest'), new Map([['review-manifest', ids]]))).toEqual([]);
+  expect(auditPage(json('review-diffs'), new Map([['review-manifest', ids]])).map((hit) => hit.kind)).toEqual(['value', 'value', 'value']);
+  // A secret's own shape under an id, a name below an id, and the same id at another path all still count.
+  expect(findSecretsInValue({ history: { 1: { 'token-printed': `ghp_${random(36, 90)}` } } }, ids).map((hit) => hit.kind)).toEqual(['key']);
+  expect(findSecretsInValue({ history: { 1: { 'token-printed': { token: random(24, 91) } } } }, ids).map((hit) => hit.kind)).toEqual(['value']);
+  expect(findSecretsInValue({ evidence: { 'token-printed': random(24, 92) } }, ids).map((hit) => hit.kind)).toEqual(['value']);
+});
+
 test('the page audit reads decoded text, attributes and parsed JSON, never escaped HTML', () => {
   const secret = random(24, 40);
   // Escaped HTML hides both from raw-text patterns: &#34; around a JSON value, &#38; before a second parameter.

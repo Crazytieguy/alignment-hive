@@ -12,7 +12,7 @@ import pageCss from '../../assets/review-page.css' with { type: 'text' };
 import codeCss from '../../assets/review-code.css' with { type: 'text' };
 import { readStateFile } from '../lib/config';
 import { reviewDiffMessages as diffMsg, review as msg, reviewPageMessages as pageMsg, reviewRoundMessages as roundMsg } from '../lib/messages';
-import { buildManifest, parseManifest, readManifest } from './manifest';
+import { MANIFEST_ID_KEYED, buildManifest, parseManifest, readManifest } from './manifest';
 import { compareRounds, seenOverlayScript } from './rounds';
 import { seenStoreScript } from './seen';
 import { EvidenceResolver, isInside } from './evidence';
@@ -232,7 +232,7 @@ ${options.manifest ? `<script type="application/json" id="review-manifest">${esc
   // serialized page would also reject inert wrapper-looking JS/CSS strings.
   const bytes = Buffer.byteLength(html);
   if (bytes >= MAX_PAGE_BYTES) throw reviewError('page', 1, msg.oversized(bytes, contributors.sort((a, b) => b.bytes - a.bytes).slice(0, 5).map((entry) => `${entry.name} (${entry.bytes} bytes)`).join(', ')));
-  refuseLeak(prepared, auditPage(html));
+  refuseLeak(prepared, auditPage(html, new Map([['review-manifest', MANIFEST_ID_KEYED]])));
   return { html, warnings };
 }
 
@@ -296,7 +296,7 @@ export async function renderReview(inputPath: string, options: RenderReviewOptio
     const reviewId = previous?.reviewId ?? existing?.reviewId;
     if (existing && (existing.session !== prepared.context.session || existing.round !== prepared.parsed.page.round || (reviewId !== undefined && existing.reviewId !== reviewId))) throw reviewError('page', 1, roundMsg.outputConflict);
     const manifest = buildManifest(prepared, { previous, reviewId, coverage: coverage?.coverage });
-    refuseLeak(prepared, findSecretsInValue(manifest));
+    refuseLeak(prepared, findSecretsInValue(manifest, MANIFEST_ID_KEYED));
     const comparison = compareRounds(manifest, previous);
     const page = assembleReview(prepared, { reviewId: manifest.reviewId, manifest, states: previous ? comparison.states : undefined, dropped: comparison.dropped, overlayScript: seenOverlayScript() });
     await writeFile(temporaryPage, page.html, { flag: 'wx', mode: 0o600 });

@@ -108,6 +108,18 @@ test('rename/disposition errors are contextual and a dropped item yields a warni
   await expect(renderReview(f.input, { cwd: f.repo, projects: f.projects, outDir: join(f.root, 'invalid'), previousManifestPath: first.manifestPath })).rejects.toThrow('new, line 1');
 });
 
+test('item ids are ids, not secret names: a round keyed by the previous round\'s ids renders', async () => {
+  // Ids two real round-2 renders were refused over, and a password-named one whose disposition is a plain word.
+  const ids = ['token-printed', 'leaked-api-key-in-log', 'db-password-rotated'];
+  const f = await setup(ids.map((id) => reviewItem(id, 'Original.')).join(''));
+  const first = await renderReview(f.input, { cwd: f.repo, projects: f.projects, outDir: join(f.root, 'round1') });
+  await writeFile(f.input, reviewDocument(reviewItem('token-printed', 'Updated.') + reviewItem('leaked-api-key-in-log', 'Original.'), 'round: 2\ndispositions: { db-password-rotated: resolved }\n'));
+  const second = await renderReview(f.input, { cwd: f.repo, projects: f.projects, outDir: join(f.root, 'round2'), previousManifestPath: first.manifestPath });
+  expect(Object.keys(second.manifest.history[1]).sort()).toEqual([...ids].sort());
+  expect(second.manifest.dispositions).toEqual({ 'db-password-rotated': 'resolved' });
+  expect(await readFile(second.pagePath, 'utf8')).toContain('data-round-state="updated"');
+});
+
 test('full manifested render golden is deterministic (UPDATE_SNAPSHOTS=1)', async () => {
   const f = await setup(reviewItem('choice', '```ref\ndiff: source.ts\nfocus: L1\nold-focus: L1\ncaption: Exact change\n```', 'judgement-call: true\nalternatives: [Keep the old behavior]\n'));
   await f.write('source.ts', 'export const value = 2;\n');
