@@ -9,8 +9,7 @@
 //! the child would map either to priority, xAI and Meta included, so the
 //! tier is spent only when the model ID asks for it.
 //!
-//! Measured on GPT-6.1 Sol (2026-10-29 and 30, Pro plan;
-//! `experiments/model-router.md`):
+//! Measured on GPT-6.1 Sol (2026-10-29 and 30, Pro plan):
 //! - On hive recall's request (286K tokens, prefix cached), warm and
 //!   interleaved, priority cut the median from 26.0 s to 16.0 s (n = 13 per
 //!   tier, p ≈ 0.002), and no priority call took over 30 s against 3 of 13

@@ -110,5 +110,3 @@ presents itself as Muse Code. Setup shows the terms before enabling it.
 
 Point `MODEL_ROUTER_DEV` at a locally built binary to bypass the release
 download in `scripts/bootstrap.sh`.
-[`experiments/model-router.md`](../../experiments/model-router.md) records
-the measured Claude Code behavior this design rests on.

@@ -1,6 +1,6 @@
 # model-router canary
 
-Checks that model-router still works end to end, and screens each new CLIProxyAPI release so the pin can follow upstream closely. Most of model-router's breakages came from outside the repo: a Claude Code release whose new tool schema the Codex backend rejected, a provider load-shedding a client fingerprint or raising a version floor, a pin too old to know a new model. Two more hid behind fallbacks for weeks (GPT web search silently fell back for 21 days). The canary looks for exactly those instead of waiting for a user report or a hand-run pin audit (`experiments/model-router.md` holds the incident history and the old audits).
+Checks that model-router still works end to end, and screens each new CLIProxyAPI release so the pin can follow upstream closely. Most of model-router's breakages came from outside the repo: a Claude Code release whose new tool schema the Codex backend rejected, a provider load-shedding a client fingerprint or raising a version floor, a pin too old to know a new model. Two more hid behind fallbacks for weeks (GPT web search silently fell back for 21 days). The canary looks for exactly those instead of waiting for a user report or a hand-run pin audit.
 
 It runs on macOS (launchd, and the keychain login the nested `claude` runs share) for a maintainer with model-router installed.
 

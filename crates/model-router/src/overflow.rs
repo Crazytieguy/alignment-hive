@@ -19,10 +19,9 @@
 //! phrase is generic, so the Meta dialect also needs the request's own
 //! estimate to be near the window ([`OverflowDialect::min_estimate_percent`]).
 //!
-//! The Codex and xAI wire shapes and the client behavior are recorded in
-//! `experiments/model-router.md` (measured against Claude Code
-//! 2.1.220 and `CLIProxyAPI` 7.2.92; a version change on either side is a
-//! retest trigger).
+//! The Codex and xAI wire shapes and the client behavior were measured
+//! against Claude Code 2.1.220 and `CLIProxyAPI` 7.2.92; a version change on
+//! either side is a retest trigger.
 
 use bytes::Bytes;
 use serde_json::Value;
