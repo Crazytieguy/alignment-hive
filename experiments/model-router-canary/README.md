@@ -29,7 +29,7 @@ With API-key GPT auth, the live probes bill your OpenAI key each day.
 **Candidate tier:** needs the managed CLIProxyAPI child and a Codex subscription login; other setups skip it.
 
 1. Downloads the release and checks it against the release's `checksums.txt`.
-2. Audits its source against the pinned tag: Codex token refresh behaviour, the config keys the router writes, Codex client identity, the priority-tier mapping.
+2. Audits its source against the pinned tag: Codex token refresh behaviour, the config keys the router writes, Codex client identity, the priority-tier mapping, how Claude-format effort is read.
 3. Starts two sandbox routers with their own XDG dirs and free ports, one on the pinned CLIProxyAPI and one on the candidate, both on the live router binary and a copy of the Codex login.
 4. Runs the same probes (overflow included) and cells against both, interleaved.
 5. Decides what comes next. `claude -p` with no tools reads upstream's release notes from the pin to the candidate and of any release since, the changed Go files and the check results. It answers "repin", "bench" (run the Terminal-Bench subset first), or "wait" when a later release fixes or reverts something the candidate changed that model-router uses. A minor or major release gets the bench unless it waits.

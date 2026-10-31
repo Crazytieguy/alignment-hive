@@ -103,11 +103,13 @@ test('goFunc takes a gofmt func through its closing brace; normalizeGo drops com
 });
 
 // A minimal source tree holding every refresh anchor, the identity lines, exclusion reads and all router YAML keys.
-function fakeSource(dir: string, edits: { lead?: string; siwcGuard?: string; siwcTail?: string; ua?: string; dropKey?: string; speed?: string } = {}): string {
+function fakeSource(dir: string, edits: { lead?: string; siwcGuard?: string; siwcTail?: string; ua?: string; dropKey?: string; speed?: string; effort?: string } = {}): string {
   const root = join(dir, 'CLIProxyAPI-x');
   mkdirSync(join(root, 'sdk/cliproxy/auth'), { recursive: true });
   mkdirSync(join(root, 'internal/runtime/executor'), { recursive: true });
   mkdirSync(join(root, 'internal/translator/codex/claude'), { recursive: true });
+  mkdirSync(join(root, 'internal/translator/openai/claude'), { recursive: true });
+  mkdirSync(join(root, 'internal/thinking'), { recursive: true });
   writeFileSync(
     join(root, 'sdk/cliproxy/auth/types.go'),
     `package auth
@@ -161,6 +163,11 @@ func authPreferredInterval(a *Auth) time.Duration {
     `package claude
 
 func ConvertClaudeRequestToCodex(rootResult gjson.Result) {
+\treasoningEffort := "medium"
+\tif v := rootResult.Get("output_config.effort"); v.Exists() && ${edits.effort ?? 'true'} {
+\t\treasoningEffort = v.String()
+\t}
+\ttemplate, _ = sjson.SetBytes(template, "reasoning.effort", reasoningEffort)
 \tserviceTier := normalizeCodexServiceTier(rootResult.Get("service_tier"))
 \tif speed := rootResult.Get("speed"); speed.Type == gjson.String && speed.String() == "${edits.speed ?? 'fast'}" {
 \t\tserviceTier = "priority"
@@ -178,6 +185,14 @@ func normalizeCodexServiceTier(result gjson.Result) string {
 \treturn ""
 }
 `,
+  );
+  writeFileSync(
+    join(root, 'internal/translator/openai/claude/openai_claude_request.go'),
+    'package claude\n\nfunc ConvertClaudeRequestToOpenAI(root gjson.Result) {\n\tif v := root.Get("output_config.effort"); v.Exists() {\n\t\tout, _ = sjson.SetBytes(out, "reasoning_effort", v.String())\n\t}\n}\n',
+  );
+  writeFileSync(
+    join(root, 'internal/thinking/apply.go'),
+    'package thinking\n\nfunc extractClaudeConfig(body []byte) ThinkingConfig {\n\treturn ThinkingConfig{}\n}\n',
   );
   const keys = routerYamlKeys(readFileSync(join(REPO, 'crates/model-router/src/supervisor.rs'), 'utf8')).filter((k) => k !== edits.dropKey);
   writeFileSync(
@@ -201,9 +216,17 @@ function audit(edits: Parameters<typeof fakeSource>[1]): Record<string, { status
 
 test('an unchanged candidate passes every audit check', () => {
   const r = audit({});
-  expect(Object.values(r).map((c) => c.status)).toEqual(['pass', 'pass', 'pass', 'pass', 'pass']);
+  expect(Object.values(r).map((c) => c.status)).toEqual(['pass', 'pass', 'pass', 'pass', 'pass', 'pass']);
   expect(r['refresh-lead']!.detail).toBe('unchanged (10 anchors)');
   expect(r['service-tier']!.detail).toBe('unchanged (3 anchors)');
+  expect(r['claude-effort']!.detail).toBe('unchanged (3 anchors)');
+});
+
+test("a change to how the Claude translator reads effort warns claude-effort", () => {
+  const r = audit({ effort: 'thinkingSet' });
+  expect(r['claude-effort']!.status).toBe('warn');
+  expect(r['claude-effort']!.detail).toContain('Codex translator');
+  expect(r['claude-effort']!.detail).toContain('$.model.complete sends it, still reaches the upstream');
 });
 
 test("a change to the Claude translator's speed mapping warns service-tier", () => {

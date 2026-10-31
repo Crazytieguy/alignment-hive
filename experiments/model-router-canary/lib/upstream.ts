@@ -263,6 +263,20 @@ function funcAnchor(files: Array<GoFile>, decl: RegExp): string | undefined {
   return body === undefined ? undefined : normalizeGo(body).join('\n');
 }
 
+/** An audit anchor: each run of lines from one matching `start` through the next matching `end`, normalized. */
+function spanAnchor(files: Array<GoFile>, start: RegExp, end: RegExp): string | undefined {
+  const spans: Array<string> = [];
+  for (const f of files) {
+    const lines = f.text.split('\n');
+    lines.forEach((l, i) => {
+      if (!start.test(l)) return;
+      const j = lines.findIndex((m, k) => k > i && end.test(m));
+      if (j > i) spans.push(normalizeGo(lines.slice(i, j + 1).join('\n')).join(' ⏎ '));
+    });
+  }
+  return spans.length ? spans.sort().join('\n') : undefined;
+}
+
 /** An audit anchor: every match of `linesAround`; undefined when there are none. */
 function linesAnchor(files: Array<GoFile>, re: RegExp, before = 0, after = 0): string | undefined {
   const xs = linesAround(files, re, before, after);
@@ -312,6 +326,22 @@ export function serviceTierAnchors(files: Array<GoFile>): Record<string, string 
     normalizeCodexServiceTier: funcAnchor(claude, /^func normalizeCodexServiceTier\(/m),
     'speed mapping': linesAnchor(claude, /Get\("speed"\)/, 1, 3),
     applyCodexRoutingHint: funcAnchor(files, /^func applyCodexRoutingHint\(/m),
+  };
+}
+
+/**
+ * What turns a Claude request's `output_config.effort` into the upstream's reasoning effort: the Codex translator's
+ * effort block (Muse shares it), the OpenAI-compatible translator's reads, and the Claude-format thinking reader, which
+ * carries effort to openai-compat when there is no thinking block. Before 8.0.38 none of them took effort without a
+ * `thinking` block, and a plugin's `$.model.complete` sends none, so hive recall's effort low ran at medium.
+ */
+export function effortAnchors(files: Array<GoFile>): Record<string, string | undefined> {
+  const codex = files.filter((f) => f.path.includes('translator/codex/claude/'));
+  const openai = files.filter((f) => f.path.includes('translator/openai/claude/'));
+  return {
+    'Codex translator': spanAnchor(codex, /reasoningEffort := /, /"reasoning\.effort"/),
+    'OpenAI translator': linesAnchor(openai, /output_config\.effort/, 3, 6),
+    extractClaudeConfig: funcAnchor(files, /^func extractClaudeConfig\(/m),
   };
 }
 
@@ -381,8 +411,8 @@ const clip = (s: string, n = 200): string => (s.length > n ? s.slice(0, n - 1) +
 /**
  * Compare the candidate's source with the pin's where a change would hurt model-router: Codex refresh timing (a
  * sandbox copy of the login could rotate the live refresh token), the config keys the router writes, the Codex
- * identity (load-shedding history), the priority tier the `-fast` routes ask for, and per-login exclusions. Returns
- * the checks it recorded.
+ * identity (load-shedding history), the priority tier the `-fast` routes ask for, how Claude-format effort is read,
+ * and per-login exclusions. Returns the checks it recorded.
  */
 export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, repo = REPO): Array<Check> {
   const base = { tier: 'candidate' as const, target: 'candidate' };
@@ -431,6 +461,12 @@ export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, r
       if (stale.length) return { status: 'warn', detail: clip(`service-tier anchors not found in the pinned source (${stale.join(', ')}); update upstream.ts serviceTierAnchors`) };
       if (!changed.length) return { status: 'pass', detail: `unchanged (${count} anchors)` };
       return { status: 'warn', detail: clip(`priority-tier handling changed (${changed.join(', ')}); recheck that a -fast route still reaches Codex as service_tier priority (service_tier.rs)`) };
+    }),
+    timed('claude-effort', () => {
+      const { stale, changed, count } = anchorChanges(effortAnchors(pinned), effortAnchors(cand));
+      if (stale.length) return { status: 'warn', detail: clip(`effort anchors not found in the pinned source (${stale.join(', ')}); update upstream.ts effortAnchors`) };
+      if (!changed.length) return { status: 'pass', detail: `unchanged (${count} anchors)` };
+      return { status: 'warn', detail: clip(`effort handling changed (${changed.join(', ')}); recheck that effort without a thinking block, as hive recall's $.model.complete sends it, still reaches the upstream`, 260) };
     }),
     timed('excluded-models', () => {
       const a = excludedModelsLines(pinned);
