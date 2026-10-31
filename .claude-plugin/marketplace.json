@@ -3,9 +3,9 @@
   "owner": { "name": "Crazytieguy" },
   "plugins": [
     {
-      "name": "mats",
-      "source": "./plugins/mats",
-      "description": "Resources for MATS fellows"
+      "name": "lit-review",
+      "source": "./plugins/lit-review",
+      "description": "Literature review pipeline (arXiv, Semantic Scholar, LessWrong)"
     },
     {
       "name": "hive-mind",
@@ -116,5 +116,9 @@
       "source": "./plugins/tldr",
       "description": "Collapses long replies to a one-sentence TL;DR: [ more ] expands one, /tldr turns it off."
     }
-  ]
+  ],
+  "renames": {
+    "project-setup": "mats",
+    "mats": "lit-review"
+  }
 }

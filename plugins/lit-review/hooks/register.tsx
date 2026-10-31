@@ -1,4 +1,4 @@
-// mats as a mod: scripts/check.sh's install row in the band above the prompt, checked at startup
+// lit-review as a mod: scripts/check.sh's install row in the band above the prompt, checked at startup
 // and /clear. Left to the hive plugin when that is enabled, since hive draws the same row.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -6,14 +6,14 @@ import type { EngineInterface, Register } from 'claude-code'
 import { noticeBand } from './notice-band'
 import type { Notice, NoticeAction } from './notice-band'
 
-const PLUGIN = 'mats'
-const notices = atom({ plugin: 'mats', key: 'notices' } as const, [] as Notice[])
-const dismissed = atom({ plugin: 'mats', key: 'dismissed' } as const, [] as string[])
+const PLUGIN = 'lit-review'
+const notices = atom({ plugin: 'lit-review', key: 'notices' } as const, [] as Notice[])
+const dismissed = atom({ plugin: 'lit-review', key: 'dismissed' } as const, [] as string[])
 
 /** Runs the plugin's session-start check and keeps its rows; none when it fails. */
 async function check($: EngineInterface, projectDir: string): Promise<void> {
   try {
-    // The hive plugin draws the same install row, so mats leaves it to hive. No API lists
+    // The hive plugin draws the same install row, so lit-review leaves it to hive. No API lists
     // plugins; the hive plugin's commands are its mark.
     if ((await $.command.list()).some(command => command.name.startsWith('hive:'))) return
     const { exitCode, stdout } = await $.process.run(['bash', `${$.plugin.root}/scripts/check.sh`], {

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run once per session by hooks/register.tsx: prints the band's rows as JSON
 # ({"notices": [...]}, the Notice shape in hooks/notice-band.tsx), or nothing.
-# mats has no dependency on hive; this nudge exists to onboard fellows to the
+# lit-review has no dependency on hive; this nudge exists to onboard users to the
 # alignment-hive install script. The mod leaves it to the hive plugin when
 # that is enabled, since hive draws the same row.
 set -euo pipefail

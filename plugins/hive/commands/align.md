@@ -74,7 +74,7 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 
 #### Plugin list
 
-- **MATS**: `mats@alignment-hive` — For MATS fellows: literature review pipeline (arXiv, Semantic Scholar, LessWrong)
+- **Literature review**: `lit-review@alignment-hive` — Literature review pipeline (arXiv, Semantic Scholar, LessWrong)
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels; supports RunPod, vast.ai and Kubernetes
 - **Codebase exploration**: `precis` — Gives Claude a summary of your codebase at the start of each session
 - **Cross-model review** (both need a ChatGPT subscription; offer as one choice):

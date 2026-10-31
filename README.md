@@ -52,7 +52,7 @@ Install a plugin by adding it to `enabledPlugins` in `settings.json`, e.g.:
 ```json
 {
   "enabledPlugins": {
-    "mats@alignment-hive": true
+    "lit-review@alignment-hive": true
   }
 }
 ```
@@ -64,7 +64,7 @@ Install a plugin by adding it to `enabledPlugins` in `settings.json`, e.g.:
 | [llms-fetch-mcp](plugins/llms-fetch-mcp) | Documentation fetching with [llms.txt](https://llmstxt.org/) support | `llms-fetch-mcp@alignment-hive` |
 | [remote-kernels](plugins/remote-kernels) | Cloud GPU machines with Jupyter kernels (RunPod, vast.ai, or Kubernetes) | `remote-kernels@alignment-hive` |
 | [model-router](plugins/model-router) | GPT models as native Claude Code subagents via a local gateway (beta) | `model-router@alignment-hive` |
-| [mats](plugins/mats) | Literature review pipeline (arXiv, Semantic Scholar, LessWrong) | `mats@alignment-hive` |
+| [lit-review](plugins/lit-review) | Literature review pipeline (arXiv, Semantic Scholar, LessWrong) | `lit-review@alignment-hive` |
 | [tldr](plugins/tldr) | Long replies collapse to a one-sentence TL;DR; `/tldr` toggles | `tldr@alignment-hive` |
 
 [Codex for Claude Code](https://github.com/Crazytieguy/codex-plugin-cc) — Codex reviews and task delegation without leaving Claude Code — is maintained in a separate repo.

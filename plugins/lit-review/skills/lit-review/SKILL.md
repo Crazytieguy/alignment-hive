@@ -224,7 +224,7 @@ Run this command **in the background** using the Bash tool's `run_in_background`
 While the pipeline runs, repeatedly check for new markdown files that need summarization. **Loop until the pipeline finishes and all papers are summarized:**
 
 1. List markdown files in `<output_dir>/papers/` that do NOT yet have a corresponding summary in `<output_dir>/summaries/`
-2. For any unsummarized files found, spawn up to 5 `mats:summarizer` subagents simultaneously with the Agent tool (one call per paper, all in the same message); if one fails, retry it once, then leave that paper without a summary and move on
+2. For any unsummarized files found, spawn up to 5 `lit-review:summarizer` subagents simultaneously with the Agent tool (one call per paper, all in the same message); if one fails, retry it once, then leave that paper without a summary and move on
 3. Wait for the current batch to complete
 4. Check the pipeline's background task status—if it's still running, wait ~15 seconds and go back to step 1. If the status is unavailable or errors (e.g., the session was backgrounded or resumed mid-run), don't wait for it—re-run the `process_papers_pipeline.py` command with the same arguments (it skips existing PDFs and markdown, so re-running is safe) and continue the loop.
 5. Once the pipeline finishes, do one final check for any remaining unsummarized papers and process them. Papers the pipeline lists as failed have no markdown and get no summary; don't chase them.

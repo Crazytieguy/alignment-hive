@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
 const BAND = {
-  plugin: 'mats',
+  plugin: 'lit-review',
   component: 'AbovePrompt' as const,
   props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 140, scroll: { offset: 0, bodyRows: 19 }, view: {} },
 }
@@ -28,17 +28,17 @@ function fake(on: On, commands: string[]) {
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
 }
 
-describe('mats install row', () => {
+describe('lit-review install row', () => {
   for (const [label, commands, isShown] of [
-    ['shown without the hive plugin', ['mats:lit-review'], true],
-    ['left to hive when the hive plugin is enabled', ['mats:lit-review', 'hive:align'], false],
+    ['shown without the hive plugin', ['lit-review:lit-review'], true],
+    ['left to hive when the hive plugin is enabled', ['lit-review:lit-review', 'hive:align'], false],
   ] as const) {
     test(label, async ($, on) => {
       fake(on, [...commands])
       await $.classic.SessionStart({ source: 'startup', cwd: '/tmp/project' })
       for (const surface of ['terminal', 'desktop'] as const) {
         const ui = await $.ui.mount({ ...BAND, surface })
-        expect((await ui.find({ key: 'mats:install:install' })) !== undefined).toBe(isShown)
+        expect((await ui.find({ key: 'lit-review:install:install' })) !== undefined).toBe(isShown)
         await ui.unmount()
       }
     })
