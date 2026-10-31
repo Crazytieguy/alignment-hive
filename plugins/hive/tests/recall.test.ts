@@ -26,7 +26,7 @@ type Served = { argv: Array<string>; cwd: string; sessionId: string | null; sock
 
 /**
  * The world beneath the plugin: a CLI with one past session (scripts/hive.sh), and models that answer `reply`, Sol
- * and its fast tier among them unless `isSolMissing`. `hold` keeps a model call running until its time is up;
+ * among them unless `isSolMissing`. `hold` keeps a model call running until its time is up;
  * `fails` has a model answer with an error status instead, after `afterMs`; `recalledBefore` puts a report of ENTRY
  * in the current session. `server`: the local server `hive local-server --ensure` names, answering reads as the CLI
  * does (`up`, `none` by default), refusing them (`down`) or never answering (`stuck`); `held` keeps that many of its
@@ -59,7 +59,7 @@ function world(on: On, { isSolMissing = false } = {}) {
     comments: COMMENTS,
     sessionRows: [] as Array<unknown>,
     isScripted: false,
-    fails: (isSolMissing ? { [FAST]: { status: 404 }, [SOL]: { status: 404 } } : {}) as Record<string, { status: number; afterMs?: number }>,
+    fails: (isSolMissing ? { [SOL]: { status: 404 } } : {}) as Record<string, { status: number; afterMs?: number }>,
     server: 'none' as 'none' | 'up' | 'down' | 'stuck',
     held: 0,
     ensures: 0,
@@ -162,7 +162,7 @@ describe('automatic recall', () => {
     const { asked, contexts } = world(on)
     await start($)
     await $.prompt.submit(typed('Format the file.'))
-    expect(asked).toEqual([FAST])
+    expect(asked).toEqual([SOL])
     expect(contexts[0]?.join('')).toContain('> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)')
     expect(contexts[0]?.join('')).toContain('hive:retrieval')
 
@@ -188,7 +188,7 @@ describe('automatic recall', () => {
     await start($)
     await $.prompt.submit(typed('Format the file.'))
     await $.prompt.submit(typed('And the other one.'))
-    expect(asked).toEqual([FAST, SOL, 'sonnet', 'sonnet'])
+    expect(asked).toEqual([SOL, 'sonnet', 'sonnet'])
     expect(contexts[1]?.join('')).toContain('Always use tabs')
   })
 
@@ -200,7 +200,7 @@ describe('automatic recall', () => {
     delete state.fails.sonnet
     await $.prompt.submit(typed('And the other one.'))
     await $.prompt.submit(typed('And a third.'))
-    expect(asked).toEqual([FAST, SOL, 'sonnet', 'sonnet', 'sonnet'])
+    expect(asked).toEqual([SOL, 'sonnet', 'sonnet', 'sonnet'])
     const found = expect.stringContaining('Always use tabs')
     expect(contexts.map(c => c.join(''))).toEqual([expect.stringContaining('did not finish'), found, found])
   })
@@ -216,63 +216,29 @@ describe('automatic recall', () => {
     expect(contexts[1]?.join('')).toContain('Always use tabs')
   })
 
-  test('on, auto with a router that lacks the fast tier: standard Sol answers, and the fast tier is not asked again', { options: { recall: true } }, async ($, on) => {
-    const { asked, contexts, state } = world(on)
-    state.fails[FAST] = { status: 404 }
-    await start($)
-    await $.prompt.submit(typed('Format the file.'))
-    await $.prompt.submit(typed('And the other one.'))
-    expect(asked).toEqual([FAST, SOL, SOL])
-    expect(contexts[1]?.join('')).toContain('Always use tabs')
-  })
-
-  test('on, auto: when the fast tier fails, standard Sol answers if it has the time; else the prompt goes on without recall', { options: { recall: true } }, async ($, on) => {
-    const { asked, clock, contexts, state, timeouts } = world(on)
-    await start($)
-    state.fails[FAST] = { status: 429, afterMs: 5_000 }
-    const first = $.prompt.submit(typed('Format the file.'))
-    await clock.advance(5_000)
-    await first
-    expect(asked).toEqual([FAST, SOL])
-    expect(timeouts).toEqual([30_000, 25_000])
-    expect(contexts[0]?.join('')).toContain('Always use tabs')
-
-    // Under 25 seconds left: a standard call starts cold, and could not finish.
-    state.fails[FAST] = { status: 429, afterMs: 5_001 }
-    const submitted = $.prompt.submit(typed('And the other one.'))
-    await clock.advance(5_001)
-    await submitted
-    expect(asked).toEqual([FAST, SOL, FAST])
-    expect(contexts[1]?.join('')).toContain('did not finish')
-  })
-
-  test('on, auto: the history is built once per budget, with fresh time left for every attempt', { options: { recall: true } }, async ($, on) => {
+  test('on, auto: Sonnet, after Sol turned out missing, gets its own history and the time left', { options: { recall: true } }, async ($, on) => {
     const { asked, clock, prompts, state, timeouts } = world(on)
-    // A row just ahead of the first attempt's clock distinguishes a reused history from a newly built one.
+    // A row just ahead of the first attempt's clock tells a history built at the second attempt's clock.
     const later = 'A newer entry in the same outline.'
     state.historyRows.push({ ...ENTRY, loc: 'feed0001:8', text: later, time: new Date(NOW + 1_000).toISOString() })
-    state.fails[FAST] = { status: 404, afterMs: 5_000 }
-    state.fails[SOL] = { status: 404 }
+    state.fails[SOL] = { status: 404, afterMs: 5_000 }
     await start($)
     const submitted = $.prompt.submit(typed('Format the file.'))
     await clock.advance(5_000)
     await submitted
-    expect(asked).toEqual([FAST, SOL, 'sonnet'])
-    expect(timeouts).toEqual([30_000, 25_000, 25_000])
-    expect(prompts[0]).toBe(prompts[1])
+    expect(asked).toEqual([SOL, 'sonnet'])
+    expect(timeouts).toEqual([30_000, 25_000])
     expect(prompts[0]).not.toContain(later)
-    // Sonnet's different budget gets its own history, at that attempt's clock.
-    expect(prompts[2]).toContain(later)
+    expect(prompts[1]).toContain(later)
   })
 
-  test('on, auto: when standard Sol fails, the prompt goes on without recall, not on Sonnet', { options: { recall: true } }, async ($, on) => {
+  test('on, auto: when Sol fails, the prompt goes on without recall, not on Sonnet', { options: { recall: true } }, async ($, on) => {
     const { asked, contexts, state } = world(on)
-    state.fails[FAST] = { status: 404 }
     state.fails[SOL] = { status: 429 }
     await start($)
     await $.prompt.submit(typed('Format the file.'))
     await $.prompt.submit(typed('And the other one.'))
-    expect(asked).toEqual([FAST, SOL, SOL])
+    expect(asked).toEqual([SOL, SOL])
     expect(contexts.map(c => c.join(''))).toEqual([expect.stringContaining('did not finish'), expect.stringContaining('did not finish')])
   })
 
@@ -379,7 +345,7 @@ describe('recall on comment reads', () => {
     const { asked, prompts, state } = world(on)
     await start($)
     const read = await readComments($)
-    expect(asked).toEqual([FAST])
+    expect(asked).toEqual([SOL])
     expect(prompts[0]).toContain('read these comments the user left on a page, new to it:\\n\\n<new_comments>\\nThread 79cff63a')
     expect(prompts[0]).not.toContain('BEGIN ARTIFACT COMMENTS')
     expect(read.text).toBe(COMMENTS)
@@ -389,7 +355,7 @@ describe('recall on comment reads', () => {
 
     state.sessionRows = [READ_ROW]
     const again = await readComments($)
-    expect(asked).toEqual([FAST])
+    expect(asked).toEqual([SOL])
     expect(again.context).toBeUndefined()
   })
 
@@ -401,13 +367,13 @@ describe('recall on comment reads', () => {
     // Read whole after a listing elided a comment: other text, the same thread.
     state.comments = COMMENTS.replace('Indent this file.', 'Indent this file.\n  [the user (owner) — 2026-10-20T15:29]\n      0a1b2c3d| With tabs.')
     expect((await readComments($)).context).toBeUndefined()
-    expect(asked).toEqual([FAST])
+    expect(asked).toEqual([SOL])
     // A subagent's turn ending is not the main agent's.
     await $.turn.complete({ reason: 'end', agentId: 'child' } as never)
     expect((await readComments($)).context).toBeUndefined()
     await $.turn.complete({ reason: 'end' } as never)
     expect((await readComments($)).context?.join('')).toContain('On the comments just read')
-    expect(asked).toEqual([FAST, FAST])
+    expect(asked).toEqual([SOL, SOL])
   })
 
   test('on: a subagent read, another action, a session a script ran, and a recall that found nothing or did not finish add nothing', { options: { recall: true } }, async ($, on) => {
@@ -428,7 +394,7 @@ describe('recall on comment reads', () => {
     const held = readComments($)
     await clock.advance(31_000)
     expect((await held).context).toBeUndefined()
-    expect(asked).toEqual([FAST, FAST])
+    expect(asked).toEqual([SOL, SOL])
   })
 })
 
@@ -440,7 +406,7 @@ describe('the local server', () => {
     await start($)
     await $.prompt.submit(typed('Format the file.'))
     await $.prompt.submit(typed('And the other one.'))
-    expect(asked).toEqual([FAST, FAST])
+    expect(asked).toEqual([SOL, SOL])
     expect(contexts[1]?.join('')).toContain('> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)')
     expect(dirs).toEqual([])
     const reads = ['sessions -n 500 --brief', 'outline abcd1234 feed0001 --replies --no-agents --clip 0']
@@ -449,7 +415,7 @@ describe('the local server', () => {
     // Started once, then known.
     expect(state.ensures).toBe(1)
     expect(logs).toContainEqual(expect.stringMatching(/^hive recall: read 2 sessions in \d+ ms$/))
-    expect(logs).toContainEqual(expect.stringMatching(/^hive recall: gpt-6\.1-sol-fast answered in \d+ ms/))
+    expect(logs).toContainEqual(expect.stringMatching(/^hive recall: gpt-6\.1-sol answered in \d+ ms/))
   })
 
   test('a server that fails is started again and asked once more; then the CLI reads, for the rest of the recall', { options: { recall: true } }, async ($, on) => {
@@ -530,7 +496,7 @@ describe('the local server', () => {
     expect(logs).toContain('hive local server: no answer in 5000 ms; warm stopped')
 
     await $.prompt.submit(typed('Format the file.'))
-    expect(asked).toEqual([FAST])
+    expect(asked).toEqual([SOL])
     expect(served.map(s => s.argv[0])).toEqual(['sessions', 'sessions', 'outline'])
     expect(state.ensures).toBe(1)
   })

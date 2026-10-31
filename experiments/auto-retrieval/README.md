@@ -26,4 +26,6 @@ bun cost5.ts 2026-09-21 2026-10-19 800 800000      # recall's cost over real use
 
 `corpus4.ts` writes `$BENCH/corpus4.jsonl` (`CORPUS_CLIP=0` for unclipped text), the project's messages and replies that `corpus5.ts` turns into the CLI's rows for the sweep and the cost simulation.
 
+Effort: the bench calls `claude -p --effort low`, which sends adaptive thinking with the effort, so Sol and Sonnet ran at low. The plugin's `$.model.complete` sends the effort with no thinking block: Sonnet 5.5 thinks adaptively without one, so it matched the bench all along; Sol ran at medium until model-router pinned CLIProxyAPI 8.0.44, which reads the effort without one.
+
 Scoring: a judged claim counts as delivered when an excerpt the main agent received contains its evidence span (`credit.ts`); recall is the share of a case's relevant judged value delivered, averaged over cases. `BENCH_CASES` limits scoring to the cases whose claims were fully judged.

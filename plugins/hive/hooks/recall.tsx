@@ -4,7 +4,7 @@ import type { EngineInterface, Hook, MatchedHook, RenderElement, RenderInput } f
 import { CliFailed, localReads } from './cli'
 import type { Read } from './cli'
 import { FAILED, INSTRUCTIONS, budgetFor, entries, history, newThreads, promptBlocks, recalledIn, reportOf, sessionsFor } from './recall-text'
-import type { Ask, History, Listed, Row, Session } from './recall-text'
+import type { Ask, Listed, Row, Session } from './recall-text'
 import type { HiveRecalled } from '../types'
 
 // Automatic recall (beta, opt-in through the `recall` option): before the main agent starts on a prompt the user
@@ -12,21 +12,16 @@ import type { HiveRecalled } from '../types'
 // with the prompt; and likewise for comment threads new to the main agent, with the read that brought them.
 
 const SOL = 'gpt-6.1-sol'
-// Sol on Codex's priority tier (model-router's `-fast` twin): about 1.6 times as fast, for 2.5 times the usage.
-const SOL_FAST = 'gpt-6.1-sol-fast'
 const FALLBACK = 'sonnet'
 // The whole step, CLI reads included; past it the prompt goes on with a note that recall did not finish.
 const TIMEOUT_MS = 30_000
-// Standard Sol after the fast tier failed, only with this much left: its answers to recall took 11–40 s (median 26 s),
-// and after the fast tier it starts cold, as the tiers share no prompt cache.
-const STANDARD_MIN_MS = 25_000
 
-// The models this process found missing, not asked again: Sol without model-router, its fast tier without a router
-// that serves it.
+// The models this process found missing, not asked again: Sol without model-router, a model chosen by name that the
+// router does not serve.
 const missing = new Set<string>()
 
-/** The models a recall asks, in turn: `auto` tries Sol's fast tier, then standard Sol, then FALLBACK. */
-const modelsFor = (choice: string) => (choice === 'auto' ? [SOL_FAST, SOL, FALLBACK] : [choice]).filter(model => !missing.has(model))
+/** The models a recall asks, in turn: `auto` tries Sol, then FALLBACK. */
+const modelsFor = (choice: string) => (choice === 'auto' ? [SOL, FALLBACK] : [choice]).filter(model => !missing.has(model))
 
 // What recall gave each prompt, by its transcript row, shown under the prompt in the ctrl+o transcript.
 const recalled = atom({ plugin: 'hive', key: 'recalled' } as const, null as HiveRecalled)
@@ -124,15 +119,9 @@ async function recall($: EngineInterface, choice: string, askOf: AskOf, deadline
   $.ui.log(`hive recall: read ${sessions.length} sessions in ${(await $.clock.now()) - started} ms`, { to: 'debug' })
   const ask = askOf(sessions.find(s => s.loc === session)?.rows)
   if (!ask) return NOTHING
-  const histories = new Map<number, History>()
-  for (const [i, model] of models.entries()) {
+  for (const model of models) {
     const now = await $.clock.now()
-    const budget = budgetFor(model)
-    let h = histories.get(budget)
-    if (!h) {
-      h = history(sessions, now, budget, session)
-      histories.set(budget, h)
-    }
+    const h = history(sessions, now, budgetFor(model), session)
     // Nothing the main agent lacks (a new project, say): no entry could come of a call.
     if (![...h.seen.keys()].some(h.isNew)) return NOTHING
     // A call with under a second left could not answer.
@@ -145,23 +134,17 @@ async function recall($: EngineInterface, choice: string, askOf: AskOf, deadline
         { signal },
       )
       .catch(() => undefined)
-    const ended = await $.clock.now()
-    $.ui.log(`hive recall: ${model} ${endOf(r)} in ${ended - asked} ms, after ${asked - now} ms of history`, { to: 'debug' })
+    $.ui.log(`hive recall: ${model} ${endOf(r)} in ${(await $.clock.now()) - asked} ms, after ${asked - now} ms of history`, { to: 'debug' })
     if (r?.isAnswered) {
       const found = entries(r.text, h)
       return found.length ? { context: reportOf(found, h.from, 'threads' in ask), shown: { entries: found, from: h.from } } : NOTHING
     }
-    // Not there to ask: the request was refused, or a 4xx other than a rate limit. FALLBACK is always there, so its
-    // 4xx fails only this recall.
+    // Not there to ask (the request was refused, or a 4xx other than a rate limit): the next model, if any. Any other
+    // failure (a rate limit, a server error, no answer in time) fails this recall: FALLBACK is only for a process
+    // without Sol, and is never marked missing.
     const isMissing = !r || (r.reason === 'api-error' && r.status !== null && r.status >= 400 && r.status < 500 && r.status !== 429)
-    if (isMissing) {
-      if (model !== FALLBACK) missing.add(model)
-      continue
-    }
-    // Any other failure (a rate limit, a server error, no answer in time) can move on only to another non-fallback
-    // model with enough time to answer. FALLBACK is only for a process without the earlier models.
-    const next = models[i + 1]
-    if (!next || next === FALLBACK || deadline - ended < STANDARD_MIN_MS) return FAILURE
+    if (!isMissing) return FAILURE
+    if (model !== FALLBACK) missing.add(model)
   }
   return FAILURE
 }
