@@ -2,8 +2,8 @@ import { afterAll, mock } from 'bun:test';
 
 type Fn = (...args: Array<any>) => unknown;
 
-// mock.module stays in place for every later test file in the process (bun 1.3.11, which CI
-// pins), so each stub here hands back to the real export once the calling file is done.
+// mock.module stays in place for every later test file in the process (seen in bun 1.3.11), so
+// each stub here hands back to the real export once the calling file is done.
 // `specifier` resolves from this directory, so callers must live in it too.
 export function mockForFile<T extends Record<string, unknown>>(
   specifier: string,

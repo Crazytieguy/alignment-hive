@@ -342,7 +342,7 @@ export function startServer(socket: string, options: ServerOptions = {}): Server
     clearInterval(tick);
     log({ stop: reason });
     // Another server's socket in its place stays; this one's goes with the listener (removed here too, as bun 1.3.11
-    // leaves it). Requests under way have a moment to be answered.
+    // left it). Requests under way have a moment to be answered.
     if (reason !== 'socket replaced') {
       await Promise.race([server.stop(), Bun.sleep(1000)]);
       if (lstatSync(socket, { throwIfNoEntry: false })?.ino === ino) rmSync(socket, { force: true });

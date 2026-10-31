@@ -198,7 +198,7 @@ describe('discoverSessions: cwds inside the project', () => {
 
   test('keeps subdirectories of the checkout and its worktrees without asking git', () => {
     writeFileSync(gitLog, '');
-    // In a child process started with the stub on PATH: bun 1.3.11's execSync ignores a PATH set in process.env.
+    // In a child process started with the stub on PATH: bun 1.3.11's execSync ignored a PATH set in process.env.
     const script = `import { discoverSessions } from ${JSON.stringify(join(import.meta.dir, '..', 'lib', 'session-state'))};
       const sessions = await discoverSessions([${JSON.stringify(transcriptsDir)}], ${JSON.stringify(projectRepo)});
       console.log(JSON.stringify(sessions.map((s) => s.sessionId).sort()));`;
