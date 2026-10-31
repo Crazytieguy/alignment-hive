@@ -1,6 +1,6 @@
 {
   "name": "lit-review",
-  "version": "0.5.12",
+  "version": "0.5.13",
   "description": "Literature review pipeline (arXiv, Semantic Scholar, LessWrong)",
   "types": "./types/index.d.ts"
 }
