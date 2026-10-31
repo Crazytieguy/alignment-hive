@@ -3,21 +3,17 @@
 //!
 //! A `-fast` twin ([`crate::config::ModelRoute::fast_tier`]) sends `service_tier:
 //! "priority"`, the field and value native Codex sends for its `/fast`.
-//! `CLIProxyAPI` (8.0.34) keeps it, and on a subscription login adds the
+//! `CLIProxyAPI` (8.0.44) keeps it, and on a subscription login adds the
 //! `X-Codex-Routing-Hint: model=…;tier=priority` header Codex sends. Every
 //! other GPT-branch request loses any `speed` or `service_tier` it carries:
 //! the child would map either to priority, xAI and Meta included, so the
 //! tier is spent only when the model ID asks for it.
 //!
 //! Measured on GPT-6.1 Sol (2026-10-29 and 30, Pro plan):
-//! - On hive recall's request (286K tokens, prefix cached), warm and
-//!   interleaved, priority cut the median from 26.0 s to 16.0 s (n = 13 per
-//!   tier, p ≈ 0.002), and no priority call took over 30 s against 3 of 13
-//!   standard ones. That request runs at effort medium upstream: Claude
-//!   Code's `$.model.complete` sends `output_config.effort` with no
-//!   `thinking` block, which the child's translator ignores. At adaptive
-//!   thinking with effort low, a shape recall never sends, the gain was small
-//!   (12.8 s to 10.2 s, n = 3).
+//! - On a 256K–286K-token request with its prefix cached (hive recall's),
+//!   warm and interleaved: at effort low, priority cut the mean from 10.9 s to 6.6 s
+//!   (n = 20 each); at effort medium, the median from 26.0 s to 16.0 s
+//!   (n = 13 each, p ≈ 0.002).
 //! - Priority cut the median from 15.3 s to 7.6 s on uncached 17K-token
 //!   requests through the router at effort low (adaptive thinking; n = 6
 //!   each, interleaved), and from 12.55 s to 8.24 s on short direct ones.

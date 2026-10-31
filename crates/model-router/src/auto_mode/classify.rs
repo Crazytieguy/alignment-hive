@@ -346,10 +346,7 @@ impl Classifier {
         if self.forced_choice {
             body["tool_choice"] = json!({"type": "tool", "name": "verdict"});
         }
-        // CLIProxyAPI reads `output_config.effort` only under adaptive
-        // thinking; without it the backend runs at its default (medium).
         if let Some(effort) = &self.effort {
-            body["thinking"] = json!({"type": "adaptive"});
             body["output_config"] = json!({"effort": effort});
         }
         if let Some(tier) = &self.service_tier {

@@ -1414,7 +1414,7 @@ async fn asked(fake: &Fake, model: &str) -> Vec<Value> {
 }
 
 /// A model that is no route is asked as GPT models are: effort in
-/// `output_config` with adaptive thinking, the verdict forced.
+/// `output_config`, the verdict forced.
 #[tokio::test]
 async fn a_classifier_model_without_a_route_is_asked_as_a_gpt_one() {
     let fake = Fake::new(
@@ -1435,7 +1435,7 @@ async fn a_classifier_model_without_a_route_is_asked_as_a_gpt_one() {
     let calls = asked(&fake, "codex-auto-review").await;
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0]["output_config"], json!({"effort": "medium"}));
-    assert_eq!(calls[0]["thinking"], json!({"type": "adaptive"}));
+    assert!(calls[0].get("thinking").is_none());
     assert_eq!(
         calls[0]["tool_choice"],
         json!({"type": "tool", "name": "verdict"})

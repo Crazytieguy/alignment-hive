@@ -2,7 +2,7 @@
 //
 // The router (crates/model-router/src/auto_mode) sends each classification as serde_json's compact serialization of
 // {model, max_tokens, stream, system: [{type: text, text}], messages: [the per-action user message], tools: [verdict],
-// tool_choice?, thinking?, output_config?, service_tier?}, object keys sorted. The system text is its template (system_prompt.md) with the
+// tool_choice?, output_config?, service_tier?}, object keys sorted. The system text is its template (system_prompt.md) with the
 // effective policy in the template's one {{POLICY}} slot, and nothing else in the body depends on the template. So a
 // candidate's request for a captured call is the captured body with the policy cut out (by the template the capture
 // was made with) and put into the candidate's template, plus the candidate's model, effort and output format. The
@@ -156,13 +156,14 @@ export function rerender(captured: Record<string, unknown>, policy: string, c: C
   const system = fillTemplate(c.template, p);
   const body: Record<string, unknown> = { ...captured, system: [{ type: 'text', text: system }] };
   if (c.model !== undefined) body.model = c.model;
-  // As classify.rs body(): an effort goes with adaptive thinking (CLIProxyAPI ignores it otherwise). Captured bodies
-  // from before that fix carry neither; keeping the captured effort keeps them as they were.
+  // As classify.rs body(): an effort goes in output_config alone. Captures from before CLIProxyAPI 8.0.38 read it
+  // without a thinking block carry `thinking: adaptive` beside it, or no effort at all; keeping the captured effort keeps
+  // them as they were.
   if (c.effort === null) {
     delete body.output_config;
     delete body.thinking;
   } else if (c.effort !== undefined) {
-    body.thinking = { type: 'adaptive' };
+    delete body.thinking;
     body.output_config = { effort: c.effort };
   }
   // As classify.rs body(): the configured tier goes in the body as is (CLIProxyAPI maps it to Codex's).
