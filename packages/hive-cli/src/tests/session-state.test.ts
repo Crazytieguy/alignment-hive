@@ -189,19 +189,22 @@ describe('discoverSessions: cwds inside the project', () => {
     writeFileSync(join(bin, 'git'), `#!/bin/sh\npwd -P >> ${JSON.stringify(gitLog)}\nexec ${JSON.stringify(realGit)} "$@"\n`, {
       mode: 0o755,
     });
-    path = process.env.PATH;
-    process.env.PATH = `${bin}:${path}`;
+    path = `${bin}:${process.env.PATH}`;
   });
 
   afterAll(() => {
-    process.env.PATH = path;
     rmSync(base, { recursive: true, force: true });
   });
 
-  test('keeps subdirectories of the checkout and its worktrees without asking git', async () => {
+  test('keeps subdirectories of the checkout and its worktrees without asking git', () => {
     writeFileSync(gitLog, '');
-    const ids = (await discoverSessions([transcriptsDir], projectRepo)).map((s) => s.sessionId).sort();
-    expect(ids).toEqual(['project-subdir', 'worktree-subdir']);
+    // In a child process started with the stub on PATH: bun 1.3.11's execSync ignores a PATH set in process.env.
+    const script = `import { discoverSessions } from ${JSON.stringify(join(import.meta.dir, '..', 'lib', 'session-state'))};
+      const sessions = await discoverSessions([${JSON.stringify(transcriptsDir)}], ${JSON.stringify(projectRepo)});
+      console.log(JSON.stringify(sessions.map((s) => s.sessionId).sort()));`;
+    const child = Bun.spawnSync([process.execPath, '-e', script], { env: { ...process.env, PATH: path } });
+    expect(child.stderr.toString()).toBe('');
+    expect(JSON.parse(child.stdout.toString())).toEqual(['project-subdir', 'worktree-subdir']);
     const asked = readFileSync(gitLog, 'utf-8');
     // The stub ran: the nested repository and the symlink's target were asked.
     expect(asked).toContain(join(projectRepo, 'vendor', 'nested', 'sub'));
