@@ -224,6 +224,11 @@ fn proxies_through_self(config: &Config) -> bool {
 /// and matched by the handler. One constant so the two can never drift.
 pub const HEALTH_PATH: &str = "/__model-router/health";
 
+/// The Models API listing path. The router answers it itself (see
+/// [`models_response`]) so a client can learn which routed ids this gateway
+/// serves; a bare upstream forward would list Anthropic's models alone.
+pub const MODELS_PATH: &str = "/v1/models";
+
 /// The tokened path prefix the ingress gate accepts.
 fn ingress_prefix(token: &str) -> String {
     format!("/t/{token}")
@@ -386,8 +391,8 @@ async fn handle(state: AppState, request: Request) -> Response {
         }
     };
 
-    if parts.method == Method::GET && parts.uri.path() == HEALTH_PATH {
-        return health_response(&state);
+    if let Some(response) = answer_local_get(&state, &parts).await {
+        return response;
     }
 
     let decision = decide(&state.config, &body);
@@ -1009,6 +1014,22 @@ fn apply_ingress_gate(config: &Config, parts: &mut axum::http::request::Parts) -
 }
 
 /// Local liveness/version endpoint for the `SessionStart` hook and doctor.
+/// The GETs the router answers itself: the health probe and the model
+/// listing. `None` for every other request, which goes on to routing.
+async fn answer_local_get(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+) -> Option<Response> {
+    if parts.method != Method::GET {
+        return None;
+    }
+    match parts.uri.path() {
+        HEALTH_PATH => Some(health_response(state)),
+        MODELS_PATH => Some(models_response(state, parts).await),
+        _ => None,
+    }
+}
+
 fn health_response(state: &AppState) -> Response {
     let (upstream, healthy) = match &state.cliproxy_upstream {
         CliproxyUpstream::Stub => ("stub", true),
@@ -1036,6 +1057,104 @@ fn health_response(state: &AppState) -> Response {
     }
     let bytes = Bytes::from(health.to_string());
     build_response(StatusCode::OK, json_headers(), Body::from(bytes))
+}
+
+/// One row of the Models API listing for a routed id: the shape Anthropic's
+/// `GET /v1/models` uses, so a client that already reads that list needs no
+/// second parser. No `created_at`: a routed id has no release date the router
+/// could honestly report, and the readers key on `id`.
+fn model_row(route: &crate::config::ModelRoute) -> serde_json::Value {
+    json!({
+        "type": "model",
+        "id": route.routing_id,
+        "display_name": route.display_name,
+    })
+}
+
+/// `GET /v1/models`: the ids this gateway serves, in the Models API's shape
+/// (`{data: [{type, id, display_name}], has_more, first_id, last_id}`).
+///
+/// Every configured route is listed, so a tool that wants to offer the
+/// gateway's models (a session manager's model picker, Claude Code's own
+/// gateway model discovery) has one place to read them. A caller carrying a
+/// credential (`x-api-key` or `Authorization`) also gets Anthropic's own list
+/// merged in front, fetched with the caller's headers; a caller without one,
+/// or an upstream that fails, gets the routed ids alone, still as a 200, so
+/// a listing never depends on a credential the reader may not hold. A
+/// routed id that the upstream also lists is reported once.
+async fn models_response(state: &AppState, parts: &axum::http::request::Parts) -> Response {
+    let own: Vec<serde_json::Value> = state.config.models.iter().map(model_row).collect();
+    let credentialed = parts.headers.contains_key("x-api-key")
+        || parts.headers.contains_key(header::AUTHORIZATION);
+    let mut data: Vec<serde_json::Value> = Vec::new();
+    if credentialed {
+        let url = upstream_url(&state.config.anthropic_upstream_base, &parts.uri);
+        let outgoing = headers::request_headers(&parts.headers, false, false, None);
+        match state.client.get(url).headers(outgoing).send().await {
+            Ok(response) if response.status().is_success() => {
+                match response
+                    .bytes()
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<serde_json::Value>(&bytes)
+                            .map_err(anyhow::Error::from)
+                    }) {
+                    Ok(upstream) => {
+                        if let Some(rows) =
+                            upstream.get("data").and_then(serde_json::Value::as_array)
+                        {
+                            data.extend(rows.iter().cloned());
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            "upstream model listing was not JSON; listing routed ids alone"
+                        );
+                    }
+                }
+            }
+            Ok(response) => {
+                tracing::info!(status = %response.status(), "upstream model listing refused; listing routed ids alone");
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = format!("{:#}", anyhow::Error::from(error)),
+                    "upstream model listing failed; listing routed ids alone"
+                );
+            }
+        }
+    }
+    let listed: std::collections::HashSet<String> = data
+        .iter()
+        .filter_map(|row| row.get("id").and_then(serde_json::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect();
+    data.extend(own.into_iter().filter(|row| {
+        row.get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !listed.contains(id))
+    }));
+    let first_id = data.first().and_then(|row| row.get("id").cloned());
+    let last_id = data.last().and_then(|row| row.get("id").cloned());
+    tracing::info!(
+        routed = state.config.models.len(),
+        total = data.len(),
+        merged_upstream = credentialed && data.len() > state.config.models.len(),
+        "listing models"
+    );
+    let listing = json!({
+        "data": data,
+        "has_more": false,
+        "first_id": first_id,
+        "last_id": last_id,
+    });
+    build_response(
+        StatusCode::OK,
+        json_headers(),
+        Body::from(Bytes::from(listing.to_string())),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1486,6 +1605,157 @@ mod tests {
             health.get("declared-context-window"),
             Some(&serde_json::Value::Null)
         );
+    }
+
+    async fn listing(
+        app: Router,
+        path: &str,
+        credential: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut request = Request::builder().method(Method::GET).uri(path);
+        if let Some(key) = credential {
+            request = request.header("x-api-key", key);
+        }
+        let response = app
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        };
+        (status, value)
+    }
+
+    fn listed_ids(listing: &serde_json::Value) -> Vec<String> {
+        listing["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn routed_ids(config: &Config) -> Vec<String> {
+        config
+            .models
+            .iter()
+            .map(|route| route.routing_id.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn models_listing_names_every_routed_id_without_a_credential() {
+        // The listing a reader without a credential gets: the gateway's own
+        // routes, in the Models API's shape, as a 200. This is how a tool
+        // that offers the gateway's models learns them.
+        let config = Config::default();
+        let expected = routed_ids(&config);
+        assert!(!expected.is_empty(), "the default config routes GPT models");
+        let app = app(config).await.unwrap();
+        let (status, listing) = listing(app, "/v1/models", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed_ids(&listing), expected);
+        assert_eq!(listing["has_more"], false);
+        assert_eq!(listing["first_id"], expected[0]);
+        assert_eq!(listing["last_id"], expected[expected.len() - 1]);
+        let first = &listing["data"][0];
+        assert_eq!(first["type"], "model");
+        assert!(
+            first["display_name"]
+                .as_str()
+                .is_some_and(|name| !name.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn models_listing_sits_under_the_ingress_token() {
+        let config = Config {
+            ingress_token: Some("secret-token".to_string()),
+            ..Config::default()
+        };
+        let expected = routed_ids(&config);
+        let app = app(config).await.unwrap();
+        let (bare, _) = listing(app.clone(), "/v1/models", None).await;
+        assert_eq!(
+            bare,
+            StatusCode::NOT_FOUND,
+            "the bare path is gated like every other"
+        );
+        let (status, listing) = listing(app, "/t/secret-token/v1/models", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed_ids(&listing), expected);
+    }
+
+    #[tokio::test]
+    async fn models_listing_with_a_credential_merges_the_upstream_list_once() {
+        // A credentialed caller gets Anthropic's list in front of the routed
+        // ids, fetched with its own headers; a routed id the upstream also
+        // names is reported once.
+        let config = Config::default();
+        let routed = routed_ids(&config);
+        let duplicated = routed[0].clone();
+        let upstream = Router::new().route(
+            "/v1/models",
+            axum::routing::get({
+                let duplicated = duplicated.clone();
+                move || async move {
+                    axum::Json(json!({
+                        "data": [
+                            {"type": "model", "id": "claude-test-5", "display_name": "Claude Test 5", "created_at": "2026-01-01T00:00:00Z"},
+                            {"type": "model", "id": duplicated, "display_name": "Upstream's copy"},
+                        ],
+                        "has_more": false,
+                    }))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, upstream).into_future());
+        let config = Config {
+            anthropic_upstream_base: format!("http://{address}"),
+            ..config
+        };
+        let app = app(config).await.unwrap();
+        let (status, listing) = listing(app, "/v1/models", Some("k")).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids = listed_ids(&listing);
+        assert_eq!(ids[0], "claude-test-5", "the upstream's rows come first");
+        assert_eq!(
+            ids[1], duplicated,
+            "the upstream's copy of a routed id is the one kept"
+        );
+        assert_eq!(
+            ids.iter().filter(|id| **id == duplicated).count(),
+            1,
+            "a routed id the upstream also lists is reported once"
+        );
+        assert_eq!(ids.len(), routed.len() + 1);
+        assert_eq!(&ids[2..], &routed[1..]);
+        assert_eq!(listing["first_id"], "claude-test-5");
+        assert_eq!(listing["last_id"], routed[routed.len() - 1]);
+    }
+
+    #[tokio::test]
+    async fn models_listing_with_a_credential_survives_an_unreachable_upstream() {
+        // The listing never depends on the upstream: a refused connection
+        // leaves the routed ids, still as a 200.
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = closed.local_addr().unwrap();
+        drop(closed);
+        let config = Config {
+            anthropic_upstream_base: format!("http://{address}"),
+            ..Config::default()
+        };
+        let expected = routed_ids(&config);
+        let app = app(config).await.unwrap();
+        let (status, listing) = listing(app, "/v1/models", Some("k")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed_ids(&listing), expected);
     }
 
     #[tokio::test]
