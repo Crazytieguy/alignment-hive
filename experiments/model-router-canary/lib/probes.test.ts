@@ -203,6 +203,27 @@ describe('catalog and config', () => {
     expect([...configuredRoutes(cat, parseMiniToml(toml)).gpt]).toEqual([['gpt-b', 'gpt-b']]);
   });
 
+  test('[[model-overrides]] merge onto the built-in GPT routes by routing ID', () => {
+    const toml =
+      '[[model-overrides]]\nrouting-id = "gpt-b"\nupstream-model = "gpt-c(high)"\n' +
+      '[[model-overrides]]\nrouting-id = "gpt-a"\ndisplay-name = "A"\n' +
+      '[[model-overrides]]\nrouting-id = "mine"\nupstream-model = "x"\ndisplay-name = "M"\n';
+    expect([...configuredRoutes(cat, parseMiniToml(toml)).gpt]).toEqual([['gpt-a', 'gpt-a'], ['gpt-b', 'gpt-c']]);
+  });
+
+  test('an override moving a built-in route off GPT drops it from the GPT probes', () => {
+    const toml = '[[model-overrides]]\nrouting-id = "gpt-a"\nfamily = "grok"\n';
+    expect([...configuredRoutes(cat, parseMiniToml(toml)).gpt]).toEqual([['gpt-b', 'gpt-b']]);
+  });
+
+  test('[[model-overrides]] merge onto a [[models]] block', () => {
+    const toml =
+      '[[models]]\nrouting-id = "gpt-b"\nupstream-model = "gpt-b"\ndisplay-name = "B"\n' +
+      '[[model-overrides]]\nrouting-id = "gpt-b"\nupstream-model = "gpt-z"\n' +
+      '[[model-overrides]]\nrouting-id = "gpt-a"\nupstream-model = "gpt-a"\ndisplay-name = "A"\n';
+    expect([...configuredRoutes(cat, parseMiniToml(toml)).gpt]).toEqual([['gpt-b', 'gpt-z'], ['gpt-a', 'gpt-a']]);
+  });
+
   test('mini TOML scalars and sections', () => {
     const t = parseMiniToml('port = 8787\ningress-token = "abc#def"\n[upstreams.cliproxy]\nport = 8317\nmode = "managed"\n');
     expect(t.top).toEqual({ port: 8787, 'ingress-token': 'abc#def' });

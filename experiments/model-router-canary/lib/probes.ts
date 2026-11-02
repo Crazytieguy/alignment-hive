@@ -116,11 +116,19 @@ async function probeFastTiers(t: RouterTarget, fast: Array<string>): Promise<Res
 }
 
 type TomlValue = string | number | boolean;
-export type MiniToml = { top: Record<string, TomlValue>; sections: Record<string, Record<string, TomlValue>>; models: Array<Record<string, TomlValue>> };
+export type MiniToml = {
+  top: Record<string, TomlValue>;
+  sections: Record<string, Record<string, TomlValue>>;
+  models: Array<Record<string, TomlValue>>;
+  overrides: Array<Record<string, TomlValue>>;
+};
 
-/** Just enough TOML for the router config keys the probes read: scalars, `[section]` and `[[models]]`. */
+/**
+ * Just enough TOML for the router config keys the probes read: scalars, `[section]`, `[[model-overrides]]` and the
+ * deprecated `[[models]]`.
+ */
 export function parseMiniToml(src: string): MiniToml {
-  const out: MiniToml = { top: {}, sections: {}, models: [] };
+  const out: MiniToml = { top: {}, sections: {}, models: [], overrides: [] };
   let cur = out.top;
   for (const raw of src.split('\n')) {
     const line = raw.trim();
@@ -129,6 +137,7 @@ export function parseMiniToml(src: string): MiniToml {
     if (arr) {
       cur = {};
       if (arr[1] === 'models') out.models.push(cur);
+      else if (arr[1] === 'model-overrides') out.overrides.push(cur);
       continue;
     }
     const sec = line.match(/^\[\s*([^\]]+?)\s*\]/);
@@ -160,19 +169,29 @@ export function configFileFor(t: RouterTarget): string {
 
 /**
  * Routing ID -> upstream ID for every route the target's config enables, the way config.rs builds them: the
- * Codex-native list unless a `[[models]]` block replaces it, Grok and Muse only when enabled, and Muse Contributor
- * mode mapping the same routing IDs to `-contributor` upstream IDs.
+ * Codex-native list (or the deprecated `[[models]]` block in its place) with `[[model-overrides]]` merged on by
+ * routing ID, Grok and Muse only when enabled, and Muse Contributor mode mapping the same routing IDs to
+ * `-contributor` upstream IDs.
  */
 export function configuredRoutes(cat: Catalog, cfg: MiniToml): { gpt: Map<string, string>; grok: Map<string, string>; muse: Map<string, string> } {
-  const gpt = new Map<string, string>();
+  const base = new Map<string, { up: string; family: TomlValue }>();
   if (cfg.models.length) {
-    // Hand-written routes: keep only the built-in GPT IDs, so the probe set stays the catalog's.
     for (const m of cfg.models) {
       const id = m['routing-id'];
       const up = m['upstream-model'];
-      if (typeof id === 'string' && typeof up === 'string' && cat.gpt.includes(id)) gpt.set(id, up.replace(/\(.*\)$/, ''));
+      if (typeof id === 'string' && typeof up === 'string') base.set(id, { up, family: m.family ?? 'gpt' });
     }
-  } else for (const id of cat.gpt) gpt.set(id, id);
+  } else for (const id of cat.gpt) base.set(id, { up: id, family: 'gpt' });
+  for (const o of cfg.overrides) {
+    const id = o['routing-id'];
+    if (typeof id !== 'string') continue;
+    const prev = base.get(id);
+    const up = o['upstream-model'] ?? prev?.up;
+    if (typeof up === 'string') base.set(id, { up, family: o.family ?? prev?.family ?? 'gpt' });
+  }
+  // Keep only the built-in GPT IDs still on GPT, so the probe set stays the catalog's.
+  const gpt = new Map<string, string>();
+  for (const [id, { up, family }] of base) if (family === 'gpt' && cat.gpt.includes(id)) gpt.set(id, up.replace(/\(.*\)$/, ''));
   const grok = new Map<string, string>();
   if (cfg.sections.grok?.enabled === true) for (const id of cat.grok) grok.set(id, id);
   const muse = new Map<string, string>();

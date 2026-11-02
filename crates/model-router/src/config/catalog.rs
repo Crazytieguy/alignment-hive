@@ -193,8 +193,8 @@ pub(crate) fn fast_twin_id(routing_id: &str) -> String {
 }
 
 /// Whether `upstream_model` is served by the Codex backend. Derived aliases
-/// (`openai-compat--*`) and hand-written `[[models]]` entries pointing at
-/// other backends do not qualify.
+/// (`openai-compat--*`) and hand-written routes pointing at other backends do
+/// not qualify.
 #[must_use]
 pub(crate) fn is_codex_native_model(upstream_model: &str) -> bool {
     is_built_in(&CODEX_NATIVE_MODELS, upstream_model)
@@ -207,8 +207,8 @@ fn is_built_in(table: &[(&str, &str)], upstream_model: &str) -> bool {
 
 /// Which backend context-overflow dialect this route speaks, if the router
 /// has verified one (see [`crate::overflow`]). Checked against the built-in
-/// model lists rather than the family alone: a hand-written `[[models]]`
-/// entry inherits `family = "gpt"` by default but may point anywhere.
+/// model lists rather than the family alone: a hand-written route inherits
+/// `family = "gpt"` by default but may point anywhere.
 #[must_use]
 pub(crate) fn overflow_dialect(route: &ModelRoute) -> Option<crate::overflow::OverflowDialect> {
     use crate::overflow::OverflowDialect;

@@ -237,7 +237,8 @@ gateway doesn't serve: compare the rows with doctor's `routed-models`. A
 `fallback-model` failure means a Claude Code `fallbackModel` setting is in
 effect, which silently re-runs a failed routed subagent on a Claude model;
 the fix is removing that setting (then restarting Claude Code), and it is
-the user's call.
+the user's call. For a `models-block` warning, offer to make the rename it
+describes.
 
 ## Disable / uninstall
 

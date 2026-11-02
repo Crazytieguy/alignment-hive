@@ -9,7 +9,7 @@ CLIProxyAPI child.
    prompts away from the model vendor.
 2. Append a provider block to `~/.config/model-router/config.toml`. Each
    `[[openai-providers.models]]` block automatically becomes a routed model —
-   never write `[[models]]` entries for these. Example (`$ROUTER
+   never write `[[model-overrides]]` entries for these. Example (`$ROUTER
    config-template` shows the commented reference):
    ```toml
    [[openai-providers]]

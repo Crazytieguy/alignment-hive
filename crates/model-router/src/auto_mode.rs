@@ -87,8 +87,8 @@ struct Stage {
 /// The route a stage's `model` names, or a GPT route to the model of that
 /// ID on the `cliproxy` upstream (validation keeps every other family's
 /// models behind their own routes). A built-in model's twin ID with no route
-/// behind it, as when `[[models]]` leaves its base out, still asks for the
-/// base model at the twin's tier.
+/// behind it, as when a deprecated `[[models]]` block leaves its base out,
+/// still asks for the base model at the twin's tier.
 pub(crate) fn stage_route(config: &Config, model: &str) -> ModelRoute {
     config.route(model).cloned().unwrap_or_else(|| {
         let twin = crate::config::twin_of(model);

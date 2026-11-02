@@ -254,6 +254,7 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         if let Some(home) = home.as_deref() {
             checks.push(wiring_check(dirs, &config, home, &project));
         }
+        checks.extend(legacy_models_block_check(&config));
         checks.push(shipped_agent_routes_check(&config));
         checks.extend(ultrafast_check(&config, dirs));
         checks.extend(context_window_checks(
@@ -816,11 +817,13 @@ fn ultrafast_check(config: &Config, dirs: &Dirs) -> Option<Check> {
     })
 }
 
-/// A hand-written `[[models]]` block replaces the built-in routes wholesale,
-/// so a list written before a route existed keeps the shipped agents that
-/// name it from routing at all — they fail on their first turn with
-/// model-not-found. Config-only: no network needed, and doctor is what the
-/// setup skill and the session-start nudge send the user to.
+/// The deprecated `[[models]]` block replaces the built-in routes
+/// wholesale, so a list written before a route existed keeps the shipped
+/// agents that name it from routing at all — they fail on their first turn
+/// with model-not-found. `[[model-overrides]]` cannot drop a route, but can
+/// point one at a model without a fast tier, which costs it its twin.
+/// Config-only: no network needed, and doctor is what the setup skill and
+/// the session-start nudge send the user to.
 fn shipped_agent_routes_check(config: &Config) -> Check {
     let served: BTreeSet<&str> = config
         .effective_models()
@@ -845,9 +848,9 @@ fn shipped_agent_routes_check(config: &Config) -> Check {
     let mut problems = Vec::new();
     if !missing.is_empty() {
         problems.push(format!(
-            "the [[models]] list in the config lacks {}, which the shipped agents need — add \
-             a [[models]] entry per missing route (`model-router config-template` shows the \
-             built-in ones) or delete the whole block to get the built-in routes back",
+            "the config's [[models]] block replaces the built-in routes and lacks {}, which \
+             the shipped agents need — rename it to [[model-overrides]], which keeps the \
+             built-in routes",
             missing.join(", ")
         ));
     }
@@ -855,7 +858,7 @@ fn shipped_agent_routes_check(config: &Config) -> Check {
         let twins: Vec<String> = twinless.iter().map(|route| fast_twin_id(route)).collect();
         problems.push(format!(
             "no -fast twin for {}, which the shipped -fast agents need ({}): only a gpt route \
-             to a shipped GPT model gets one, so point each such [[models]] entry at one",
+             to a shipped GPT model gets one, so point each such route's upstream-model at one",
             twinless.join(", "),
             twins.join(", ")
         ));
@@ -869,6 +872,23 @@ fn shipped_agent_routes_check(config: &Config) -> Check {
             problems.join("; ")
         ),
     }
+}
+
+/// A warning while the config still has the deprecated `[[models]]` block,
+/// which is honoured for now but replaces the built-in routes wholesale.
+fn legacy_models_block_check(config: &Config) -> Option<Check> {
+    config.legacy_models_block.then(|| Check {
+        name: "models-block",
+        ok: true,
+        warn: true,
+        detail: "[[models]] is deprecated and will stop being read: it replaces the built-in \
+                 routes wholesale, so routes added in later releases never reach this install. \
+                 Rename it to [[model-overrides]], which keeps the built-in routes and merges \
+                 each entry onto the one with its routing-id (entries identical to a built-in \
+                 route can go; `model-router config-template` lists them), then \
+                 `model-router service restart`"
+            .to_string(),
+    })
 }
 
 fn routed_models_check(config: &Config, body: Result<&[u8], String>, log: &str) -> Check {
@@ -1457,7 +1477,11 @@ mod tests {
             check.detail
         );
         assert!(!check.detail.contains("gpt-5.6-terra"), "{}", check.detail);
-        assert!(check.detail.contains("config-template"), "{}", check.detail);
+        assert!(
+            check.detail.contains("rename it to [[model-overrides]]"),
+            "{}",
+            check.detail
+        );
     }
 
     #[test]
@@ -1568,6 +1592,51 @@ mod tests {
         assert_eq!(
             ultrafast_check(&subscription, &dirs).unwrap().detail,
             "gpt-6.1-sol-ultrafast, gpt-6-astra-ultrafast (the Codex plan lists the tier)"
+        );
+    }
+
+    #[test]
+    fn a_model_override_pointing_a_shipped_route_at_a_model_without_a_fast_tier_names_its_twin() {
+        let source = "[[model-overrides]]\nrouting-id = \"gpt-6.1-sol\"\n\
+                      upstream-model = \"gpt-6-sol\"\n";
+        let check = shipped_agent_routes_check(&config(source));
+        assert!(!check.ok);
+        assert!(
+            check.detail.starts_with(
+                "no -fast twin for gpt-6.1-sol, which the shipped -fast agents need \
+                 (gpt-6.1-sol-fast)"
+            ),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn model_overrides_keep_the_shipped_routes() {
+        let source = "[[model-overrides]]\nrouting-id = \"mine\"\nupstream-model = \"m\"\n\
+                      display-name = \"Mine\"\n\n\
+                      [[model-overrides]]\nrouting-id = \"gpt-6-luna\"\ndisplay-name = \"Luna\"\n";
+        let overridden = config(source);
+        let check = shipped_agent_routes_check(&overridden);
+        assert!(check.ok, "{}", check.detail);
+        assert!(legacy_models_block_check(&overridden).is_none());
+        assert!(legacy_models_block_check(&config("")).is_none());
+    }
+
+    #[test]
+    fn a_legacy_models_block_gets_a_deprecation_warning() {
+        // Even one that keeps every shipped route: it still drops future ones.
+        let source = models_toml(&["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"]);
+        let config = config(&source);
+        assert!(shipped_agent_routes_check(&config).ok);
+        let check = legacy_models_block_check(&config).unwrap();
+        assert!(check.ok && check.warn);
+        assert_eq!(check.name, "models-block");
+        assert!(
+            check.detail.starts_with("[[models]] is deprecated")
+                && check.detail.contains("Rename it to [[model-overrides]]"),
+            "{}",
+            check.detail
         );
     }
 

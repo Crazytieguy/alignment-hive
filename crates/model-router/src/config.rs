@@ -233,9 +233,31 @@ pub struct Config {
     /// from the state dir.
     pub ingress_token: Option<String>,
 
-    /// Exact model routing allowlist.
-    #[serde_inline_default(default_models())]
+    /// Exact model routing allowlist: the built-in GPT routes with
+    /// `[[model-overrides]]` merged on. Resolved by [`Config::prepare`] (from
+    /// the deprecated `[[models]]` block instead of the built-ins when the
+    /// config has one); never read from TOML under this name.
+    #[serde(skip, default = "default_models")]
     pub models: Vec<ModelRoute>,
+
+    /// Deprecated `[[models]]`: a full route list that replaces the built-in
+    /// routes wholesale, so a list written before a route existed silently
+    /// drops it. Still honoured, with a doctor warning; [`Config::prepare`]
+    /// moves it into [`Self::models`].
+    #[serde(default, rename = "models")]
+    pub legacy_models: Option<Vec<ModelRoute>>,
+
+    /// Set by [`Config::prepare`] when the routes came from a deprecated
+    /// `[[models]]` block rather than the built-ins.
+    #[serde(skip)]
+    pub legacy_models_block: bool,
+
+    /// `[[model-overrides]]`: merged onto the built-in routes by routing-id.
+    /// An entry naming a built-in route changes only the fields it sets; one
+    /// with a new routing-id adds a route. [`Config::prepare`] folds them
+    /// into [`Self::models`].
+    #[serde(default)]
+    pub model_overrides: Vec<ModelOverride>,
 
     /// OpenAI-compatible providers exposed through the managed `CLIProxyAPI`
     /// child (Fireworks, Together, ...). Empty by default.
@@ -292,9 +314,8 @@ pub struct Config {
     /// entry, and the `-fast` twins of `models`. Rebuilt by
     /// [`Config::prepare`], never read from TOML.
     ///
-    /// Deliberately not merged into `models`: that field carries a serde
-    /// default, which a single user-written `[[models]]` block replaces
-    /// wholesale — taking every generated route with it.
+    /// Kept apart from `models` so a deprecated `[[models]]` block, which
+    /// replaces that list wholesale, cannot take a generated route with it.
     #[serde(skip)]
     pub generated_models: Vec<ModelRoute>,
 
@@ -722,6 +743,70 @@ impl ModelRoute {
     }
 }
 
+/// One `[[model-overrides]]` entry: the [`ModelRoute`] fields it sets, the
+/// rest left as the route it overrides has them.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ModelOverride {
+    routing_id: String,
+    upstream: Option<String>,
+    upstream_model: Option<String>,
+    display_name: Option<String>,
+    family: Option<ModelFamily>,
+    context_window: Option<u64>,
+    context_window_scaling: Option<bool>,
+}
+
+impl ModelOverride {
+    /// Sets the fields this entry names on `route`.
+    fn apply(self, route: &mut ModelRoute) {
+        let Self {
+            routing_id: _,
+            upstream,
+            upstream_model,
+            display_name,
+            family,
+            context_window,
+            context_window_scaling,
+        } = self;
+        if let Some(upstream) = upstream {
+            route.upstream = upstream;
+        }
+        if let Some(upstream_model) = upstream_model {
+            route.upstream_model = upstream_model;
+        }
+        if let Some(display_name) = display_name {
+            route.display_name = display_name;
+        }
+        if let Some(family) = family {
+            route.family = family;
+        }
+        if context_window.is_some() {
+            route.context_window = context_window;
+        }
+        if let Some(scaling) = context_window_scaling {
+            route.context_window_scaling = scaling;
+        }
+    }
+
+    /// A route of its own, for an entry naming no existing route.
+    fn into_route(self) -> anyhow::Result<ModelRoute> {
+        ensure!(
+            self.upstream_model.is_some() && self.display_name.is_some(),
+            "[[model-overrides]] entry {:?} names no built-in route, so it adds one and needs \
+             upstream-model and display-name",
+            self.routing_id
+        );
+        let mut route = ModelRoute {
+            routing_id: self.routing_id.clone(),
+            upstream: CLIPROXY_UPSTREAM.to_string(),
+            ..ModelRoute::default()
+        };
+        self.apply(&mut route);
+        Ok(route)
+    }
+}
+
 // No `Debug` outside tests: `api_key` must not reach a log through `{:?}`.
 #[serde_inline_default]
 #[derive(Clone, Deserialize, PartialEq, Eq)]
@@ -799,24 +884,37 @@ fn default_upstreams() -> BTreeMap<String, UpstreamConfig> {
     BTreeMap::from([(CLIPROXY_UPSTREAM.to_string(), UpstreamConfig::default())])
 }
 
-/// Renders the commented `[[models]]` template section from the actual
-/// defaults, so the shipped template can never drift from `default_models()`.
+/// Renders the commented `[[model-overrides]]` template section, with the
+/// built-in route list generated from the actual defaults so the template can
+/// never drift from `default_models()`.
 fn template_models_section(models: &[ModelRoute]) -> String {
-    models
+    let routes = models
         .iter()
         .map(|route| {
-            let context_window = route
+            let window = route
                 .context_window
-                .map(|window| format!("#context-window = {window}\n"))
+                .map(|window| format!(", {window} tokens"))
                 .unwrap_or_default();
-            format!(
-                "#[[models]]\n#routing-id = \"{}\"\n#upstream = \"{}\"\n#upstream-model = \
-                 \"{}\"\n#display-name = \"{}\"\n{context_window}",
-                route.routing_id, route.upstream, route.upstream_model, route.display_name
-            )
+            format!("#   {} ({}{window})", route.routing_id, route.display_name)
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    let (example, example_name) = models
+        .first()
+        .map_or(("gpt-6.1-sol", "GPT-6.1 Sol"), |route| {
+            (route.routing_id.as_str(), route.display_name.as_str())
+        });
+    format!(
+        "# Built-in GPT routes, always served:\n{routes}\n# Each GPT route with a priority tier \
+         also gets a <routing-id>-fast twin.\n# [[model-overrides]] entries merge onto the \
+         built-in routes by routing-id:\n# one naming a built-in route changes only the fields \
+         it sets, and one with a\n# new routing-id adds a route (upstream-model and \
+         display-name required).\n# Fields: upstream-model, display-name, family (\"gpt\", \
+         \"grok\", \"muse\"),\n# context-window.\n#[[model-overrides]]\n#routing-id = \
+         \"{example}\"\n#display-name = \"{example_name} (custom)\"\n#\n#[[model-overrides]]\n\
+         #routing-id = \"my-route\"\n#upstream-model = \"some-model\"\n#display-name = \"My \
+         Route\"\n"
+    )
 }
 
 /// Renders the commented `[grok]` template section, with the built-in route
@@ -860,7 +958,8 @@ fn template_muse_section() -> String {
 /// template. Kept out of the interpolated body so `template` stays readable.
 const TEMPLATE_PROVIDERS_SECTION: &str = r#"# OpenAI-compatible providers (managed mode only): the managed CLIProxyAPI
 # child gains these as `openai-compatibility` upstreams, and each model entry
-# below becomes a routed model automatically — no [[models]] entry needed.
+# below becomes a routed model automatically — no [[model-overrides]] entry
+# needed.
 # `name` is the provider's exact model ID; `routing-id` is what Claude Code
 # requests. API keys do NOT go in this file: put them in secrets.toml next
 # to it (chmod 600), keyed by provider name:
@@ -944,6 +1043,7 @@ impl Config {
     /// # Errors
     /// Returns an error when any safety or consistency invariant is violated.
     pub fn prepare(&mut self) -> anyhow::Result<()> {
+        self.resolve_models()?;
         self.normalize_legacy_upstream_name()?;
         self.rebuild_generated_models();
         self.validate()?;
@@ -1049,7 +1149,7 @@ impl Config {
             .expect("prepared config always contains the cliproxy upstream")
     }
 
-    /// Every route the router serves: configured `[[models]]` plus the
+    /// Every route the router serves: [`Self::models`] plus the
     /// generated ones (built-in Grok and Muse, `[[openai-providers]]`, the
     /// `-fast` twins).
     pub fn effective_models(&self) -> impl Iterator<Item = &ModelRoute> {
@@ -1062,6 +1162,39 @@ impl Config {
         self.effective_models()
             .chain(&self.opt_in_models)
             .find(|route| route.routing_id == routing_id)
+    }
+
+    /// Builds [`Self::models`]: the deprecated `[[models]]` block in place
+    /// of the built-in routes when there is one, then `[[model-overrides]]`
+    /// merged on by routing-id. Consumes both inputs, so a second
+    /// [`Self::prepare`] leaves the result (and any route added since) as is.
+    fn resolve_models(&mut self) -> anyhow::Result<()> {
+        if let Some(legacy) = self.legacy_models.take() {
+            tracing::warn!(
+                "[[models]] is deprecated: it replaces the built-in routes wholesale, so routes \
+                 added in later releases are missing; rename it to [[model-overrides]], which \
+                 keeps the built-in routes and merges entries onto them by routing-id"
+            );
+            self.models = legacy;
+            self.legacy_models_block = true;
+        }
+        let mut seen = HashSet::new();
+        for entry in std::mem::take(&mut self.model_overrides) {
+            ensure!(
+                seen.insert(entry.routing_id.clone()),
+                "duplicate [[model-overrides]] routing-id: {}",
+                entry.routing_id
+            );
+            match self
+                .models
+                .iter_mut()
+                .find(|route| route.routing_id == entry.routing_id)
+            {
+                Some(route) => entry.apply(route),
+                None => self.models.push(entry.into_route()?),
+            }
+        }
+        Ok(())
     }
 
     fn normalize_legacy_upstream_name(&mut self) -> anyhow::Result<()> {
@@ -1543,9 +1676,7 @@ impl Config {
 # ingress-token = "replace-with-a-random-token"
 
 # GPT routing is exact-match only. Requests for every other model go to
-# Anthropic. By default the built-in GPT routes below are enabled; writing
-# any [[models]] entry replaces the whole default list.
-# Each GPT route with a priority tier also gets a <routing-id>-fast twin.
+# Anthropic.
 {models}
 # Claude Code implements its WebSearch tool as a side call that runs the
 # server-side web_search tool on the session model. The router matches the
@@ -1871,22 +2002,25 @@ mod tests {
 
     #[test]
     fn route_referencing_unsupported_upstream_is_rejected() {
-        let config: Config = toml::from_str(
-            r#"
-                [upstreams.cliproxy]
-                mode = "stub"
+        for table in ["models", "model-overrides"] {
+            let error = prepare_error(&format!(
+                r#"
+                    [upstreams.cliproxy]
+                    mode = "stub"
 
-                [[models]]
-                routing-id = "claude-gpt-test"
-                upstream = "other"
-                upstream-model = "gpt-test"
-                display-name = "GPT Test"
-            "#,
-        )
-        .unwrap();
-        let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("only `cliproxy` is supported today"));
-        assert!(error.contains("other"));
+                    [[{table}]]
+                    routing-id = "claude-gpt-test"
+                    upstream = "other"
+                    upstream-model = "gpt-test"
+                    display-name = "GPT Test"
+                "#
+            ));
+            assert!(
+                error.contains("only `cliproxy` is supported today"),
+                "{error}"
+            );
+            assert!(error.contains("other"), "{error}");
+        }
     }
 
     #[test]
@@ -3264,5 +3398,182 @@ mod tests {
             assert_eq!(ULTRAFAST.base(id), None, "{id}");
         }
         assert!(is_retired_gpt_route("gpt-6-sol-ultrafast"));
+    }
+
+    /// The routing IDs a prepared config serves, in order.
+    fn route_ids(config: &Config) -> Vec<&str> {
+        config
+            .effective_models()
+            .map(|route| route.routing_id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn model_overrides_change_only_the_fields_they_set() {
+        let defaults = parse_and_prepare("");
+        let config = parse_and_prepare(
+            "[[model-overrides]]\nrouting-id = \"gpt-6.1-sol\"\ndisplay-name = \"Sol\"\n",
+        );
+        assert!(!config.legacy_models_block);
+        assert_eq!(route_ids(&config), route_ids(&defaults));
+        assert_eq!(
+            route(&config, "gpt-6.1-sol"),
+            &ModelRoute {
+                display_name: "Sol".to_string(),
+                ..route(&defaults, "gpt-6.1-sol").clone()
+            }
+        );
+        // The -fast twin is built from the overridden route.
+        assert_eq!(route(&config, "gpt-6.1-sol-fast").display_name, "Sol");
+        for id in route_ids(&defaults)
+            .into_iter()
+            .filter(|id| !id.starts_with("gpt-6.1-sol"))
+        {
+            assert_eq!(route(&config, id), route(&defaults, id), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_model_override_can_repoint_a_built_in_route() {
+        let config = parse_and_prepare(
+            "[[model-overrides]]\nrouting-id = \"gpt-6.1-sol\"\nupstream-model = \"gpt-6-luna\"\n\
+             context-window = 123456\n",
+        );
+        let sol = route(&config, "gpt-6.1-sol");
+        assert_eq!(sol.upstream_model, "gpt-6-luna");
+        assert_eq!(sol.context_window, Some(123_456));
+        assert_eq!(sol.display_name, "GPT-6.1 Sol");
+        assert_eq!(
+            route(&config, "gpt-6.1-sol-fast").upstream_model,
+            "gpt-6-luna"
+        );
+    }
+
+    #[test]
+    fn a_model_override_with_a_new_routing_id_adds_a_route() {
+        let defaults = parse_and_prepare("");
+        let config = parse_and_prepare(
+            "[[model-overrides]]\nrouting-id = \"mine\"\nupstream-model = \"m\"\n\
+             display-name = \"Mine\"\nfamily = \"grok\"\n",
+        );
+        for id in route_ids(&defaults) {
+            assert_eq!(route(&config, id), route(&defaults, id), "{id}");
+        }
+        assert_eq!(
+            route(&config, "mine"),
+            &ModelRoute {
+                routing_id: "mine".to_string(),
+                upstream: CLIPROXY_UPSTREAM.to_string(),
+                upstream_model: "m".to_string(),
+                display_name: "Mine".to_string(),
+                family: ModelFamily::Grok,
+                ..ModelRoute::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_model_override_needs_a_model_and_a_name() {
+        for source in [
+            "routing-id = \"mine\"\ndisplay-name = \"Mine\"",
+            "routing-id = \"mine\"\nupstream-model = \"m\"",
+        ] {
+            let error = prepare_error(&format!("[[model-overrides]]\n{source}\n"));
+            assert!(
+                error.contains("\"mine\" names no built-in route")
+                    && error.contains("needs upstream-model and display-name"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_model_overrides_are_rejected() {
+        let error = prepare_error(
+            "[[model-overrides]]\nrouting-id = \"gpt-6-luna\"\ndisplay-name = \"A\"\n\n\
+             [[model-overrides]]\nrouting-id = \"gpt-6-luna\"\ndisplay-name = \"B\"\n",
+        );
+        assert!(
+            error.contains("duplicate [[model-overrides]] routing-id: gpt-6-luna"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn model_overrides_reject_unknown_fields() {
+        let error = toml::from_str::<Config>(
+            "[[model-overrides]]\nrouting-id = \"gpt-6-luna\"\nfast-tier = true\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown field `fast-tier`"), "{error}");
+    }
+
+    #[test]
+    fn a_legacy_models_block_still_replaces_the_built_in_routes() {
+        let config = parse_and_prepare(
+            "[[models]]\nrouting-id = \"gpt-6-luna\"\nupstream-model = \"gpt-6-luna\"\n\
+             display-name = \"Luna\"\n",
+        );
+        assert!(config.legacy_models_block);
+        assert_eq!(route_ids(&config), ["gpt-6-luna", "gpt-6-luna-fast"]);
+        assert!(!parse_and_prepare("").legacy_models_block);
+    }
+
+    #[test]
+    fn model_overrides_merge_onto_a_legacy_models_block() {
+        let config = parse_and_prepare(
+            "[[models]]\nrouting-id = \"gpt-6-luna\"\nupstream-model = \"gpt-6-luna\"\n\
+             display-name = \"Luna\"\n\n\
+             [[model-overrides]]\nrouting-id = \"gpt-6-luna\"\ndisplay-name = \"L\"\n\n\
+             [[model-overrides]]\nrouting-id = \"mine\"\nupstream-model = \"m\"\n\
+             display-name = \"Mine\"\n",
+        );
+        assert!(config.legacy_models_block);
+        assert_eq!(
+            route_ids(&config),
+            ["gpt-6-luna", "mine", "gpt-6-luna-fast"]
+        );
+        assert_eq!(route(&config, "gpt-6-luna").display_name, "L");
+    }
+
+    #[test]
+    fn prepare_is_idempotent_across_model_overrides() {
+        let mut config: Config = toml::from_str(
+            "[[models]]\nrouting-id = \"gpt-6-luna\"\nupstream-model = \"gpt-6-luna\"\n\
+             display-name = \"Luna\"\n\n\
+             [[model-overrides]]\nrouting-id = \"mine\"\nupstream-model = \"m\"\n\
+             display-name = \"Mine\"\n",
+        )
+        .unwrap();
+        config.prepare().unwrap();
+        let first = route_ids(&config).join(",");
+        config.prepare().unwrap();
+        assert_eq!(route_ids(&config).join(","), first);
+        assert!(config.legacy_models_block);
+    }
+
+    #[test]
+    fn the_template_documents_model_overrides_only() {
+        let template = Config::template();
+        assert!(!template.contains("[[models]]"), "{template}");
+        // The two commented examples, uncommented, parse: one override and
+        // one added route.
+        let start = template.find("#[[model-overrides]]").unwrap();
+        let end = start + template[start..].find("\n\n").unwrap();
+        let example: String = template[start..end]
+            .lines()
+            .map(|line| line.strip_prefix('#').unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let config = parse_and_prepare(&example);
+        let defaults = parse_and_prepare("");
+        assert_eq!(config.models.len(), defaults.models.len() + 1, "{example}");
+        for route in &defaults.models {
+            assert!(
+                template.contains(&format!("#   {} ({}", route.routing_id, route.display_name)),
+                "{template}"
+            );
+        }
     }
 }

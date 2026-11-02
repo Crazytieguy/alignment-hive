@@ -28,9 +28,10 @@ Complete the task you are given.
   `minimal` through `max`, with `high` as Muse Code's default and advice to
   use the lowest level that gives acceptable results; how much each level
   changes the output is not something this plugin has calibrated.
-- The `model:` value must be a routing ID the router serves (`[[models]]`
-  entry or `[[openai-providers.models]]` routing-id); anything else falls
-  through to Anthropic and fails with model-not-found.
+- The `model:` value must be a routing ID the router serves (a built-in
+  route, a `[[model-overrides]]` entry or an `[[openai-providers.models]]`
+  routing-id); anything else falls through to Anthropic and fails with
+  model-not-found.
 
 New agents load at session start — the user must restart sessions to see
 them.
