@@ -1,12 +1,13 @@
 /**
  * What the review page treats as a secret: the repository's gitleaks rules (the upload
- * sanitizer's list), minus its fuzzy ones, plus the shapes gitleaks has no rule for.
+ * sanitizer's list), minus its fuzzy ones, plus the shapes gitleaks has no rule for and
+ * the literal values of the credential env vars `hive` runs with (withEnvValues).
  * Evidence is redacted with these before it is hashed; authored text and the finished page
  * are checked with the same rules and refused.
  */
 import { createHash } from 'node:crypto';
 import { parse } from 'parse5';
-import { SECRET_NAME, SECRET_SHAPES, namedScan, secretSpans } from '../lib/sanitize';
+import { SECRET_NAME, SECRET_SHAPES, namedScan, secretSpans, withEnvValues } from '../lib/sanitize';
 import { SECRET_RULES } from '../lib/secret-rules';
 import type { ShapeId } from '../lib/sanitize';
 import type { SecretRule } from '../lib/secret-rules';
@@ -36,7 +37,7 @@ function scanText(text: string, replace: boolean): { text: string; found: Array<
   let from = 0;
   for (const uri of [...text.matchAll(DATA_URI), null]) {
     const to = uri ? uri.index : text.length;
-    for (const { ruleId, valueStart, valueEnd } of secretSpans(text.slice(from, to), RULES)) {
+    for (const { ruleId, valueStart, valueEnd } of secretSpans(text.slice(from, to), withEnvValues(RULES))) {
       const hit = { kind: kindOf(ruleId), start: from + valueStart, end: from + valueEnd, match: text.slice(from + valueStart, from + valueEnd) };
       if (!MARKER.test(hit.match)) found.push(hit);
     }

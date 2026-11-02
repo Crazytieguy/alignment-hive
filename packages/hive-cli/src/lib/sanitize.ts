@@ -1,6 +1,7 @@
 // Secret redaction. Uploads replace each span detectSecrets finds with `[REDACTED:<rule>]`: gitleaks'
-// rules (secret-rules.ts, generated), SECRET_SHAPES for secrets no rule names, and a high-entropy
-// safety net. The debrief page marks spans from a narrower list through secretSpans.
+// rules (secret-rules.ts, generated), SECRET_SHAPES for secrets no rule names, a high-entropy
+// safety net, and the literal values of this process's credential env vars (withEnvValues). The
+// debrief page marks spans from a narrower list through secretSpans.
 
 import { SECRET_RULES } from './secret-rules';
 import type { SecretRule } from './secret-rules';
@@ -17,6 +18,11 @@ const NAME = `(?:[A-Za-z0-9_-]*(?:${WORDS.join('|')})${SUFFIX}|authorization|coo
 /** A password's name: its value may be a plain word. */
 const PASS_NAME = `(?:[A-Za-z0-9_-]*passw(?:or)?d${SUFFIX})`;
 export const SECRET_NAME = new RegExp(`^${NAME}$`, 'i');
+/**
+ * An env var whose value is a credential: a secret word ends the name (`OPENAI_API_KEY`, `GITHUB_TOKEN`, `DB_PASSWORD`),
+ * so metadata about a secret (`TOKEN_FILE`, `SECRET_PATH`, `TOKEN_URL`) and words like `MAX_TOKENS` are not one.
+ */
+const ENV_SECRET_NAME = new RegExp(`^[A-Za-z0-9_-]*(?:${[...WORDS, 'passphrase', 'secrets'].join('|')})$`, 'i');
 const PASS_NAME_RE = new RegExp(`^${PASS_NAME}$`, 'i');
 const RANDOM = (chars: string) => `(?=${chars}*\\d)(?=${chars}*[A-Za-z])`;
 /** What a redaction left: the page's markers and the upload placeholders. */
@@ -124,6 +130,39 @@ const HIGH_ENTROPY_RULE: SecretRule = {
 
 const ALL_RULES: Array<SecretRule> = [...SECRET_SHAPES, ...SECRET_RULES, HIGH_ENTROPY_RULE];
 
+const ENV_VALUE_ID = 'env-value';
+/** Shorter values are too likely to be test stubs or ordinary words to redact everywhere they appear. */
+const MIN_ENV_SECRET_LENGTH = 16;
+/** The values of `env`'s credential vars, 16 characters or longer, longest first. */
+export function envSecretValues(env: Record<string, string | undefined>): Array<string> {
+  const values = new Set<string>();
+  for (const [name, value] of Object.entries(env)) {
+    if (value !== undefined && value.length >= MIN_ENV_SECRET_LENGTH && ENV_SECRET_NAME.test(name)) values.add(value);
+  }
+  return [...values].sort((a, b) => b.length - a.length);
+}
+/** Built on first use from process.env; null when no var qualifies. The values never leave the process and are never logged. */
+let envValueRule: SecretRule | null | undefined;
+function envRule(): SecretRule | null {
+  if (envValueRule === undefined) {
+    const values = envSecretValues(process.env);
+    envValueRule = values.length === 0 ? null : { id: ENV_VALUE_ID, regex: new RegExp(values.map((v) => v.replace(/[\\^$.*+?()[\]{}|/-]/g, '\\$&')).join('|'), 'g') };
+  }
+  return envValueRule;
+}
+/** For tests: the next scan reads process.env again. */
+export function resetEnvSecretValues(): void {
+  envValueRule = undefined;
+}
+/**
+ * `rules` plus an exact match for each credential env var's value, when there is one. Additive: the env at scan time
+ * may not be the one the session ran under, so the other rules still carry the load.
+ */
+export function withEnvValues(rules: Array<SecretRule>): Array<SecretRule> {
+  const rule = envRule();
+  return rule ? [...rules, rule] : rules;
+}
+
 export interface SecretMatch {
   ruleId: string;
   start: number;
@@ -199,9 +238,9 @@ function looksLikeNonSecret(s: string): boolean {
   return false;
 }
 
-/** Non-overlapping secret spans in content, earliest first; when rules overlap the earliest span wins. */
+/** Non-overlapping secret spans in content, earliest first; when rules overlap the earliest span wins, grown over any env value it overlaps. */
 export function detectSecrets(content: string): Array<SecretMatch> {
-  return secretSpans(content, ALL_RULES);
+  return secretSpans(content, withEnvValues(ALL_RULES));
 }
 
 /** `detectSecrets` over a chosen rule list; the review page drops the entropy net and the fuzzy gitleaks rule. */
@@ -241,6 +280,12 @@ export function secretSpans(content: string, rules: Array<SecretRule>): Array<Se
   for (const m of matches) {
     const last = deduped.at(-1);
     if (last === undefined || m.start >= last.end) deduped.push(m);
+    // An env value is known to be a secret whole: a span overlapping one grows to cover both, so neither leaves a tail.
+    else if ((m.ruleId === ENV_VALUE_ID || last.ruleId === ENV_VALUE_ID) && m.end > last.end) {
+      last.end = m.end;
+      last.valueStart = Math.min(last.valueStart, m.valueStart);
+      last.valueEnd = Math.max(last.valueEnd, m.valueEnd);
+    }
   }
   return deduped;
 }

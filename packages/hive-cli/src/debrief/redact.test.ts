@@ -4,6 +4,7 @@ import pageScript from '../../assets/review-page.js' with { type: 'text' };
 import diffCss from '../../assets/review-diff.css' with { type: 'text' };
 import pageCss from '../../assets/review-page.css' with { type: 'text' };
 import codeCss from '../../assets/review-code.css' with { type: 'text' };
+import { resetEnvSecretValues } from '../lib/sanitize';
 import { syntheticSecret } from './fixtures';
 import { SECRET_NAME, auditPage, findSecrets, findSecretsInValue, redactText, redactValue } from './redact';
 import type { SecretKind } from './redact';
@@ -136,4 +137,17 @@ test('a page with a large data URI is audited in linear time: the text around it
 
 test('the renderer\'s own scripts and styles carry nothing the audit would flag', () => {
   for (const asset of [diffScript, pageScript, diffCss, pageCss, codeCss]) expect(findSecrets(asset)).toEqual([]);
+});
+
+test("a credential env var's value is a key on the page: evidence redacted, authored text refused", () => {
+  const value = 'aaaabbbbccccddddeeee';
+  process.env.DEBRIEF_TEST_API_KEY = value;
+  resetEnvSecretValues();
+  try {
+    expect(redactText(`got ${value} back`).text).toBe('got [key] back');
+    expect(findSecrets(`<p>${value}</p>`).map((hit) => hit.kind)).toEqual(['key']);
+  } finally {
+    delete process.env.DEBRIEF_TEST_API_KEY;
+    resetEnvSecretValues();
+  }
 });

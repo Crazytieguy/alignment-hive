@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test';
-import { detectSecrets, sanitizeDeep, sanitizeRecord, sanitizeString } from '../lib/sanitize';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { detectSecrets, envSecretValues, resetEnvSecretValues, sanitizeDeep, sanitizeRecord, sanitizeString } from '../lib/sanitize';
 
 // High-entropy test tokens (repeated characters fail entropy checks); GitHub PATs are ghp_ + 36 alphanumerics.
 const TEST_GITHUB_TOKEN = 'ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs';
@@ -312,5 +312,58 @@ describe('high-entropy safety net', () => {
     for (const secret of ['wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'aB3cD4eF5/gH6iJ7kL8/mN9oP0qR1sT2uV3wX4y']) {
       expect(detectSecrets(secret).length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('credential env var values', () => {
+  // Low entropy and no digits, so only the env-value rule can catch them.
+  const KEY = 'aaaabbbbccccddddeeee';
+  const vars: Record<string, string> = {
+    FOO_API_KEY: KEY,
+    SHORT_TOKEN: 'ffffgggghhhh',
+    FOO_SETTING: 'iiiijjjjkkkkllllmmmm',
+    FOO_TOKEN_FILE: 'nnnnooooppppqqqqrrrr',
+  };
+  const withEnv = (extra: Record<string, string>) => {
+    Object.assign(process.env, extra);
+    resetEnvSecretValues();
+  };
+  afterEach(() => {
+    for (const name of [...Object.keys(vars), 'FOO_DB_PASSWORD']) delete process.env[name];
+    resetEnvSecretValues();
+  });
+
+  test("a credential var's value is redacted wherever it appears", () => {
+    withEnv(vars);
+    expect(sanitizeString(`using ${KEY} now`)).toBe('using [REDACTED:env-value] now');
+    expect(JSON.stringify(sanitizeDeep({ note: `x${KEY}y` }))).toBe('{"note":"x[REDACTED:env-value]y"}');
+  });
+
+  test('values under 16 characters and non-credential names are left alone', () => {
+    withEnv(vars);
+    for (const name of ['SHORT_TOKEN', 'FOO_SETTING', 'FOO_TOKEN_FILE']) {
+      const text = `value ${vars[name]} here`;
+      expect(sanitizeString(text)).toBe(text);
+    }
+    expect(envSecretValues(vars)).toEqual([KEY]);
+  });
+
+  test('picks names a secret word ends', () => {
+    const picked = (name: string) => envSecretValues({ [name]: KEY }).length === 1;
+    for (const name of ['OPENAI_API_KEY', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'DB_PASSWORD', 'client_secret', 'GPG_PASSPHRASE']) expect(picked(name)).toBe(true);
+    for (const name of ['PATH', 'TOKENIZERS_PARALLELISM', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'AWS_ACCESS_KEY_ID', 'GITHUB_TOKEN_PATH', 'STARSHIP_SESSION_KEY']) expect(picked(name)).toBe(false);
+  });
+
+  test('a span overlapping an env value grows to cover it, so no tail of the value survives', () => {
+    const password = 'zzzzyyyyxxxx:wwwwvvvv';
+    withEnv({ FOO_DB_PASSWORD: password });
+    const out = sanitizeString(`Q7mZp2Lk9Wv4Rt8Yn3Bs${password} end`);
+    expect(out).not.toContain('wwwwvvvv');
+    expect(out).toEndWith(' end');
+  });
+
+  test('without credential vars nothing changes', () => {
+    resetEnvSecretValues();
+    expect(sanitizeString(`using ${KEY} now`)).toBe(`using ${KEY} now`);
   });
 });
