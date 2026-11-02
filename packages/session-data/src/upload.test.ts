@@ -190,7 +190,8 @@ describe('sessionSummary', () => {
       ),
     );
     expect(sessionSummary(t)).toBe('the real prompt');
-    expect(sessionSummary(parseTranscript(J(user('x'.repeat(120)))))).toBe(`${'x'.repeat(97)}...`);
+    expect(sessionSummary(parseTranscript(J(user('x'.repeat(1000)))))).toBe('x'.repeat(1000));
+    expect(sessionSummary(parseTranscript(J(user('x'.repeat(1001)))))).toBe(`${'x'.repeat(997)}...`);
     expect(sessionSummary(parseTranscript(J({ type: 'system', subtype: 'x' })))).toBeUndefined();
   });
 

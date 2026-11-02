@@ -78,6 +78,8 @@ function ConsentPage() {
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Returning users stay on this page after saving, so they get a note until they change a choice.
+  const [saved, setSaved] = useState(false);
 
   // Track if user was returning at mount — used to suppress the wizard→preferences
   // flash for first-time users (whose mutation makes latestConsent non-null before navigate fires).
@@ -85,6 +87,9 @@ function ConsentPage() {
   const isReturning = latestConsent !== null && (wasReturning || !isSubmitting);
 
   const handleChoice = (question: ConsentQuestion, value: boolean) => {
+    // A choice changed mid-save wouldn't be in the save that then reports "saved".
+    if (isSubmitting) return;
+    setSaved(false);
     setChoices((prev) => {
       const next = { ...prev, [question]: value };
       // When re-enabling sharing, restore sub-preferences from latest consent
@@ -102,6 +107,7 @@ function ConsentPage() {
 
     setIsSubmitting(true);
     setSubmitError(null);
+    setSaved(false);
     try {
       if (choices.sessionSharing) {
         if (
@@ -141,6 +147,7 @@ function ConsentPage() {
       // First-time users go to install page; returning users stay on consent
       if (isReturning) {
         setIsSubmitting(false);
+        setSaved(true);
       } else {
         navigate({ to: "/install" });
       }
@@ -161,6 +168,7 @@ function ConsentPage() {
         onSubmit={() => handleSubmit()}
         isSubmitting={isSubmitting}
         submitError={submitError}
+        saved={saved}
         accessList={accessList}
         existingConsent={
           latestConsent

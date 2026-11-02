@@ -190,6 +190,8 @@ interface BlockRowProps {
 function BlockRow({ entry, isExpanded, onToggle, renderAgentLink }: BlockRowProps) {
   const summary = getBlockSummary(entry);
   const typeLabel = getTypeLabel(entry);
+  // The column fits most labels; a longer one ends in an ellipsis, with the tool's full name on hover.
+  const typeTitle = entry.kind === "tool" ? entry.tool : undefined;
   const typeColor = getTypeColor(entry);
   const agentId = entry.kind === "tool" ? entry.agentId : undefined;
 
@@ -206,7 +208,8 @@ function BlockRow({ entry, isExpanded, onToggle, renderAgentLink }: BlockRowProp
             {entry.n}
           </span>
           <span
-            className={`w-16 shrink-0 font-mono text-xs font-medium ${typeColor}`}
+            className={`w-28 shrink-0 truncate font-mono text-xs font-medium ${typeColor}`}
+            title={typeTitle}
           >
             {typeLabel}
           </span>
@@ -237,7 +240,8 @@ function BlockRow({ entry, isExpanded, onToggle, renderAgentLink }: BlockRowProp
           {entry.n}
         </span>
         <span
-          className={`w-16 shrink-0 font-mono text-xs font-medium ${typeColor}`}
+          className={`w-28 shrink-0 truncate font-mono text-xs font-medium ${typeColor}`}
+          title={typeTitle}
         >
           {typeLabel}
         </span>
@@ -311,7 +315,9 @@ function getTypeLabel(entry: Entry): string {
       WebFetch: "FETCH",
       TodoWrite: "TODO",
     };
-    return toolAbbrevs[entry.tool] ?? entry.tool.toUpperCase().slice(0, 6);
+    // An MCP tool (mcp__<server>__<tool>) goes by its own name; the server shows on hover.
+    const name = entry.tool.startsWith("mcp__") ? entry.tool.split("__").pop() || entry.tool : entry.tool;
+    return toolAbbrevs[entry.tool] ?? name.toUpperCase();
   }
   if (entry.kind === "user" && entry.isCompactSummary) return "SUMM";
   const typeAbbrevs: Record<string, string> = {

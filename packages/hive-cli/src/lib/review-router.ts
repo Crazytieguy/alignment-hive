@@ -134,7 +134,7 @@ export function createReviewRouter(stateDir: string, cwd: string) {
           status,
           partialUpload,
           statusLabel,
-          summary: summary.slice(0, 120),
+          summary,
         }));
         return { sessions, snoozeUntil: inputs.snoozeUntil, ...(consentError !== undefined && { consentError }) };
       }),

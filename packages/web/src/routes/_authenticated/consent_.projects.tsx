@@ -50,6 +50,9 @@ function ProjectsPage() {
     new Map(),
   );
   const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // Set by a successful save, cleared by the next toggle, so the note never outlives what it confirms.
+  const [saved, setSaved] = useState(false);
 
   const getEffectiveSharing = (key: string, serverSharing: boolean) =>
     pendingState.has(key) ? pendingState.get(key)! : serverSharing;
@@ -63,6 +66,9 @@ function ProjectsPage() {
     );
 
   const toggleProject = (key: string, currentServerState: boolean) => {
+    // A toggle changed mid-save wouldn't be in the save that then reports "saved".
+    if (isSaving) return;
+    setSaved(false);
     setPendingState((prev) => {
       const next = new Map(prev);
       const currentEffective = next.has(key) ? next.get(key)! : currentServerState;
@@ -78,6 +84,8 @@ function ProjectsPage() {
 
   const saveChanges = async () => {
     setIsSaving(true);
+    setSaveError(null);
+    setSaved(false);
     try {
       const changes: Array<{
         identifier:
@@ -108,6 +116,11 @@ function ProjectsPage() {
         await updateProjectSharing({ changes });
       }
       setPendingState(new Map());
+      setSaved(true);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error("Failed to save project sharing:", msg);
+      setSaveError(msg);
     } finally {
       setIsSaving(false);
     }
@@ -330,13 +343,22 @@ function ProjectsPage() {
               {hasChanges && (
                 <Button
                   variant="ghost"
-                  onClick={() => setPendingState(new Map())}
+                  onClick={() => {
+                    setPendingState(new Map());
+                    setSaveError(null);
+                  }}
                   disabled={isSaving}
                 >
                   Discard
                 </Button>
               )}
             </div>
+            {saveError && (
+              <p className="mt-2 text-sm text-destructive">{saveError}</p>
+            )}
+            <p role="status" className="mt-2 text-sm text-muted-foreground">
+              {saved && !saveError ? "Preferences saved" : ""}
+            </p>
           </>
         ) : (
           <p className="text-sm text-muted-foreground">

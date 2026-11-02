@@ -17,6 +17,8 @@ interface ConsentSummaryProps {
   onSubmit: () => void;
   isSubmitting: boolean;
   submitError: string | null;
+  /** The last submit succeeded and no choice has changed since. */
+  saved: boolean;
   accessList: Array<{ name: string | null; email: string }>;
   existingConsent: {
     sessionSharing: boolean;
@@ -32,6 +34,7 @@ export default function ConsentSummary({
   onSubmit,
   isSubmitting,
   submitError,
+  saved,
   accessList,
   existingConsent,
 }: ConsentSummaryProps) {
@@ -156,6 +159,9 @@ export default function ConsentSummary({
               {submitError}
             </p>
           )}
+          <p role="status" className="text-sm text-muted-foreground text-center">
+            {saved && !submitError ? "Preferences saved" : ""}
+          </p>
         </div>
 
         <p className="mt-10 text-sm text-muted-foreground">{policyFooter}</p>

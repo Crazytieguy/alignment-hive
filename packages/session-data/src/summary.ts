@@ -1,11 +1,13 @@
 import { isHumanMessage } from './noise';
 import type { Transcript } from './transcript';
 
-const MAX_SUMMARY = 100;
+// Displays truncate it themselves and show the whole line on hover; this only stops a pasted
+// single-line wall of text from becoming the summary.
+const MAX_SUMMARY = 1000;
 
 /**
  * A session's name in upload listings: its title, else the first line of its first human
- * message (for an agent, the message that started it), clipped to 100 characters.
+ * message (for an agent, the message that started it), clipped to 1000 characters.
  */
 export function sessionSummary(t: Transcript): string | undefined {
   if (t.title) return t.title;

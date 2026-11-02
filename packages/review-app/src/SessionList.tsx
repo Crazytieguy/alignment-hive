@@ -76,6 +76,7 @@ export function SessionList({ filter, onFilterChange, selected, onSelectedChange
   const excludableIds = new Set(filtered.filter(isExcludable).map((s) => s.sessionId));
   // Only rows still excludable in this view count, whatever the selection held before a refetch.
   const selectedIds = [...selected].filter((id) => excludableIds.has(id));
+  const allSelected = excludableIds.size > 0 && selectedIds.length === excludableIds.size;
 
   // Drop selections whose rows stopped being excludable (excluded, uploaded, or filtered away).
   useEffect(() => {
@@ -146,13 +147,13 @@ export function SessionList({ filter, onFilterChange, selected, onSelectedChange
         <Alert variant="warning">{hive.upload.snoozedUntil(new Date(snoozeUntil).toLocaleString())}</Alert>
       )}
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {FILTERS.map((f) => (
           <button
             key={f}
             onClick={() => onFilterChange(f)}
             aria-pressed={filter === f}
-            className={`rounded-md px-3 py-1 text-sm ${
+            className={`whitespace-nowrap rounded-md px-3 py-1 text-sm ${
               filter === f
                 ? "bg-primary text-primary-foreground"
                 : "bg-muted text-muted-foreground hover:bg-muted/80"
@@ -177,10 +178,10 @@ export function SessionList({ filter, onFilterChange, selected, onSelectedChange
           <Button
             size="sm"
             variant="outline"
-            onClick={() => onSelectedChange(excludableIds)}
+            onClick={() => onSelectedChange(allSelected ? new Set() : excludableIds)}
             disabled={excludableIds.size === 0}
           >
-            Select all excludable
+            {allSelected ? "Deselect all" : "Select all excludable"}
           </Button>
           <Button
             size="sm"
@@ -193,13 +194,14 @@ export function SessionList({ filter, onFilterChange, selected, onSelectedChange
         </div>
       </div>
 
-      <div className="rounded-lg border border-border bg-card">
+      {/* Below the table's minimum width it scrolls inside the card rather than widening the page. */}
+      <div className="overflow-x-auto rounded-lg border border-border bg-card">
         <table className="w-full">
           <thead>
             <tr className="border-b border-border text-left text-sm text-muted-foreground">
               <th className="w-10 px-4 py-3"></th>
               <th className="px-4 py-3 font-medium">Session</th>
-              <th className="px-4 py-3 font-medium">Last active</th>
+              <th className="whitespace-nowrap px-4 py-3 font-medium">Last active</th>
               <th className="px-4 py-3 font-medium">Status</th>
               <th className="px-4 py-3 font-medium">Summary</th>
               <th className="px-4 py-3 font-medium">Actions</th>
@@ -236,7 +238,8 @@ export function SessionList({ filter, onFilterChange, selected, onSelectedChange
                   <td className="px-4 py-3">
                     <StatusBadge {...session} />
                   </td>
-                  <td className="max-w-[300px] truncate px-4 py-3 text-sm text-muted-foreground" title={session.summary}>
+                  {/* w-full with max-w-0: the summary takes the width the other columns leave, truncated. */}
+                  <td className="w-full min-w-40 max-w-0 truncate px-4 py-3 text-sm text-muted-foreground" title={session.summary}>
                     {session.summary || "—"}
                   </td>
                   <td className="px-4 py-3">

@@ -182,7 +182,7 @@ export function StatusBadge({ status, partialUpload, statusLabel }: StatusFields
     yellow: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
     default: "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400",
   } as const;
-  const className = `inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${colorClasses[getStatusColor(status, partialUpload)]}`;
+  const className = `inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${colorClasses[getStatusColor(status, partialUpload)]}`;
 
   return (
     <span className={className} title={statusHint(status, partialUpload)}>

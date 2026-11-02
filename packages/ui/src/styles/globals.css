@@ -184,4 +184,9 @@
     @apply bg-background text-foreground;
     font-family: "Seravek", "Gill Sans", "Trebuchet MS", "Segoe UI", sans-serif;
   }
+  /* Tailwind v4's preflight leaves buttons with the default cursor; both apps want the pointer. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
 }
