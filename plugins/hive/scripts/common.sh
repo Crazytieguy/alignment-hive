@@ -7,6 +7,16 @@ resolve_state_dir() {
   echo "${main_worktree:-$1}/.claude/hive"
 }
 
+# Claude Code's config dir: $CLAUDE_CONFIG_DIR (a leading ~/ expanded), else ~/.claude.
+claude_config_dir() {
+  local dir="${CLAUDE_CONFIG_DIR:-}"
+  case "$dir" in
+    "")    echo "$HOME/.claude" ;;
+    "~/"*) echo "$HOME/${dir#\~/}" ;;
+    *)     echo "$dir" ;;
+  esac
+}
+
 # The plugin's version from its manifest; empty when unreadable.
 plugin_version() {
   jq -r '.version // ""' "$1/.claude-plugin/plugin.json" 2>/dev/null || echo ""

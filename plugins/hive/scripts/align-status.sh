@@ -28,7 +28,7 @@ case "$(uname -m 2>/dev/null)" in
   *) ARCH_TRIPLE="" ;;
 esac
 
-CATALOG="$HOME/.claude/plugins/marketplaces/alignment-hive/.claude-plugin/marketplace.json"
+CATALOG="$(claude_config_dir)/plugins/marketplaces/alignment-hive/.claude-plugin/marketplace.json"
 if [ -z "$OS_TRIPLE" ] || [ -z "$ARCH_TRIPLE" ]; then
   echo "**Platform entry suffix**: none (unsupported platform)"
   echo "**Platform entries available for**: none"

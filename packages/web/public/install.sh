@@ -24,11 +24,22 @@ resolve_auth_file() {
   fi
 }
 
+# Claude Code's config dir, where `claude plugin` records marketplaces and installs.
+resolve_claude_config_dir() {
+  local env_path="${CLAUDE_CONFIG_DIR:-}"
+  case "$env_path" in
+    "")    echo "$HOME/.claude" ;;
+    "~/"*) echo "$HOME/${env_path#\~/}" ;;
+    *)     echo "$env_path" ;;
+  esac
+}
+
 AUTH_FILE="$(resolve_auth_file)"
 JQ_CACHE_DIR="$HOME/.cache/alignment-hive"
 JQ_BINARY="$JQ_CACHE_DIR/jq"
-KNOWN_MARKETPLACES="$HOME/.claude/plugins/known_marketplaces.json"
-INSTALLED_PLUGINS="$HOME/.claude/plugins/installed_plugins.json"
+CLAUDE_PLUGINS_DIR="$(resolve_claude_config_dir)/plugins"
+KNOWN_MARKETPLACES="$CLAUDE_PLUGINS_DIR/known_marketplaces.json"
+INSTALLED_PLUGINS="$CLAUDE_PLUGINS_DIR/installed_plugins.json"
 JQ=""
 
 # --- Output helpers ---
@@ -148,7 +159,7 @@ enable_auto_update() {
 
   info "Enabling auto-update..."
   local tmp
-  tmp=$(mktemp "$HOME/.claude/plugins/known_marketplaces.XXXXXX")
+  tmp=$(mktemp "$CLAUDE_PLUGINS_DIR/known_marketplaces.XXXXXX")
   if $JQ '."alignment-hive".autoUpdate = true' "$KNOWN_MARKETPLACES" > "$tmp"; then
     mv "$tmp" "$KNOWN_MARKETPLACES"
     success "Auto-update enabled"
