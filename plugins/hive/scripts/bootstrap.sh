@@ -61,27 +61,59 @@ TARGET="${OS}-${ARCH_NAME}"
 CACHE_DIR="$CACHE_BASE/v${VERSION}"
 BINARY="$CACHE_DIR/hive"
 
+# One download at a time: sessions started together after a cli-version bump would each fetch
+# the binary. The lock is a directory (mkdir is atomic). Its holder can be killed mid-download on
+# the hook's 10s timeout, so a lock older than a minute is taken over. Two downloads at once are
+# only wasted work: each writes its own tmpfile and moves it into place atomically.
+LOCK="$CACHE_DIR/.download-lock"
+
+acquire_lock() {
+  mkdir "$LOCK" 2>/dev/null && return 0
+  [ -n "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ] || return 1
+  rmdir "$LOCK" 2>/dev/null || true
+  mkdir "$LOCK" 2>/dev/null
+}
+
 if [ ! -x "$BINARY" ]; then
-  BINARY_NAME="hive-cli-${TARGET}"
-  DOWNLOAD_URL="https://github.com/Crazytieguy/alignment-hive/releases/download/hive-cli-v${VERSION}/${BINARY_NAME}"
-
-  echo "Downloading hive-cli v${VERSION} for ${TARGET}..." >&2
   mkdir -p "$CACHE_DIR"
+  # Partial downloads that a kill on the hook's timeout left behind.
+  find "$CACHE_BASE" -maxdepth 2 -type f -name '.hive.tmp.*' -mmin +60 -exec rm -f {} + 2>/dev/null || true
 
-  # The hook can be killed on its timeout mid-download; never leave a partial file behind.
-  TMPFILE="$CACHE_DIR/.hive.tmp.$$"
-  trap 'rm -f "$TMPFILE"' EXIT
-  if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMPFILE"; then
-    echo "Failed to download hive-cli v${VERSION} from $DOWNLOAD_URL" >&2
-    install_notice update-failed problem "CLI update failed"
-    exit 0
+  if acquire_lock; then
+    # The hook can be killed on its timeout mid-download; never leave a partial file behind.
+    TMPFILE="$CACHE_DIR/.hive.tmp.$$"
+    trap 'rm -f "$TMPFILE"; rmdir "$LOCK" 2>/dev/null || true' EXIT
+    # Another start may have finished the download while this one waited for the lock.
+    if [ ! -x "$BINARY" ]; then
+      BINARY_NAME="hive-cli-${TARGET}"
+      DOWNLOAD_URL="https://github.com/Crazytieguy/alignment-hive/releases/download/hive-cli-v${VERSION}/${BINARY_NAME}"
+
+      echo "Downloading hive-cli v${VERSION} for ${TARGET}..." >&2
+      if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMPFILE"; then
+        echo "Failed to download hive-cli v${VERSION} from $DOWNLOAD_URL" >&2
+        install_notice update-failed problem "CLI update failed"
+        exit 0
+      fi
+
+      chmod +x "$TMPFILE"
+      mv "$TMPFILE" "$BINARY"
+      echo "Installed hive-cli v${VERSION}" >&2
+    fi
+    # Released here, not only on exit: the exec below runs no EXIT trap.
+    rmdir "$LOCK" 2>/dev/null || true
+    trap - EXIT
+  else
+    # Another start is downloading: wait a few seconds for its binary, else leave it to a later call.
+    waited=0
+    while [ ! -x "$BINARY" ] && [ "$waited" -lt 25 ]; do
+      sleep 0.2
+      waited=$((waited + 1))
+    done
+    if [ ! -x "$BINARY" ]; then
+      printf '{"notices": [{"id": "update-pending", "severity": "info", "text": "CLI update downloading"}]}\n'
+      exit 0
+    fi
   fi
-
-  chmod +x "$TMPFILE"
-  mv "$TMPFILE" "$BINARY"
-  trap - EXIT
-
-  echo "Installed hive-cli v${VERSION}" >&2
 fi
 
 # Whether version $1 is older than $2, both X.Y.Z; false when either isn't.
