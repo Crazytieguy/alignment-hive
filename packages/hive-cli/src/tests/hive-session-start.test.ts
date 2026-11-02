@@ -36,11 +36,9 @@ const { hiveSessionStart } = await import('../commands/hive-session-start');
 const { hiveNotices } = await import('../commands/notices');
 const { getStateDir, statePaths } = await import('../lib/config');
 
-beforeAll(async () => {
-  root = await realpath(await mkdtemp(join(tmpdir(), 'hive-session-start-')));
-  const transcripts = join(root, 'transcripts');
-  await mkdir(transcripts, { recursive: true });
-  const path = join(transcripts, 's1.jsonl');
+/** A finished session last modified a week ago: ready to upload. */
+async function writeSession(dir: string, sessionId: string) {
+  const path = join(dir, `${sessionId}.jsonl`);
   await writeFile(
     path,
     [
@@ -51,6 +49,13 @@ beforeAll(async () => {
       .join('\n') + '\n',
   );
   await utimes(path, OLD, OLD);
+}
+
+beforeAll(async () => {
+  root = await realpath(await mkdtemp(join(tmpdir(), 'hive-session-start-')));
+  const transcripts = join(root, 'transcripts');
+  await mkdir(transcripts, { recursive: true });
+  await writeSession(transcripts, 's1');
 });
 
 afterAll(async () => {
@@ -108,6 +113,42 @@ describe('session start', () => {
       ['session', 'working', ['keep-private']],
     ]);
     expect(rows[0]?.text).toContain('uploading 1 session');
+  });
+
+  test('schedules at most UPLOAD_BATCH_SIZE sessions; a later start takes more once that job is done', async () => {
+    history = SHARING;
+    const { UPLOAD_BATCH_SIZE } = await import('../lib/sharing');
+    const bulk = join(root, 'bulk');
+    await mkdir(bulk, { recursive: true });
+    const ids = Array.from({ length: UPLOAD_BATCH_SIZE * 2 + 20 }, (_, i) => `bulk-${String(i).padStart(3, '0')}`);
+    await Promise.all(ids.map((id) => writeSession(bulk, id)));
+    const stateDir = getStateDir(root);
+    await writeFile(statePaths(stateDir).transcriptsDirs, `${join(root, 'transcripts')}\n${bulk}\n`);
+    const eligible = new Set([...ids, 's1']);
+
+    const scheduled = (): Array<Array<string>> =>
+      spawned.filter((args) => args[0] === 'upload').map((args) => args[args.indexOf('--sessions') + 1].split(','));
+
+    try {
+      await printed(hiveSessionStart);
+      const [first] = scheduled();
+      expect(first).toHaveLength(UPLOAD_BATCH_SIZE);
+      expect(new Set(first).size).toBe(UPLOAD_BATCH_SIZE);
+      expect(first.every((id) => eligible.has(id))).toBe(true);
+      expect((await notices())[0]?.text).toContain(`uploading ${UPLOAD_BATCH_SIZE} sessions`);
+
+      // While that job is scheduled, another start schedules nothing.
+      await printed(hiveSessionStart);
+      expect(scheduled()).toHaveLength(1);
+
+      // The job removes the marker when it ends (upload-send.ts); the next start takes another batch.
+      await rm(statePaths(stateDir).uploadScheduled);
+      await printed(hiveSessionStart);
+      expect(scheduled()).toHaveLength(2);
+      expect(scheduled()[1]).toHaveLength(UPLOAD_BATCH_SIZE);
+    } finally {
+      await rm(bulk, { recursive: true, force: true });
+    }
   });
 
   test('does not count or schedule a session last modified while sharing was off', async () => {

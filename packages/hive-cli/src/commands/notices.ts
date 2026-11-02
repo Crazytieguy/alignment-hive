@@ -3,6 +3,7 @@ import { parseCommandArgs, usageError } from '../lib/args';
 import { ensureStateDir, getStateDir } from '../lib/config';
 import { hive } from '../lib/messages';
 import {
+  UPLOAD_BATCH_SIZE,
   UPLOAD_DELAY_MINUTES,
   alignDue,
   loadSharingSnapshot,
@@ -106,7 +107,7 @@ async function uploadRows(snapshot: Extract<SharingSnapshot, { kind: 'on' }>, st
     rows.push({
       id: 'uploading',
       severity: 'info',
-      text: copy.uploading(eligibleIds.length, minutes),
+      text: copy.uploading(Math.min(eligibleIds.length, UPLOAD_BATCH_SIZE), minutes),
       actions: [{ id: 'snooze', label: copy.snooze, kind: 'plugin' }],
       when: 'start',
     });

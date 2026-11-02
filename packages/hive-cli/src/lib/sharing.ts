@@ -15,6 +15,27 @@ import type { StatusContext } from './session-state';
 export const UPLOAD_DELAY_MINUTES = 10;
 const UPLOAD_SCHEDULE_COOLDOWN_MS = 15 * 60 * 1000;
 
+/**
+ * At most this many sessions per scheduled upload: their ids go to the job as one argument, which
+ * the OS caps in length. The rest go with the jobs later session starts schedule, once this one
+ * has cleared the upload-scheduled marker.
+ */
+export const UPLOAD_BATCH_SIZE = 50;
+
+/**
+ * The sessions one scheduled upload takes: all of them up to UPLOAD_BATCH_SIZE, else a random
+ * UPLOAD_BATCH_SIZE, so sessions whose upload keeps failing cannot hold back the rest for good.
+ */
+export function pickUploadBatch(eligibleIds: ReadonlyArray<string>): Array<string> {
+  const ids = [...eligibleIds];
+  if (ids.length <= UPLOAD_BATCH_SIZE) return ids;
+  for (let i = 0; i < UPLOAD_BATCH_SIZE; i++) {
+    const j = i + Math.floor(Math.random() * (ids.length - i));
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+  }
+  return ids.slice(0, UPLOAD_BATCH_SIZE);
+}
+
 /** When session start last scheduled an upload, if within the cooldown that keeps it from scheduling another. */
 export async function uploadScheduledAt(stateDir: string): Promise<number | null> {
   const scheduledAt = await readTimestamp(statePaths(stateDir).uploadScheduled);
