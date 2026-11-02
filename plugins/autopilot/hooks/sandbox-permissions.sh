@@ -21,6 +21,7 @@ eval "$( echo "$input" | "$JQ" -r '
   "tool_name=" + (.tool_name // "" | @sh),
   "target_path=" + (.tool_input.file_path // .tool_input.path // "" | @sh),
   "session_id=" + (.session_id // "" | @sh),
+  "agent_id=" + (.agent_id // "" | @sh),
   "bash_command=" + (.tool_input.command // "" | @sh)
 ')"
 
@@ -68,8 +69,10 @@ if [[ "$target_path" == *..* ]]; then
   exit 0
 fi
 
-# Auto-allow Read/Write/Edit to this session's and its registered agents' sandbox scripts
+# Auto-allow Read/Write/Edit to this session's and its registered agents' sandbox scripts. The
+# payload's agent_id (set inside a subagent) names the calling agent's own script.
 ids=("$session_id")
+[ -n "$agent_id" ] && ids+=("$agent_id")
 if [ -f "$sessions_dir/$session_id.agents" ]; then
   while IFS= read -r id; do [ -n "$id" ] && ids+=("$id"); done < "$sessions_dir/$session_id.agents"
 fi
@@ -80,13 +83,24 @@ for id in "${ids[@]}"; do
   fi
 done
 
-# Deny writes to unregistered .ts files in the sandbox dir
+# A session whose id changed mid-session (backgrounding forks a new id) keeps using the script it
+# was assigned under the old id, so any id with grants or an agent registry counts as registered.
+if [[ "$target_path" =~ ^"$sandbox_dir"/([A-Za-z0-9-]+)\.ts$ ]]; then
+  id="${BASH_REMATCH[1]}"
+  if [ -f "$sessions_dir/$id" ] || [ -f "$sessions_dir/$id.agents" ]; then
+    emit_allow
+    exit 0
+  fi
+fi
+
+# Deny writes to unregistered .ts files in the sandbox dir, naming the caller's live script: after a
+# fork the model's context still names the old one.
 if [ "$tool_name" = "Write" ] || [ "$tool_name" = "Edit" ]; then
   if [[ "$target_path" == */.claude/deno-sandbox/* ]]; then
     # Only block writes to script files (.ts), not config/declaration files (.d.ts, .json, etc.)
     case "$target_path" in
       *.d.ts) ;;
-      *.ts) emit_deny "Write to your assigned sandbox script file instead." ;;
+      *.ts) emit_deny "Write to your assigned sandbox script file instead: ${sandbox_dir}/${agent_id:-$session_id}.ts" ;;
     esac
   fi
   exit 0

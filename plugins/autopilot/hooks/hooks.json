@@ -20,6 +20,12 @@
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-deno.sh\"",
             "async": true,
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/prune-sessions.sh\"",
+            "async": true,
+            "timeout": 30
           }
         ]
       }
