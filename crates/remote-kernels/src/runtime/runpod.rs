@@ -560,29 +560,33 @@ impl RunPodRuntime {
         self.runpod.ssh_expected()
     }
 
-    /// The failure the open must not survive when a pod the config expects
-    /// SSH on never produced an SSH endpoint. The symptom is the same on
-    /// both clouds, but the next action is not: a pod this call just created
-    /// can be started again, while an existing machine must not be — a
-    /// second `start()` there would mint a second billing pod and strand
-    /// this one.
-    fn ssh_expectation_unmet(&self, ctx: &ConnectionContext) -> anyhow::Error {
+    /// What `open()` returns when a pod the config expects SSH on produced
+    /// no SSH endpoint within the measured `waited` window. The symptom is
+    /// the same on both clouds, but the next action is not:
+    ///
+    /// - A pod this call just created is still provisioning: `RunPod`
+    ///   reports RUNNING while the image is still pulling, and the endpoint
+    ///   appears only once the container starts (a cold 16 GB pull took
+    ///   ~165 s, observed live 2026-09). That is
+    ///   [`StillProvisioning`](super::StillProvisioning): the pod is kept
+    ///   and the background finalizer keeps waiting — releasing the machine
+    ///   oplock between attempts — until `provision-timeout-mins`, the money
+    ///   backstop that then terminates it.
+    /// - An existing machine fails, and the reader is sent back to
+    ///   `attach()`, never `start()`: a second `start()` would mint a second
+    ///   billing pod and strand this one.
+    fn ssh_expectation_unmet(ctx: &ConnectionContext, waited: Duration) -> anyhow::Error {
         if ctx.fresh {
-            anyhow::anyhow!(
-                "No direct SSH endpoint appeared for this pod within {SSH_WAIT_MINUTES} \
-                 minutes. Retry start(). If it keeps happening on community cloud, set \
-                 [runpod] cloud-type = \"SECURE\" in {}.",
-                self.config_path
-            )
-        } else {
-            anyhow::anyhow!(
-                "No direct SSH endpoint appeared for machine {} within {SSH_WAIT_MINUTES} \
-                 minutes. Retry attach(\"{}\"). If it keeps happening, stop() the machine (it \
-                 keeps its data) and tell the user.",
-                ctx.machine_id,
-                ctx.machine_id
-            )
+            return super::StillProvisioning.into();
         }
+        anyhow::anyhow!(
+            "No direct SSH endpoint appeared for machine {} within {}. Retry \
+             attach(\"{}\"). If it keeps happening, stop() the machine (it keeps its data) \
+             and tell the user.",
+            ctx.machine_id,
+            describe_wait(waited),
+            ctx.machine_id
+        )
     }
 
     /// The pod's port mappings, derived from the Jupyter access mode. Only
@@ -754,32 +758,56 @@ impl RunPodRuntime {
         (Some(vec!["sh".to_string(), "-c".to_string(), script]), None)
     }
 
-    /// Poll `GET /v2/pods/{id}` until the pod reports a direct SSH endpoint.
-    /// `ssh.direct` appears only once the published `22/tcp` mapping has a
-    /// public port, which can lag RUNNING by a few seconds.
-    async fn wait_for_ssh_info(&self, pod_id: &str) -> anyhow::Result<(String, u16)> {
-        for attempt in 1..=SSH_WAIT_ATTEMPTS {
+    /// Poll `GET /v2/pods/{id}` for one [`SSH_WAIT_WINDOW`] until the pod
+    /// reports a direct SSH endpoint. `ssh.direct` appears only once the
+    /// published `22/tcp` mapping has a public port, which can lag RUNNING
+    /// by a few seconds — or by minutes while a large image pulls. `None`
+    /// when the window passed without one.
+    async fn wait_for_ssh_info(&self, pod_id: &str) -> Option<(String, u16)> {
+        let deadline = tokio::time::Instant::now() + SSH_WAIT_WINDOW;
+        let mut attempt = 0_u32;
+        loop {
+            attempt += 1;
             match self.client.get_pod(pod_id).await {
                 Ok(pod) => {
                     if let Some((ip, port)) = pod.direct_ssh() {
                         tracing::info!(attempt, %ip, port, "SSH info available");
-                        return Ok((ip, port));
+                        return Some((ip, port));
                     }
                     tracing::debug!(attempt, "SSH info not yet available");
                 }
                 Err(e) => tracing::debug!(attempt, error = %e, "Failed to query SSH info"),
             }
+            if tokio::time::Instant::now() + SSH_WAIT_INTERVAL > deadline {
+                return None;
+            }
             tokio::time::sleep(SSH_WAIT_INTERVAL).await;
         }
-        anyhow::bail!("no direct SSH endpoint after {SSH_WAIT_MINUTES} minutes")
     }
 }
 
-/// How long `open()` waits for the pod to publish its direct SSH endpoint,
-/// and the same window in whole minutes for the message that reports it.
-const SSH_WAIT_ATTEMPTS: u64 = 40;
+/// How long one `open()` waits for the pod to publish its direct SSH
+/// endpoint. Deliberately not the provision timeout: `open()` runs under
+/// the machine oplock, and a long wait there would block `stop()`/`terminate()`.
+/// A fresh pod that needs longer (a cold pull of a large image) is instead
+/// reported as [`StillProvisioning`](super::StillProvisioning) and waited on
+/// in the background, bounded by `provision-timeout-mins` (see
+/// [`RunPodRuntime::ssh_expectation_unmet`]).
+const SSH_WAIT_WINDOW: Duration = Duration::from_mins(2);
 const SSH_WAIT_INTERVAL: Duration = Duration::from_secs(3);
-const SSH_WAIT_MINUTES: u64 = SSH_WAIT_ATTEMPTS * SSH_WAIT_INTERVAL.as_secs() / 60;
+
+/// A measured wait as a reader takes it: whole minutes (rounded), or
+/// seconds under a minute.
+fn describe_wait(waited: Duration) -> String {
+    let secs = waited.as_secs();
+    if secs < 60 {
+        return format!("{secs} seconds");
+    }
+    match (secs + 30) / 60 {
+        1 => "1 minute".to_string(),
+        mins => format!("{mins} minutes"),
+    }
+}
 
 /// Runtime capabilities, exposed credential-free so config validation can
 /// consult them at load time (see [`super::validate_config`]).
@@ -1285,28 +1313,38 @@ impl Runtime for RunPodRuntime {
         // guard is never armed there.
         //
         // Where config DOES promise SSH — the exact predicate that arms the
-        // guard — a pod without it must fail the start instead: the armed
-        // guard is disarmed only by the SSH heartbeat, and a degraded
-        // Jupyter-only session would be self-cleaned under the user after
-        // orphan-halt-mins. (Sync and the watchdog would be silently broken
-        // too.)
+        // guard — a pod without it must never open as a degraded
+        // Jupyter-only session: the armed guard is disarmed only by the SSH
+        // heartbeat, so that session would be self-cleaned under the user
+        // after orphan-halt-mins. (Sync and the watchdog would be silently
+        // broken too.) A fresh pod keeps waiting in the background until
+        // provision-timeout-mins; an existing one fails the attach (see
+        // ssh_expectation_unmet).
+        let ssh_wait_started = std::time::Instant::now();
         let ssh = match self.wait_for_ssh_info(external_id).await {
-            Ok((host, port)) => Some(crate::ssh_exec::SshEndpoint {
+            Some((host, port)) => Some(crate::ssh_exec::SshEndpoint {
                 key_path: ctx.ssh_key_path.clone(),
                 known_hosts_path: ctx.known_hosts_path.clone(),
                 user: "root".to_string(),
                 host,
                 port,
             }),
-            Err(e) if self.ssh_expected() => {
+            None if self.ssh_expected() => {
+                let waited = ssh_wait_started.elapsed();
                 tracing::warn!(
                     external_id,
-                    "no SSH endpoint on a pod that expects one: {e}"
+                    fresh = ctx.fresh,
+                    "no SSH endpoint yet on a pod that expects one, after {}",
+                    describe_wait(waited)
                 );
-                return Err(self.ssh_expectation_unmet(ctx));
+                return Err(Self::ssh_expectation_unmet(ctx, waited));
             }
-            Err(e) => {
-                tracing::warn!(external_id, "No SSH connectivity: {e}");
+            None => {
+                tracing::warn!(
+                    external_id,
+                    "No SSH connectivity: no direct SSH endpoint after {}",
+                    describe_wait(ssh_wait_started.elapsed())
+                );
                 None
             }
         };
@@ -3054,51 +3092,49 @@ mod tests {
         }
     }
 
-    /// One message per cloud, two per situation: the symptom is identical on
-    /// SECURE and COMMUNITY, but a fresh pod can simply be started again
-    /// while an existing machine must not be — a second `start()` there
-    /// would mint a second billing pod. `support-public-ip` is gone from the
-    /// UI, so no message may name it, but a config that still carries it
-    /// keeps exactly the behavior it had (SSH expected, guard armed).
+    /// Two situations, one outcome each, identical on SECURE and COMMUNITY
+    /// (the function never reads the config). A fresh pod whose endpoint
+    /// has not appeared is still provisioning — a cold pull of a large image
+    /// outlasts one SSH window (issue #98) — so it must come back as
+    /// `StillProvisioning`, which the finalizer keeps waiting on until
+    /// provision-timeout-mins, not as a failure that terminates the pod.
+    /// An existing machine fails, naming the measured window, and must
+    /// never send the reader back to `start()`: a second `start()` would mint
+    /// a second billing pod. `support-public-ip` is gone from the UI, so no
+    /// message may name it, but a config that still carries it keeps
+    /// exactly the behavior it had (SSH expected, guard armed).
     #[test]
     fn ssh_expectation_failure_branches_on_fresh_versus_attach() {
-        let secure = runtime_with("");
-        let community =
-            runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"\nsupport-public-ip = true");
-        for fresh in [true, false] {
-            assert_eq!(
-                secure
-                    .ssh_expectation_unmet(&ssh_context(fresh))
-                    .to_string(),
-                community
-                    .ssh_expectation_unmet(&ssh_context(fresh))
-                    .to_string()
-            );
-        }
+        let fresh = RunPodRuntime::ssh_expectation_unmet(&ssh_context(true), SSH_WAIT_WINDOW);
+        assert!(fresh.is::<crate::runtime::StillProvisioning>(), "{fresh}");
 
-        let message = secure.ssh_expectation_unmet(&ssh_context(true)).to_string();
-        assert!(message.contains("No direct SSH endpoint"), "{message}");
-        assert!(message.contains("2 minutes"), "the window: {message}");
-        assert!(message.contains("Retry start()"), "{message}");
-        assert!(message.contains("cloud-type = \"SECURE\""), "{message}");
-        assert!(message.contains("remote-kernels.toml"), "{message}");
-
-        // The attach rendering must never send the reader back to start().
-        let attach = secure
-            .ssh_expectation_unmet(&ssh_context(false))
-            .to_string();
+        let attach =
+            RunPodRuntime::ssh_expectation_unmet(&ssh_context(false), Duration::from_secs(127))
+                .to_string();
+        assert!(attach.contains("No direct SSH endpoint"), "{attach}");
         assert!(attach.contains("for machine m1"), "{attach}");
+        assert!(attach.contains("within 2 minutes"), "the window: {attach}");
         assert!(attach.contains("Retry attach(\"m1\")"), "{attach}");
         assert!(attach.contains("stop() the machine"), "{attach}");
         assert!(!attach.contains("start()"), "{attach}");
+        // Nothing to switch to: SECURE is the default and the only cloud
+        // that guarantees SSH, so the hint would be noise at best.
+        assert!(!attach.contains("cloud-type"), "{attach}");
+
+        // The window is the one actually waited, not a constant.
+        let longer =
+            RunPodRuntime::ssh_expectation_unmet(&ssh_context(false), Duration::from_secs(200))
+                .to_string();
+        assert!(longer.contains("within 3 minutes"), "{longer}");
 
         for gone in ["support-public-ip", "supportPublicIp", "orphan guard"] {
-            assert!(!message.contains(gone), "{gone} survives: {message}");
             assert!(!attach.contains(gone), "{gone} survives: {attach}");
         }
 
         // The deprecated flag still selects the old behavior for configs
         // that carry it: SSH expected, so the guard arms.
+        let community =
+            runtime_with("[runpod]\ncloud-type = \"COMMUNITY\"\nsupport-public-ip = true");
         assert!(community.ssh_expected());
         assert!(
             community

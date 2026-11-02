@@ -1073,6 +1073,141 @@ async fn auto_reattach_does_not_wait_for_startup_commands() {
     terminate(&second, Some(&machine_id)).await;
 }
 
+/// Poll status() until a section contains `needle`; the full text of that
+/// status() call, or `None` after ~30s. status() drains its queued alerts,
+/// so each one is seen exactly once.
+async fn status_until(server: &RemoteKernelsServer, needle: &str) -> Option<String> {
+    for _ in 0..60 {
+        let status = server
+            .status(Parameters(remote_kernels::server::StatusParams {
+                instance: None,
+            }))
+            .await
+            .expect("status protocol error");
+        let text = text_of(&status);
+        if text.contains(needle) {
+            return Some(text);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    None
+}
+
+/// A same-session running machine that fails to reattach must not be left
+/// unsupervised silently: status() names the machine and the reason, and
+/// the machine and its record are kept for a manual attach() (issue #89).
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn auto_reattach_failure_surfaces_in_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = server_in_session(dir.path(), None, "broken-session");
+    let (machine_id, _) = start_machine(&first, Some("broken")).await;
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Break the recorded credentials: the SSH key the record points at is
+    // gone, so attach must refuse before touching the machine.
+    let state = AppState::new(dir.path().to_path_buf());
+    let original = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+    let mut broken = original.clone();
+    broken.ssh_key_path = Some(dir.path().join("missing-key").display().to_string());
+    state.save_record(&machine_id, &broken).unwrap();
+
+    let second = server_in_session(dir.path(), None, "broken-session");
+    second.spawn_auto_reattach();
+    let text = status_until(&second, "Automatic reattach of machine")
+        .await
+        .expect("a failed auto-reattach never surfaced in status()");
+    assert!(
+        text.contains(&format!(
+            "Automatic reattach of machine {machine_id} did not complete"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("cannot be attached"), "{text}");
+    assert!(text.contains("record kept"), "{text}");
+
+    // Not attached here, and nothing was torn down: the record still says
+    // running, so a manual attach() can still pick the machine up.
+    assert!(
+        !second
+            .shared_state()
+            .lock()
+            .await
+            .instances
+            .contains_key(&machine_id)
+    );
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+    assert_eq!(record.phase, remote_kernels::state::Phase::Running);
+
+    // The alert is drained once shown, not repeated on every status().
+    let again = second
+        .status(Parameters(remote_kernels::server::StatusParams {
+            instance: None,
+        }))
+        .await
+        .unwrap();
+    assert!(
+        !text_of(&again).contains("Automatic reattach of machine"),
+        "{}",
+        text_of(&again)
+    );
+
+    state.save_record(&machine_id, &original).unwrap();
+    terminate(&second, Some(&machine_id)).await;
+}
+
+/// A running machine whose spend owner cannot be read might be this
+/// session's: auto-reattach must neither adopt it blind nor skip it
+/// silently — status() says so and points at attach() (issue #89).
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn auto_reattach_with_unreadable_spend_owner_surfaces_in_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = server_in_session(dir.path(), None, "ledger-session");
+    let (machine_id, _) = start_machine(&first, Some("ledger")).await;
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // A complete line that will not parse is ledger corruption, so the
+    // machine's owner cannot be read.
+    let ledger = remote_kernels::ledger::ledger_dir(dir.path()).join(format!("{machine_id}.jsonl"));
+    let original = std::fs::read_to_string(&ledger).expect("machine ledger");
+    std::fs::write(&ledger, format!("{original}not an event\n")).unwrap();
+
+    let second = server_in_session(dir.path(), None, "ledger-session");
+    second.spawn_auto_reattach();
+    let text = status_until(&second, "Automatic reattach skipped machine")
+        .await
+        .expect("an unreadable spend owner never surfaced in status()");
+    assert!(
+        text.contains(&format!(
+            "Automatic reattach skipped machine {machine_id}: its spend owner could not be read"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("attach(\"{machine_id}\") manually")),
+        "{text}"
+    );
+    assert!(
+        !second
+            .shared_state()
+            .lock()
+            .await
+            .instances
+            .contains_key(&machine_id),
+        "a machine whose owner is unknown must not be adopted"
+    );
+
+    // Cleanup from a fresh server: this one has seen the ledger corrupt and
+    // keeps accounting failed closed.
+    drop(second);
+    std::fs::write(&ledger, original).unwrap();
+    let cleanup = server_in_session(dir.path(), None, "ledger-session");
+    terminate(&cleanup, Some(&machine_id)).await;
+}
+
 /// finish(): queue downloads + stop while a cell is still running; the drain
 /// waits for idle, collects the file into the project, stops the machine,
 /// and clears the queued intent.

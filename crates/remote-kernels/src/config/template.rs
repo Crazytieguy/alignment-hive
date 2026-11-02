@@ -245,7 +245,9 @@ impl Config {
 # image-start-cmd = "{default_image_start_cmd}"
 
 # Give up on a pod still provisioning after this many minutes and terminate
-# it — a pod stuck "loading" bills the whole time.
+# it — a pod stuck "loading" bills the whole time. Provisioning lasts until
+# the pod is running AND reachable over SSH, so it includes pulling the image
+# (a cold pull of a large image can take several minutes).
 # Default: {default_provision_timeout_mins}
 # provision-timeout-mins = {default_provision_timeout_mins}
 

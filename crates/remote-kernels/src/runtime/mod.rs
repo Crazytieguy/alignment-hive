@@ -366,8 +366,8 @@ impl UnconfirmedCreate {
 /// instance and continue waiting in the background.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "machine is still provisioning (queued or waiting for capacity) — setup continues in the \
-     background; poll status()"
+    "machine is still provisioning (queued, waiting for capacity, or pulling its image) — setup \
+     continues in the background; poll status()"
 )]
 pub struct StillProvisioning;
 

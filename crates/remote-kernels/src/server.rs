@@ -317,7 +317,7 @@ impl RemoteKernelsServer {
                     );
                     let reconcile_note = self.reclaim_start_alerts(&reconcile_messages).await;
                     Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                        "Machine {machine_id} (provider id: {}) is still queued or waiting for capacity. \
+                        "Machine {machine_id} (provider id: {}) is still provisioning (queued, waiting for capacity, or pulling its image). \
                          It was NOT cleaned up — setup continues in the background. Poll \
                          status() until it shows running, or terminate(instance=\"{machine_id}\") \
                          to give up.{note}{reconcile_note}",

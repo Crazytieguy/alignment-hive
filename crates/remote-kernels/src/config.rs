@@ -384,7 +384,8 @@ pub struct RunpodConfig {
     pub image_start_cmd: Option<String>,
 
     /// Give up on a pod still provisioning after this many minutes and
-    /// terminate it (it bills the whole time).
+    /// terminate it (it bills the whole time). Provisioning lasts until the
+    /// pod is running and reachable over SSH, image pull included.
     #[serde_inline_default(DEFAULT_PROVISION_TIMEOUT_MINS)]
     pub provision_timeout_mins: u64,
 
