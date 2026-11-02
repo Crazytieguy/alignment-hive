@@ -70,6 +70,16 @@ test('a release list that stops short of the pin says so', () => {
   expect(p).toContain("[the notes of releases before 8.0.12 weren't fetched]");
 });
 
+test('the direct tool-addition check is marked informational, and a candidate-only pass is called out', () => {
+  const direct = (target: string, status: 'pass' | 'warn') => ({ tier: 'candidate' as const, target, name: 'tool-addition-direct', status, detail: status, info: true });
+  const base = { pinned: '8.0.44', candidate: '8.0.48', patch: true, releases: [], files: [] };
+  const signalled = judgePrompt({ ...base, checks: [direct('pinned', 'warn'), direct('candidate', 'pass')] });
+  expect(signalled).toContain('warn (info) candidate/pinned tool-addition-direct: warn');
+  expect(signalled).toContain('retire its GPT tool-change hoist');
+  expect(judgePrompt({ ...base, checks: [direct('pinned', 'pass'), direct('candidate', 'pass')] })).not.toContain('retire its GPT tool-change hoist');
+  expect(judgePrompt({ ...base, checks: [direct('pinned', 'warn'), direct('candidate', 'warn')] })).not.toContain('retire its GPT tool-change hoist');
+});
+
 test('the decision comes from the structured output only', () => {
   expect(parseJudge(JSON.stringify({ result: 'x', structured_output: { decision: 'bench', reason: 'executor changed', fixedIn: '' } }))).toEqual({ decision: 'bench', reason: 'executor changed', fixedIn: '' });
   expect(parseJudge(JSON.stringify({ structured_output: { decision: 'wait', reason: 'restores commentary history', fixedIn: ' v8.0.44' } }))).toEqual({ decision: 'wait', reason: 'restores commentary history', fixedIn: '8.0.44' });

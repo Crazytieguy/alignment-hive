@@ -19,7 +19,7 @@ import { changedGoFiles, judgePrompt, judgeRelease } from './lib/judge';
 import type { JudgeDecision } from './lib/judge';
 import { discoverModels, liveTarget, parseMiniToml, routerHealth, runProbes } from './lib/probes';
 import type { ModelSet } from './lib/probes';
-import { Recorder, appendHistory, readHistory, renderMarkdown } from './lib/report';
+import { Recorder, appendHistory, gates, hoistSignal, readHistory, renderMarkdown } from './lib/report';
 import type { CandidateVerdict, Check, RunReport } from './lib/report';
 import { credentialPostcheck, credentialPrecheck, livePorts, startSandbox, sweepSandboxes } from './lib/sandbox';
 import type { Sandbox } from './lib/sandbox';
@@ -159,7 +159,7 @@ function pinnedModels(pinned: ModelSet, candidate: ModelSet, rec: Recorder): Mod
  * Non-structural regressions are retried before they settle 'fail': one has to fail on two tries in a row.
  */
 function verdictOf(rec: Recorder, previous: Array<string>): { verdict: CandidateVerdict; reason: string; regressions: Array<string> } {
-  const failed = (target: string) => new Set(rec.checks.filter((c) => c.tier !== 'live' && c.target === target && c.status === 'fail').map((c) => c.name));
+  const failed = (target: string) => new Set(rec.checks.filter((c) => gates(c) && c.tier !== 'live' && c.target === target && c.status === 'fail').map((c) => c.name));
   const pinned = failed('pinned');
   const candidate = failed('candidate');
   const regressions = [...candidate].filter((n) => !pinned.has(n));
@@ -174,7 +174,7 @@ function verdictOf(rec: Recorder, previous: Array<string>): { verdict: Candidate
   if (!ran) return { verdict: 'inconclusive', reason: `the candidate never ran: ${[...pinned].join(', ') || 'see the report'}`, regressions };
   const broke = rec.checks.find((c) => c.target === 'canary' && c.name === 'run' && c.status === 'fail');
   if (broke) return { verdict: 'inconclusive', reason: `the run broke off: ${broke.detail.slice(0, 160)}`, regressions };
-  const warns = rec.checks.filter((c) => c.target === 'candidate' && c.status === 'warn').map((c) => c.name);
+  const warns = rec.checks.filter((c) => gates(c) && c.target === 'candidate' && c.status === 'warn').map((c) => c.name);
   return { verdict: 'pass', reason: warns.length ? `passed with warnings: ${warns.join(', ')}` : 'every check passed', regressions };
 }
 
@@ -519,7 +519,8 @@ function findingsOf(report: RunReport, rec: Recorder): Array<Finding> {
   if (cand) {
     const state = readJson<CandidateState>(CANDIDATES, {});
     const entry = state[cand.version];
-    const text = `candidate CLIProxyAPI ${cand.version}: ${cand.verdict} (${cand.reason})`;
+    const signal = hoistSignal(rec.checks);
+    const text = `candidate CLIProxyAPI ${cand.version}: ${cand.verdict} (${cand.reason})${signal ? `; also, ${signal}` : ''}`;
     if (cand.verdict === 'pass' || cand.verdict === 'fail') out.push({ key: `candidate:${cand.version}:${cand.verdict}`, text });
     // A superseded candidate needs nothing while the release that fixes it ages, unless the waits keep coming.
     if (cand.verdict === 'superseded') {

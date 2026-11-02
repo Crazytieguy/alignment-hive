@@ -16,7 +16,25 @@ export type Check = {
   detail: string;
   ms?: number;
   metrics?: Record<string, number>;
+  /** Reported only: never part of a verdict, and never a fail. */
+  info?: boolean;
 };
+
+/** Whether a check counts toward a verdict. */
+export const gates = (c: Check): boolean => !c.info;
+
+/** The candidate-tier check that sends Claude Code's mid-conversation tool_addition straight to each child (#122). */
+export const TOOL_ADDITION_DIRECT = 'tool-addition-direct';
+
+/**
+ * The signal #122 waits for: the candidate's child declares a mid-conversation tool to GPT itself (a Codex
+ * `additional_tools` item) and the pinned one doesn't, so model-router's GPT hoist can go once the pin moves.
+ */
+export function hoistSignal(checks: Array<Check>): string | undefined {
+  const status = (target: string) => checks.find((c) => c.name === TOOL_ADDITION_DIRECT && c.target === target)?.status;
+  if (status('candidate') !== 'pass' || status('pinned') === 'pass') return undefined;
+  return `this candidate's CLIProxyAPI declares a mid-conversation tool_addition to GPT itself (${TOOL_ADDITION_DIRECT}), and the pinned one doesn't: once the pin moves here, model-router can retire its GPT tool-change hoist (issue #122, a separate change after the re-pin)`;
+}
 
 /** A router the probes and cells can talk to. */
 export type RouterTarget = {
@@ -76,7 +94,7 @@ export class Recorder {
   }
 
   failures(tier?: Tier, target?: string): Array<Check> {
-    return this.checks.filter((c) => c.status === 'fail' && (!tier || c.tier === tier) && (!target || c.target === target));
+    return this.checks.filter((c) => gates(c) && c.status === 'fail' && (!tier || c.tier === tier) && (!target || c.target === target));
   }
 }
 
@@ -94,12 +112,15 @@ export function renderMarkdown(r: RunReport): string {
   );
   if (r.error) lines.push(`**Canary error:** ${r.error}`, '');
   if (r.candidate) lines.push(`**Candidate ${r.candidate.version}: ${r.candidate.verdict}.** ${r.candidate.reason}`, '');
+  const signal = hoistSignal(r.checks);
+  if (signal) lines.push(`**GPT tool-change hoist:** ${signal}.`, '');
   lines.push(r.attention.length ? '**Needs attention:**' : 'Nothing needs attention.');
   for (const a of r.attention) lines.push(`- ${a}`);
   lines.push('', '| | tier | target | check | detail | time |', '|---|---|---|---|---|---|');
   for (const c of r.checks) {
     const ms = c.ms === undefined ? '' : `${(c.ms / 1000).toFixed(1)}s`;
-    lines.push(`| ${icon[c.status]} | ${c.tier} | ${c.target} | ${c.name} | ${c.detail.replaceAll('|', '\\|').replaceAll('\n', ' ')} | ${ms} |`);
+    const name = c.info ? `${c.name} (info)` : c.name;
+    lines.push(`| ${icon[c.status]} | ${c.tier} | ${c.target} | ${name} | ${c.detail.replaceAll('|', '\\|').replaceAll('\n', ' ')} | ${ms} |`);
   }
   return lines.join('\n') + '\n';
 }

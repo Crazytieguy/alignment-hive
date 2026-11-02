@@ -17,6 +17,7 @@ import {
   judgeOverflow,
   judgeReach,
   judgeToolAddition,
+  judgeToolAdditionDirect,
   judgeToolTurn1,
   judgeToolTurn2,
   judgeWebsearch,
@@ -342,6 +343,24 @@ describe('validators', () => {
     expect(judgeToolAddition(call('DeferredToolPlaceholder')).detail).toContain('called DeferredToolPlaceholder');
     expect(judgeToolAddition(ok(pong)).detail).toContain('no tool call');
     expect(judgeToolAddition(bad('HTTP 400: bad')).status).toBe('fail');
+  });
+
+  test('tool addition sent straight to the child: informational, never a fail', () => {
+    const call = (input: unknown, cached = 4096) =>
+      ok(msg([{ type: 'tool_use', id: 'c1', name: 'get_code', input }], { stop_reason: 'tool_use', usage: { input_tokens: 100, cache_read_input_tokens: cached } }));
+    const before = ok(pong);
+    expect(judgeToolAdditionDirect(before, call({ factor: 7, ticket: 'K7Q2' }))).toMatchObject({ status: 'pass', metrics: { offered: 1, cache_read: 4096 } });
+    // Offered, but a cache miss can't rule out a tools[] change.
+    expect(judgeToolAdditionDirect(before, call({ factor: 7, ticket: 'K7Q2' }, 0))).toMatchObject({ status: 'warn', metrics: { offered: 1 } });
+    // get_code named in the system text but called without the definition's ticket: a guess, not an offer.
+    const guessed = judgeToolAdditionDirect(before, call({ factor: 7 }));
+    expect(guessed).toMatchObject({ status: 'warn', metrics: { offered: 0 } });
+    expect(guessed.detail).toContain('guessed');
+    const placeholder = ok(msg([{ type: 'tool_use', id: 'c1', name: 'DeferredToolPlaceholder', input: {} }], { stop_reason: 'tool_use' }));
+    expect(judgeToolAdditionDirect(before, placeholder).detail).toContain('not offered: this child drops a mid-conversation tool_addition; called DeferredToolPlaceholder');
+    expect(judgeToolAdditionDirect(before, ok(pong)).detail).toContain('no tool call');
+    expect(judgeToolAdditionDirect(bad('HTTP 401: bad key', 401), ok(pong)).status).toBe('warn');
+    expect(judgeToolAdditionDirect(before, bad('HTTP 500: x')).detail).toContain('request with the addition: HTTP 500');
   });
 
   test('prompt cache', () => {
