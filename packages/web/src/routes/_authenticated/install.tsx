@@ -70,6 +70,19 @@ function InstallPage() {
           </p>
         </div>
 
+        <div className="space-y-4">
+          <h2 className="text-lg font-medium">Uninstall</h2>
+          <pre className="relative p-3 bg-muted rounded-lg text-sm overflow-x-auto">
+            curl -fsSL https://alignment-hive.com/uninstall.sh | bash
+            <CopyButton text="curl -fsSL https://alignment-hive.com/uninstall.sh | bash" />
+          </pre>
+          <p className="text-sm text-muted-foreground">
+            Removes the plugins, the hive CLI and your login. Sessions you've
+            already uploaded are not deleted; to stop sharing, run{" "}
+            <code>hive consent disable</code> in each shared project first.
+          </p>
+        </div>
+
         <div className="pt-4 border-t text-sm text-muted-foreground space-y-2">
           <p>
             Contact <strong>Yoav Tzfati</strong> for questions, email:{" "}

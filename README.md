@@ -30,6 +30,14 @@ Session sharing requires an alignment-hive invite; everything else works without
 
 After installation open Claude Code in your project and run `/hive:align`.
 
+To uninstall:
+
+```bash
+curl -fsSL https://alignment-hive.com/uninstall.sh | bash
+```
+
+This removes the alignment-hive plugins, the marketplace, the hive CLI and your login. It doesn't delete sessions you've already uploaded; to stop sharing, run `hive consent disable` in each shared project before uninstalling.
+
 ### Manual install
 
 To add the plugin marketplace without the install script (no CLI, no hive plugin), merge this into your `~/.claude/settings.json`:
