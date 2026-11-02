@@ -30,6 +30,13 @@ describe('sanitizeString', () => {
     expect(sanitized.match(/\[REDACTED:/g)?.length).toBe(1);
     expect(sanitized).not.toContain('ghp_');
   });
+
+  test("overlapping matches merge, so a longer match's tail past a narrower rule is redacted too", () => {
+    // slack-bot-token matches up to the dot; the entropy net matches the whole run.
+    const token = 'xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx.extraTail9Zz8Yy7';
+    expect(sanitizeString(`token ${token} end`)).toBe('token [REDACTED:slack-bot-token] end');
+    expect(detectSecrets(token)).toMatchObject([{ valueStart: 0, valueEnd: token.length }]);
+  });
 });
 
 describe('the review page\'s shapes apply to uploads too (one rule set)', () => {

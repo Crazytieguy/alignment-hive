@@ -238,7 +238,7 @@ function looksLikeNonSecret(s: string): boolean {
   return false;
 }
 
-/** Non-overlapping secret spans in content, earliest first; when rules overlap the earliest span wins, grown over any env value it overlaps. */
+/** Non-overlapping secret spans in content, earliest first; overlapping matches merge into one span. */
 export function detectSecrets(content: string): Array<SecretMatch> {
   return secretSpans(content, withEnvValues(ALL_RULES));
 }
@@ -276,18 +276,20 @@ export function secretSpans(content: string, rules: Array<SecretRule>): Array<Se
 
   matches.sort((a, b) => a.start - b.start);
 
-  const deduped: Array<SecretMatch> = [];
+  // Overlapping matches merge into one span covering both, under the earliest's rule: keeping only
+  // one would leave the rest of a longer match (a token's tail past what a narrower rule knows).
+  const merged: Array<SecretMatch> = [];
   for (const m of matches) {
-    const last = deduped.at(-1);
-    if (last === undefined || m.start >= last.end) deduped.push(m);
-    // An env value is known to be a secret whole: a span overlapping one grows to cover both, so neither leaves a tail.
-    else if ((m.ruleId === ENV_VALUE_ID || last.ruleId === ENV_VALUE_ID) && m.end > last.end) {
-      last.end = m.end;
+    const last = merged.at(-1);
+    if (last === undefined || m.start >= last.end) {
+      merged.push(m);
+    } else {
+      last.end = Math.max(last.end, m.end);
       last.valueStart = Math.min(last.valueStart, m.valueStart);
       last.valueEnd = Math.max(last.valueEnd, m.valueEnd);
     }
   }
-  return deduped;
+  return merged;
 }
 
 export function sanitizeString(content: string): string {
