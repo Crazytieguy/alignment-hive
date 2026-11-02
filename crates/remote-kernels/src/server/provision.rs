@@ -19,10 +19,32 @@ use super::RemoteKernelsServer;
 )]
 pub(super) struct BudgetUnenforceable(String);
 
+/// The machine this setup was bringing up left the live set mid-setup — an
+/// explicit `stop()`/`terminate()` (which now never waits for setup), budget
+/// cleanup, or a newer attach replaced it. Whoever removed it already
+/// decided the machine's fate, so a failed-start cleanup must NOT run on
+/// top (it could terminate a machine the user just chose to stop).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "machine {0} was stopped, terminated or replaced while its setup was still running; it was left as that call left it"
+)]
+pub(super) struct EndedDuringSetup(pub(super) String);
+
+/// Backstop for waiting on startup commands: their exec timeout is 5
+/// minutes, plus room for keepalives that queued behind the machine oplock.
+const STARTUP_COMMANDS_WAIT: std::time::Duration = std::time::Duration::from_mins(6);
+
 #[derive(Clone, Copy)]
 pub(super) enum ConnectMode {
     Fresh,
-    Attach { force: bool, resumed: bool },
+    Attach {
+        force: bool,
+        resumed: bool,
+        /// The startup re-attach, which handles a session's machines one at a
+        /// time and must not let one machine's startup commands hold up the
+        /// next machine's lease past its watchdog's stale window.
+        auto: bool,
+    },
 }
 
 /// How a failed start/attach was resolved, per the machine's cleanup
@@ -198,7 +220,7 @@ impl RemoteKernelsServer {
                 .instances
                 .get_mut(machine_id)
                 .filter(|i| i.external_id == external_id)
-                .ok_or_else(|| anyhow::anyhow!("instance was removed or replaced during start"))
+                .ok_or_else(|| EndedDuringSetup(machine_id.to_string()).into())
         }
 
         let (
@@ -297,7 +319,8 @@ impl RemoteKernelsServer {
             mode,
             ConnectMode::Attach {
                 force: true,
-                resumed: true
+                resumed: true,
+                ..
             }
         ) && lifecycle.wants_terminate
             && let Some(op_id) = lifecycle.op_id.as_deref()
@@ -366,7 +389,12 @@ impl RemoteKernelsServer {
                 .map(ToString::to_string),
             storage_rate_per_hr: lifecycle.storage_rate_per_hr,
         };
-        let (hb, mut supervision, setup_diagnostics) = crate::heartbeat::start(
+        let crate::heartbeat::Setup {
+            heartbeat: hb,
+            mut supervision,
+            mut startup,
+            diagnostics: setup_diagnostics,
+        } = crate::heartbeat::start(
             Arc::clone(&conn),
             machine_id.to_string(),
             external_id.to_string(),
@@ -397,6 +425,10 @@ impl RemoteKernelsServer {
         // Wait for Jupyter to be ready — without holding the state lock (this
         // can poll for minutes; other instances must stay operable meanwhile).
         if let Err(error) = jupyter.wait_until_ready().await {
+            // A stop()/terminate() during the wait is why Jupyter never
+            // answered, and it decided the machine's fate: this is no failed
+            // start to clean up after.
+            same_generation(&mut *self.state.lock().await, machine_id, external_id)?;
             let heartbeat = self
                 .state
                 .lock()
@@ -425,32 +457,43 @@ impl RemoteKernelsServer {
             .is_ok()
                 && *supervision.borrow() != crate::heartbeat::SupervisionStatus::Pending;
             if !resolved && self.budget.is_some() {
-                // Setup is usually still deep inside its SSH retry loop at
-                // this point — the latest recorded attempt error is the only
-                // actionable cause available (e.g. a rejected key file).
-                let cause = match setup_diagnostics.latest() {
-                    Some(last) => format!(
-                        "the automatic-shutdown watchdog could not be confirmed within 15 seconds; last error: {last}"
-                    ),
-                    None => {
-                        "the automatic-shutdown watchdog could not be confirmed within 15 seconds"
-                            .to_string()
-                    }
-                };
+                // A stop()/terminate() aborts setup, which ends this wait
+                // too; that must not read as an unenforceable budget, whose
+                // cleanup terminates whatever the machine's policy says.
+                same_generation(&mut *self.state.lock().await, machine_id, external_id)?;
+                // Setup may still be inside its SSH retry loop (the latest
+                // recorded attempt error names the cause, e.g. a rejected key
+                // file) or just slow on this host — the per-step timings say
+                // which step ate the window.
+                let mut cause =
+                    "the automatic-shutdown watchdog could not be confirmed within 15 seconds"
+                        .to_string();
+                if let Some(timeline) = setup_diagnostics.timeline() {
+                    let _ = write!(cause, " (setup steps: {timeline})");
+                }
+                if let Some(last) = setup_diagnostics.latest() {
+                    let _ = write!(cause, "; last error: {last}");
+                }
+                tracing::warn!(target: super::LOG_TARGET, instance = machine_id, "Budget gate missed: {cause}");
                 return Err(BudgetUnenforceable(cause).into());
             }
         }
         let supervision_status = supervision.borrow().clone();
+        let settled = supervision_status != crate::heartbeat::SupervisionStatus::Pending;
         match supervision_status {
             crate::heartbeat::SupervisionStatus::Refused(message) => {
                 anyhow::bail!(attach_refusal_message(mode, &message));
             }
             crate::heartbeat::SupervisionStatus::Pending => {
+                let startup = if self.config.startup_commands.is_empty() {
+                    ""
+                } else {
+                    " (the configured startup commands run only after it succeeds)"
+                };
                 if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
-                    instance.supervision_note = Some(
-                        "automatic-shutdown setup is still retrying in the background; until status() stops showing this, stop or terminate the machine explicitly when done"
-                            .to_string(),
-                    );
+                    instance.supervision_note = Some(format!(
+                        "automatic-shutdown setup is still retrying in the background{startup}; until status() stops showing this, stop or terminate the machine explicitly when done"
+                    ));
                 }
             }
             crate::heartbeat::SupervisionStatus::Active => {}
@@ -478,6 +521,49 @@ impl RemoteKernelsServer {
                     instance.supervision_note = Some(note);
                 }
             }
+        }
+
+        // Startup commands run once supervision is settled, outside the gate
+        // above; the machine is not usable for their purpose (packages,
+        // data) until they finish, so wait for them here. Their own exec
+        // timeout bounds this; the backstop only covers keepalives stuck
+        // behind the oplock. (With supervision still retrying they have not
+        // started; the Pending caveat above says so.)
+        let mut startup_note = None;
+        if settled
+            && !self.config.startup_commands.is_empty()
+            && !matches!(mode, ConnectMode::Attach { auto: true, .. })
+        {
+            let finished = tokio::time::timeout(STARTUP_COMMANDS_WAIT, async {
+                loop {
+                    let current = startup.borrow().clone();
+                    if current != crate::heartbeat::StartupCommands::Pending {
+                        return Some(current);
+                    }
+                    if startup.changed().await.is_err() {
+                        // The setup task ended without running them: either
+                        // it never could (no lease on this machine), or an
+                        // explicit stop()/terminate() or a replacement
+                        // aborted it — the generation check below says which.
+                        return None;
+                    }
+                }
+            })
+            .await;
+            same_generation(&mut *self.state.lock().await, machine_id, external_id)?;
+            startup_note = match finished {
+                Ok(Some(crate::heartbeat::StartupCommands::Abandoned(message))) => {
+                    anyhow::bail!(attach_refusal_message(mode, &message));
+                }
+                Ok(Some(crate::heartbeat::StartupCommands::Finished(Some(failure)))) => Some(
+                    format!("startup commands failed (the machine is usable): {failure}"),
+                ),
+                Ok(_) => None,
+                Err(_) => Some(format!(
+                    "startup commands still had not finished after {} minutes; they may still be running",
+                    STARTUP_COMMANDS_WAIT.as_secs() / 60
+                )),
+            };
         }
 
         // Mark Running and persist. The ledger's provisioned event already
@@ -540,6 +626,9 @@ impl RemoteKernelsServer {
         if let Some(note) = conn.startup_note() {
             let _ = write!(summary, "\n- Note: {note}");
         }
+        if let Some(note) = startup_note {
+            let _ = write!(summary, "\n- Note: {note}");
+        }
 
         Ok(summary)
     }
@@ -584,6 +673,12 @@ impl RemoteKernelsServer {
                     .await
                 {
                     Ok(_) => return,
+                    // Whoever removed the machine mid-setup owns its fate:
+                    // no retry, no failed-start cleanup on top.
+                    Err(e) if e.is::<EndedDuringSetup>() => {
+                        tracing::info!(target: super::LOG_TARGET, instance = %machine_id, "Background setup ended: {e}");
+                        return;
+                    }
                     Err(e) if e.is::<crate::runtime::StillProvisioning>() => {
                         // Bounded patience: metered machines bill while
                         // provisioning and have no on-machine watchdog yet
@@ -616,8 +711,18 @@ impl RemoteKernelsServer {
                             .provisioning_overdue(&machine_id, &external_id)
                             .await
                             .is_some();
+                        // Another session took the machine over: retrying
+                        // would acquire its lease back and fence that session.
+                        let fenced = server
+                            .state
+                            .lock()
+                            .await
+                            .instances
+                            .get(&machine_id)
+                            .is_some_and(|instance| Self::fenced_message(instance).is_some());
                         if hard_failures < 3
                             && !overdue
+                            && !fenced
                             && server.machine_exists(&external_id, &runtime_name).await
                         {
                             tracing::warn!(
@@ -774,6 +879,19 @@ impl RemoteKernelsServer {
                 "Failed-start cleanup suppressed: {error}"
             );
             return FailedStartCleanup::Unconfirmed;
+        }
+
+        // An explicit stop() during setup already removed the instance and
+        // recorded the machine as stopped: the user's choice, whichever path
+        // reported the failed setup. The policy below must not delete it.
+        {
+            let state = self.state.lock().await;
+            if !state.instances.contains_key(machine_id)
+                && crate::state::load_instance_record(&state.project_dir, machine_id)
+                    .is_some_and(|r| r.external_id == external_id && r.phase == Phase::Stopped)
+            {
+                return FailedStartCleanup::Stopped;
+            }
         }
 
         // Drop the in-memory instance and capture its record for the policy

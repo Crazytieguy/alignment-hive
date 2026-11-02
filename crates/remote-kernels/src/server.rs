@@ -67,6 +67,9 @@ pub struct RemoteKernelsServer {
     budget_exhausted: Arc<std::sync::atomic::AtomicBool>,
     /// Failure messages from background (wait=false) starts, drained by `status()`.
     start_failures: Arc<Mutex<Vec<String>>>,
+    /// Whether the server-start reconcile of durable records is still
+    /// running in the background (see `spawn_startup_check`).
+    startup_check_running: Arc<std::sync::atomic::AtomicBool>,
     /// Machines with a `finish()` drain in flight (single-flight per machine;
     /// the running drain re-reads the intent, so newer plans are picked up).
     finish_drains: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -122,6 +125,7 @@ impl RemoteKernelsServer {
             budget_source: budget.map(|value| value.source),
             budget_exhausted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             start_failures: Arc::new(Mutex::new(Vec::new())),
+            startup_check_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             finish_drains: Arc::new(Mutex::new(std::collections::HashSet::new())),
             lease_owner,
             instructions,
@@ -325,6 +329,11 @@ impl RemoteKernelsServer {
                 Err(e) if crate::runtime::error_requires_user_action(&e) => Err(
                     McpError::internal_error(format!("Machine start needs attention: {e:#}"), None),
                 ),
+                // A stop()/terminate() during setup already decided the
+                // machine's fate; a failed-start cleanup must not override it.
+                Err(e) if e.is::<provision::EndedDuringSetup>() => {
+                    err_text(format!("Machine start did not complete: {e}"))
+                }
                 Err(e) => {
                     let force_terminate = e.is::<BudgetUnenforceable>();
                     let outcome = self
@@ -795,6 +804,17 @@ impl RemoteKernelsServer {
         {
             let mut failures = self.start_failures.lock().await;
             sections.extend(failures.drain(..));
+        }
+        if self
+            .startup_check_running
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            sections.push(
+                "The server-start check of this project's machine records is still running in \
+                 the background; its findings appear in a later status() call, and this \
+                 session's running machines are reattached after it."
+                    .to_string(),
+            );
         }
 
         let (records, live) = {
@@ -1709,6 +1729,29 @@ impl RemoteKernelsServer {
         if !messages.is_empty() {
             self.start_failures.lock().await.extend(messages);
         }
+    }
+
+    /// The server-start work, as one background task: reconcile every
+    /// durable record (a provider round trip each, and possibly a wait on a
+    /// machine's oplock), queue the findings for `status()`, then reattach
+    /// this session's running machines — reconcile first, so reattach sees
+    /// the repaired records. Runs in the background so the MCP handshake is
+    /// never stuck behind it (Claude Code gives up connecting after 30 s).
+    pub fn spawn_startup_check(&self) -> tokio::task::JoinHandle<()> {
+        let server = self.clone();
+        self.startup_check_running
+            .store(true, std::sync::atomic::Ordering::Release);
+        tokio::spawn(async move {
+            let messages = server.reconcile().await;
+            for message in &messages {
+                tracing::info!(target: LOG_TARGET, "{message}");
+            }
+            server.queue_alerts(messages).await;
+            server
+                .startup_check_running
+                .store(false, std::sync::atomic::Ordering::Release);
+            server.auto_reattach().await;
+        })
     }
 }
 

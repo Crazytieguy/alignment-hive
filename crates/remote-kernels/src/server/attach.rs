@@ -257,7 +257,11 @@ impl RemoteKernelsServer {
             .finalize_start(
                 &machine_id,
                 &record.external_id,
-                ConnectMode::Attach { force, resumed },
+                ConnectMode::Attach {
+                    force,
+                    resumed,
+                    auto,
+                },
                 Some(operation_lock),
             )
             .await
@@ -285,12 +289,21 @@ impl RemoteKernelsServer {
                     &machine_id,
                     &record.external_id,
                     &record.runtime,
-                    ConnectMode::Attach { force, resumed },
+                    ConnectMode::Attach {
+                        force,
+                        resumed,
+                        auto,
+                    },
                 );
                 Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "Machine {machine_id} is still provisioning; attachment continues in the background. Poll status()."
                 ))]))
             }
+            // A stop()/terminate() during setup removed the instance (or a
+            // newer attach replaced it): nothing here may touch it now.
+            Err(error) if error.is::<super::provision::EndedDuringSetup>() => err_text(format!(
+                "Attach of machine {machine_id} did not complete: {error}"
+            )),
             Err(error) => {
                 {
                     let mut state = self.state.lock().await;
@@ -397,7 +410,7 @@ impl RemoteKernelsServer {
         tokio::spawn(async move { server.auto_reattach().await });
     }
 
-    async fn auto_reattach(&self) {
+    pub(super) async fn auto_reattach(&self) {
         let project_dir = self.state.lock().await.project_dir.clone();
         let mut mine = Vec::new();
         {

@@ -37,6 +37,27 @@ async fn record_of(server: &RemoteKernelsServer) -> Option<InstanceRecord> {
     crate::state::load_instance_record(&state.project_dir, "main")
 }
 
+/// `stop()` during setup leaves no instance and a Stopped record. The setup that
+/// then fails must not apply its terminate policy to the stopped machine.
+#[tokio::test]
+async fn failed_start_cleanup_leaves_a_machine_stopped_during_setup_alone() {
+    let (server, _dir) = server_with_instance(Cleanup::Terminate).await;
+    {
+        let mut state = server.state.lock().await;
+        let mut inst = state.instances.remove("main").unwrap();
+        inst.phase = Phase::Stopped;
+        state.save_record("main", &inst.record()).unwrap();
+    }
+    for force_terminate in [false, true] {
+        let outcome = server
+            .cleanup_failed_start("main", "fake-test-id", "fake", force_terminate)
+            .await;
+        assert!(matches!(outcome, FailedStartCleanup::Stopped));
+        let record = record_of(&server).await.expect("record must be kept");
+        assert_eq!(record.phase, Phase::Stopped);
+    }
+}
+
 #[tokio::test]
 async fn failed_start_terminate_policy_clears_record() {
     let (server, _dir) = server_with_instance(Cleanup::Terminate).await;

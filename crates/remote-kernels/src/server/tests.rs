@@ -632,6 +632,7 @@ fn resumed_attach_refusal_warns_that_machine_is_billing() {
         super::provision::ConnectMode::Attach {
             force: false,
             resumed: true,
+            auto: false,
         },
         "another owner has a fresh lease",
     );

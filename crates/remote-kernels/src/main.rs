@@ -104,21 +104,20 @@ async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let server = server::RemoteKernelsServer::new_with_budget(config, app_state, budget);
     let shutdown_server = server.clone();
 
-    let reconcile_messages = server.reconcile().await;
-    for message in &reconcile_messages {
-        tracing::info!("{message}");
-    }
-    // Startup reconcile findings surface via status(), and this session's
-    // running machines are picked back up automatically in the background.
-    server.queue_alerts(reconcile_messages).await;
-    server.spawn_auto_reattach();
-
     tracing::info!("Starting remote-kernels MCP server");
 
     let running = server
+        .clone()
         .serve(rmcp::transport::stdio())
         .await
         .inspect_err(|e| tracing::error!("Failed to start MCP server: {e}"))?;
+
+    // Only after the handshake: the startup reconcile makes a provider round
+    // trip per durable record and can wait on a machine's oplock, and Claude
+    // Code gives up on a server that hasn't answered within 30 s. Its
+    // findings surface via status(); this session's running machines are
+    // reattached once it is done.
+    server.spawn_startup_check();
 
     running.waiting().await?;
 

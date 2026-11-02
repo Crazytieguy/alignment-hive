@@ -1038,6 +1038,41 @@ async fn auto_reattach_restores_same_sessions_running_machine() {
     terminate(&second, Some(&machine_id)).await;
 }
 
+/// Reattach handles a session's machines one at a time, so it must not wait
+/// out one machine's startup commands while the next one's lease goes stale.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn auto_reattach_does_not_wait_for_startup_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = server_in_session(dir.path(), None, "auto-session");
+    let (machine_id, _) = start_machine(&first, Some("auto")).await;
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let mut state = AppState::new(dir.path().to_path_buf());
+    state.session_owner = "auto-session".to_string();
+    let second = RemoteKernelsServer::new(config_with_startup(&["sleep 120"]), state, None);
+    second.spawn_auto_reattach();
+    let mut reattached = false;
+    for _ in 0..60 {
+        if second
+            .shared_state()
+            .lock()
+            .await
+            .instances
+            .get(&machine_id)
+            .is_some_and(|inst| inst.phase == remote_kernels::state::Phase::Running)
+        {
+            reattached = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(reattached, "reattach waited on the startup commands");
+
+    terminate(&second, Some(&machine_id)).await;
+}
+
 /// finish(): queue downloads + stop while a cell is still running; the drain
 /// waits for idle, collects the file into the project, stops the machine,
 /// and clears the queued intent.
@@ -2421,6 +2456,215 @@ async fn cancelled_calls_leave_results_collectable() {
             .unwrap();
         assert_collected(result, label);
     }
+
+    client.cancel().await.unwrap();
+    terminate(&server, Some(&machine_id)).await;
+}
+
+fn config_with_startup(commands: &[&str]) -> Config {
+    let commands = commands
+        .iter()
+        .map(|command| format!("{command:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    toml::from_str(&format!(
+        "default-runtime = \"fake\"\nstartup-commands = [{commands}]"
+    ))
+    .unwrap()
+}
+
+/// Issue #99: startup commands used to run inside the 15 s budget gate, so a
+/// package install (or a slow host) got a budgeted machine terminated. Now
+/// the watchdog is installed first and start() waits for the commands
+/// outside the gate.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn slow_startup_commands_do_not_trip_the_budget_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("startup-ran");
+    let config = config_with_startup(&["sleep 25", &format!("touch {}", ran.display())]);
+    let server = server_with(
+        dir.path(),
+        config,
+        Some(remote_kernels::config::EffectiveBudget {
+            cap: 5.0,
+            source: remote_kernels::config::BudgetSource::Environment,
+        }),
+    );
+    let started = std::time::Instant::now();
+    let (machine_id, text) = start_machine(&server, Some("slow-startup")).await;
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(25),
+        "start() must wait for the startup commands: {text}"
+    );
+    assert!(
+        ran.exists(),
+        "startup commands did not finish before start() returned"
+    );
+    assert!(!text.contains("startup commands"), "{text}");
+    terminate(&server, Some(&machine_id)).await;
+}
+
+/// Issue #88: an explicit stop() during setup used to queue behind the
+/// machine oplock for as long as the startup commands ran (up to 5 min).
+/// It now returns promptly, and the interrupted start() leaves the stopped
+/// machine alone instead of "cleaning up" (terminating) it.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn stop_during_startup_commands_returns_promptly() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with(dir.path(), config_with_startup(&["sleep 120"]), None);
+    let starting = {
+        let server = server.clone();
+        tokio::spawn(async move {
+            server
+                .start(Parameters(remote_kernels::server::StartParams {
+                    label: Some("long-setup".to_string()),
+                    runtime: None,
+                    gpu_type: None,
+                    image: None,
+                    vast_offers: None,
+                    priority: None,
+                    wait: Some(true),
+                }))
+                .await
+        })
+    };
+    // Wait until supervision is established (the lease is held), then give
+    // the watchdog install a moment so setup is inside the commands.
+    let mut machine_id = None;
+    for _ in 0..240 {
+        let state = server.shared_state();
+        let state = state.lock().await;
+        if let Some((id, inst)) = state.instances.iter().next()
+            && inst.lease_generation.is_some()
+        {
+            machine_id = Some(id.clone());
+            break;
+        }
+        drop(state);
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let machine_id = machine_id.expect("supervision was never established");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(
+        !starting.is_finished(),
+        "start() returned before its startup commands finished"
+    );
+
+    let stopping = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        server.stop(Parameters(remote_kernels::server::StopParams {
+            instance: Some(machine_id.clone()),
+            skip_pre_stop_command: None,
+        })),
+    )
+    .await
+    .expect("stop() was stuck behind the setup")
+    .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+    assert!(
+        stopping.elapsed() < std::time::Duration::from_secs(20),
+        "stop() took {:?}",
+        stopping.elapsed()
+    );
+
+    let started = tokio::time::timeout(std::time::Duration::from_secs(10), starting)
+        .await
+        .expect("start() did not end after stop()")
+        .unwrap()
+        .expect("start() protocol error");
+    let text = text_of(&started);
+    assert!(is_error(&started), "{text}");
+    assert!(text.contains("did not complete"), "{text}");
+    // The interrupted start must not have terminated the stopped machine.
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+        .expect("the stopped machine's record must survive the interrupted start");
+    assert_eq!(record.phase, remote_kernels::state::Phase::Stopped);
+    terminate(&server, Some(&machine_id)).await;
+}
+
+/// Issue #100: the server-start reconcile used to run before the MCP
+/// handshake, so one slow record made Claude Code's 30 s connect time out.
+/// It now runs in the background after serving begins: tool calls answer
+/// while it is held up, and its finding reaches status() once it is done.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn startup_check_runs_after_the_handshake() {
+    use rmcp::ServiceExt;
+    use rmcp::model::CallToolRequestParams;
+
+    let dir = tempfile::tempdir().unwrap();
+    let first = server_in_session(dir.path(), None, "startup-check-first");
+    let (machine_id, _) = start_machine(&first, Some("held")).await;
+    {
+        let state = first.shared_state();
+        let mut state = state.lock().await;
+        let mut inst = state.instances.remove(&machine_id).unwrap();
+        inst.stop_heartbeat();
+    }
+    drop(first);
+    // A record whose reconcile needs the machine oplock (an interrupted
+    // self-cleanup read on a running machine), and another operation
+    // holding that lock.
+    let mut lifecycle = remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id);
+    lifecycle.finalize_phase = Some(remote_kernels::state::FinalizePhase::RetrievingOutcome);
+    remote_kernels::state::save_lifecycle_record(dir.path(), &machine_id, &lifecycle).unwrap();
+    let held = remote_kernels::state::acquire_operation_lock(dir.path(), &machine_id)
+        .await
+        .unwrap();
+
+    let server = server_in_session(dir.path(), None, "startup-check-second");
+    let (server_io, client_io) = tokio::io::duplex(1 << 20);
+    let (check_tx, check_rx) = tokio::sync::oneshot::channel();
+    let served = server.clone();
+    // Exactly main.rs's order: serve, then start the background check.
+    tokio::spawn(async move {
+        if let Ok(running) = served.clone().serve(server_io).await {
+            let _ = check_tx.send(served.spawn_startup_check());
+            let _ = running.waiting().await;
+        }
+    });
+    let client = tokio::time::timeout(std::time::Duration::from_secs(5), ().serve(client_io))
+        .await
+        .expect("the handshake waited on the startup check")
+        .unwrap();
+    let check = check_rx.await.unwrap();
+
+    // A status() scoped away from the held machine answers right away and
+    // says the check is still running.
+    let status = |instance: Option<&str>| {
+        let mut arguments = serde_json::Map::new();
+        if let Some(instance) = instance {
+            arguments.insert("instance".to_string(), instance.into());
+        }
+        client
+            .peer()
+            .call_tool(CallToolRequestParams::new("status").with_arguments(arguments))
+    };
+    let early = tokio::time::timeout(std::time::Duration::from_secs(5), status(Some("elsewhere")))
+        .await
+        .expect("status() waited on the startup check")
+        .unwrap();
+    let early = text_of(&early);
+    assert!(early.contains("still running in the background"), "{early}");
+    assert!(!check.is_finished());
+
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(60), check)
+        .await
+        .expect("startup check never finished")
+        .unwrap();
+    let later = text_of(&status(None).await.unwrap());
+    assert!(
+        later.contains("interrupted attempt to read its self-cleanup result"),
+        "{later}"
+    );
+    assert!(
+        !later.contains("still running in the background"),
+        "{later}"
+    );
 
     client.cancel().await.unwrap();
     terminate(&server, Some(&machine_id)).await;

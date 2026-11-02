@@ -17,30 +17,72 @@ pub fn is_host_key_mismatch(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains("SSH host key mismatch")
 }
 
-/// Shared latest-setup-error slot. Supervision setup can sit inside a
-/// minutes-long reachability retry loop while the server's 15-second
-/// budget-enforceability gate expires; without this, the gate's error is a
-/// generic "watchdog could not be confirmed" and the actual cause (e.g.
-/// `Permission denied (publickey)` from an unusable key file) exists only as
-/// a debug log. Each failed attempt records its full error chain here BEFORE
-/// sleeping, so the gate can name the real problem.
+/// Shared supervision-setup progress: the latest setup error and how long
+/// each setup step took. Supervision setup can sit inside a minutes-long
+/// reachability retry loop (or a slow host can make every step slow) while
+/// the server's 15-second budget-enforceability gate expires; without this,
+/// the gate's error is a generic "watchdog could not be confirmed" and the
+/// actual cause (e.g. `Permission denied (publickey)` from an unusable key
+/// file, or one step eating the whole window) exists only in a log the user
+/// usually cannot see afterwards. Each failed attempt records its full error
+/// chain here BEFORE sleeping, and each step its duration, so the gate can
+/// name the real problem.
 #[derive(Debug, Clone, Default)]
-pub struct SetupDiagnostics(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+pub struct SetupDiagnostics(std::sync::Arc<std::sync::Mutex<SetupProgress>>);
+
+#[derive(Debug, Default)]
+struct SetupProgress {
+    latest_error: Option<String>,
+    finished: Vec<(&'static str, Duration)>,
+    current: Option<(&'static str, std::time::Instant)>,
+}
 
 impl SetupDiagnostics {
-    pub fn record(&self, error: &anyhow::Error) {
-        let mut slot = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = Some(format!("{error:#}"));
-    }
-
-    pub fn latest(&self) -> Option<String> {
+    fn progress(&self) -> std::sync::MutexGuard<'_, SetupProgress> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+    }
+
+    pub fn record(&self, error: &anyhow::Error) {
+        self.progress().latest_error = Some(format!("{error:#}"));
+    }
+
+    pub fn latest(&self) -> Option<String> {
+        self.progress().latest_error.clone()
+    }
+
+    /// Mark the start of a setup step (closing any step still open).
+    pub fn begin_step(&self, step: &'static str) {
+        self.end_step();
+        self.progress().current = Some((step, std::time::Instant::now()));
+    }
+
+    /// Close the open step, if any, returning its name and duration.
+    pub fn end_step(&self) -> Option<(&'static str, Duration)> {
+        let mut progress = self.progress();
+        let (step, started) = progress.current.take()?;
+        let elapsed = started.elapsed();
+        progress.finished.push((step, elapsed));
+        Some((step, elapsed))
+    }
+
+    /// The steps so far, e.g. `SSH reachability 0.4s, lease acquire 1.2s,
+    /// watchdog install 13.1s (still running)`; `None` before any step.
+    pub fn timeline(&self) -> Option<String> {
+        let progress = self.progress();
+        let mut parts = progress
+            .finished
+            .iter()
+            .map(|(step, elapsed)| format!("{step} {:.1}s", elapsed.as_secs_f64()))
+            .collect::<Vec<_>>();
+        if let Some((step, started)) = progress.current {
+            parts.push(format!(
+                "{step} {:.1}s (still running)",
+                started.elapsed().as_secs_f64()
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
     }
 }
 
@@ -422,6 +464,28 @@ pub fn jupyter_launch_script(workdir: &str, jupyter_command: &str, port: u16) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The budget gate's message names every finished step and the one it
+    /// is stuck in.
+    #[test]
+    fn setup_timeline_lists_finished_and_running_steps() {
+        let diagnostics = SetupDiagnostics::default();
+        assert_eq!(diagnostics.timeline(), None);
+        diagnostics.begin_step("lease acquire");
+        diagnostics.begin_step("watchdog install");
+        let timeline = diagnostics.timeline().unwrap();
+        assert!(
+            timeline.starts_with("lease acquire 0.0s, watchdog install "),
+            "{timeline}"
+        );
+        assert!(timeline.ends_with("s (still running)"), "{timeline}");
+        assert_eq!(
+            diagnostics.end_step().map(|(step, _)| step),
+            Some("watchdog install")
+        );
+        assert!(!diagnostics.timeline().unwrap().contains("still running"));
+        assert_eq!(diagnostics.end_step(), None);
+    }
 
     #[test]
     fn ssh_opts_pin_host_keys_tofu() {

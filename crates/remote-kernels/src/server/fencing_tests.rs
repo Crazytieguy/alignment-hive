@@ -494,7 +494,11 @@ async fn adoption_appends_owner_and_installs_adopters_deadline() {
             finalize_command: None,
             storage_rate_per_hr: None,
         };
-        let (heartbeat, mut supervision, _diagnostics) = crate::heartbeat::start(
+        let crate::heartbeat::Setup {
+            heartbeat,
+            mut supervision,
+            ..
+        } = crate::heartbeat::start(
             Arc::clone(&connection),
             machine_id.clone(),
             external_id.to_string(),
@@ -707,7 +711,11 @@ async fn no_flock_supervision_degrades_without_cleanup() {
     let operation_lock = RemoteKernelsServer::acquire_operation_lock(dir.path(), &machine_id)
         .await
         .unwrap();
-    let (heartbeat, mut status, _diagnostics) = crate::heartbeat::start(
+    let crate::heartbeat::Setup {
+        heartbeat,
+        supervision: mut status,
+        ..
+    } = crate::heartbeat::start(
         connection,
         machine_id.clone(),
         external_id.to_string(),
@@ -780,7 +788,7 @@ mod transport_outage {
     use crate::state::FenceReason;
 
     struct Leased {
-        _dir: tempfile::TempDir,
+        dir: tempfile::TempDir,
         machine_dir: tempfile::TempDir,
         server: RemoteKernelsServer,
         conn: Arc<AnyConnection>,
@@ -867,7 +875,7 @@ mod transport_outage {
             state.instances.insert(machine_id.clone(), inst);
         }
         Leased {
-            _dir: dir,
+            dir,
             machine_dir,
             server,
             conn,
@@ -1040,12 +1048,57 @@ mod transport_outage {
             &["sleep 3".to_string()],
             leased.generation,
             &leased.server.lease_owner,
+            leased.dir.path(),
+            None,
             std::time::Duration::from_millis(500),
         )
         .await
         .unwrap();
         let after = crate::machine_scripts::read(&leased.conn).await.unwrap().ts;
         assert!(after > before, "lease ts {before} never advanced ({after})");
+    }
+
+    /// Another machine in the session can raise the burn rate during a long
+    /// setup, so the deadline installed before the commands must not stand.
+    #[tokio::test]
+    async fn startup_commands_keep_the_budget_deadline_current() {
+        let leased = leased().await;
+        {
+            let state = leased.server.state.lock().await;
+            let guard = crate::ledger::EpochGuard::acquire(leased.dir.path()).unwrap();
+            let mut event = crate::ledger::event(
+                crate::ledger::EventKind::Provisioned,
+                2.0,
+                0.0,
+                0,
+                None,
+                None,
+            );
+            event.owner = Some(state.session_owner.clone());
+            guard
+                .append(&leased.machine_id, "provisioned", event)
+                .unwrap();
+        }
+        let feed = crate::heartbeat::BudgetFeed {
+            state: Arc::clone(&leased.server.state),
+            budget: 1.0,
+        };
+        assert_eq!(leased.fake().last_budget_deadline(), u64::MAX);
+        crate::heartbeat::run_startup_commands(
+            &leased.conn,
+            &leased.machine_id,
+            &["sleep 2".to_string()],
+            leased.generation,
+            &leased.server.lease_owner,
+            leased.dir.path(),
+            Some(&feed),
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+        // $1 of budget at $2/hr is half an hour.
+        let deadline = leased.fake().last_budget_deadline();
+        assert!((1700..=1800).contains(&deadline), "{deadline}s");
     }
 
     #[tokio::test]
@@ -1065,6 +1118,8 @@ mod transport_outage {
             &["sleep 20".to_string()],
             leased.generation,
             &leased.server.lease_owner,
+            leased.dir.path(),
+            None,
             std::time::Duration::from_millis(500),
         )
         .await;

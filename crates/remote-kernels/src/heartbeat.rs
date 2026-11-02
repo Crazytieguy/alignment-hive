@@ -5,9 +5,11 @@
 //! through the instance's [`Connection`]:
 //! 1. Wait for the command transport (SSH / exec) to become reachable
 //! 2. Acquire fenced lease authority (or mark supervision unavailable)
-//! 3. Run startup commands (user commands from config)
-//! 4. Install the watchdog: self-cleanup on stale heartbeat
-//!    (`watchdog-stale-secs`, default 5 min) or on a passed budget deadline
+//! 3. Install the watchdog: self-cleanup on stale heartbeat
+//!    (`watchdog-stale-secs`, default 5 min) or on a passed budget deadline,
+//!    and report supervision — the server's 15 s budget gate waits on this
+//! 4. Run startup commands (user commands from config), without the machine
+//!    oplock, keeping the lease fresh meanwhile
 //! 5. Every 60s: signal liveness, refresh the budget deadline from the shared
 //!    spend model (aggregate burn rate across all metered instances THIS
 //!    session owns, so its concurrent machines can't collectively exceed its
@@ -97,6 +99,29 @@ impl BudgetFeed {
     }
 }
 
+/// Progress of the configured startup commands, which run after supervision
+/// is established (never inside the budget gate's window).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupCommands {
+    /// Not finished yet — or never started, because supervision setup is
+    /// still retrying or ended without an active lease.
+    Pending,
+    /// Done (or none configured). `Some` carries the failure: a failed
+    /// command is not fatal, the machine is still usable.
+    Finished(Option<String>),
+    /// This session stopped waiting because it lost control of the machine.
+    Abandoned(String),
+}
+
+/// What [`start`] hands back: the task handle plus the watch points the
+/// caller gates on.
+pub struct Setup {
+    pub heartbeat: HeartbeatState,
+    pub supervision: watch::Receiver<SupervisionStatus>,
+    pub startup: watch::Receiver<StartupCommands>,
+    pub diagnostics: crate::ssh_exec::SetupDiagnostics,
+}
+
 /// Start the heartbeat pipeline for one instance. Returns immediately.
 #[allow(clippy::too_many_arguments)] // lease, watchdog, connection, and spend contexts are independent
 pub fn start(
@@ -110,12 +135,9 @@ pub fn start(
     budget: Option<f64>,
     startup_commands: Vec<String>,
     operation_lock: std::fs::File,
-) -> (
-    HeartbeatState,
-    watch::Receiver<SupervisionStatus>,
-    crate::ssh_exec::SetupDiagnostics,
-) {
+) -> Setup {
     let (status_tx, status_rx) = watch::channel(SupervisionStatus::Pending);
+    let (startup_tx, startup_rx) = watch::channel(StartupCommands::Pending);
     let diagnostics = crate::ssh_exec::SetupDiagnostics::default();
     let task_diagnostics = diagnostics.clone();
     let handle = tokio::spawn(async move {
@@ -131,6 +153,7 @@ pub fn start(
             &startup_commands,
             operation_lock,
             &status_tx,
+            &startup_tx,
             &task_diagnostics,
         )
         .await
@@ -139,13 +162,28 @@ pub fn start(
         }
     });
 
-    (
-        HeartbeatState {
+    Setup {
+        heartbeat: HeartbeatState {
             task_handle: handle,
         },
-        status_rx,
+        supervision: status_rx,
+        startup: startup_rx,
         diagnostics,
-    )
+    }
+}
+
+/// Close the open setup step and log its duration at info level: the
+/// per-step timings are what tells a slow host from a stuck step.
+fn step_done(diagnostics: &crate::ssh_exec::SetupDiagnostics, machine_id: &str) {
+    if let Some((step, elapsed)) = diagnostics.end_step() {
+        tracing::info!(
+            instance = machine_id,
+            step,
+            elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            "Supervision setup step finished in {:.1}s: {step}",
+            elapsed.as_secs_f64()
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -161,6 +199,7 @@ async fn establish_and_run(
     startup_commands: &[String],
     operation_lock: std::fs::File,
     status: &watch::Sender<SupervisionStatus>,
+    startup: &watch::Sender<StartupCommands>,
     diagnostics: &crate::ssh_exec::SetupDiagnostics,
 ) -> anyhow::Result<()> {
     if !conn.supports_lease() {
@@ -175,11 +214,15 @@ async fn establish_and_run(
     // oplock across it starves explicit stop()/terminate() of the one lock
     // they need to END a billing machine (observed live on RunPod). The lock
     // is dropped here and re-acquired only around the lease-acquire critical
-    // section, then held through watchdog install.
+    // section, then held through watchdog install — and released again
+    // before the startup commands, which can run for minutes.
     drop(operation_lock);
     let project_dir = state.lock().await.project_dir.clone();
-    let (lease, mut operation_lock) = loop {
-        match conn.wait_reachable(diagnostics).await {
+    let (lease, operation_lock) = loop {
+        diagnostics.begin_step("SSH reachability");
+        let reachable = conn.wait_reachable(diagnostics).await;
+        step_done(diagnostics, machine_id);
+        match reachable {
             Ok(()) => {}
             Err(error) if error.to_string().contains("no public IP") => {
                 mark_unsupervisable(state, machine_id, external_id, NO_SSH_CAVEAT).await;
@@ -205,7 +248,10 @@ async fn establish_and_run(
             }
         }
 
-        let lock = match crate::state::acquire_operation_lock(&project_dir, machine_id).await {
+        diagnostics.begin_step("operation lock");
+        let lock = crate::state::acquire_operation_lock(&project_dir, machine_id).await;
+        step_done(diagnostics, machine_id);
+        let lock = match lock {
             Ok(lock) => lock,
             Err(error) => {
                 mark_fenced(
@@ -222,7 +268,10 @@ async fn establish_and_run(
                 return Ok(());
             }
         };
-        match acquire_lease(conn, acquire_mode, lease_owner).await {
+        diagnostics.begin_step("lease acquire");
+        let acquired = acquire_lease(conn, acquire_mode, lease_owner).await;
+        step_done(diagnostics, machine_id);
+        match acquired {
             Ok(lease) => break (lease, lock),
             Err(EstablishError::Retry(error)) => {
                 diagnostics.record(&anyhow::anyhow!("{error:#}"));
@@ -277,77 +326,13 @@ async fn establish_and_run(
             }
         }
     }
-    // All setup writes happen only after acquiring authority and while the
-    // local operation lock prevents another project server from rotating it.
-    if let Err((reason, error)) = run_startup_commands(
-        conn,
-        machine_id,
-        startup_commands,
-        lease_generation,
-        lease_owner,
-        Duration::from_mins(1),
-    )
-    .await
-    {
-        mark_fenced(state, machine_id, external_id, reason).await;
-        let _ = status.send(SupervisionStatus::Refused(error.to_string()));
-        tracing::warn!(
-            instance = machine_id,
-            "Supervision setup stopped during startup commands: {error}"
-        );
-        return Ok(());
-    }
     // The watchdog measures staleness from the machine-side lease timestamp,
-    // so it must never be (re)armed against a lease that a long setup already
-    // aged: prove freshness right before the install. Transport retries drop
-    // the operation lock, exactly like the establish loop — holding it across
-    // a long outage would starve an explicit stop()/terminate().
-    let last_refresh_ok = loop {
-        match crate::machine_scripts::refresh(conn, lease_generation, lease_owner).await {
-            Ok(()) => break std::time::Instant::now(),
-            Err(error) => match classify_refresh_failure(&error) {
-                LeaseAuthority::Lost(reason) => {
-                    mark_fenced(state, machine_id, external_id, reason).await;
-                    let _ = status.send(SupervisionStatus::Refused(error.to_string()));
-                    tracing::warn!(
-                        instance = machine_id,
-                        "Supervision setup stopped: lease could not be confirmed: {error}"
-                    );
-                    return Ok(());
-                }
-                LeaseAuthority::Unconfirmed => {
-                    drop(operation_lock);
-                    tracing::warn!(
-                        instance = machine_id,
-                        "lease refresh failed transiently before watchdog install — retrying in 60s: {error}"
-                    );
-                    tokio::time::sleep(Duration::from_mins(1)).await;
-                    operation_lock = match crate::state::acquire_operation_lock(
-                        &project_dir,
-                        machine_id,
-                    )
-                    .await
-                    {
-                        Ok(lock) => lock,
-                        Err(error) => {
-                            mark_fenced(
-                                state,
-                                machine_id,
-                                external_id,
-                                FenceReason::AuthorityUnknown,
-                            )
-                            .await;
-                            tracing::warn!(
-                                instance = machine_id,
-                                "Supervision setup stopped: operation lock unavailable: {error}"
-                            );
-                            return Ok(());
-                        }
-                    };
-                }
-            },
-        }
-    };
+    // so it must never be (re)armed against an aged lease. The acquire just
+    // wrote that timestamp and nothing slow runs between it and the install
+    // (startup commands run AFTER supervision is up, see below), so the
+    // acquire itself is the freshness proof — no extra round trip inside the
+    // budget gate's window.
+    let last_refresh_ok = std::time::Instant::now();
 
     let budget = budget.map(|budget| BudgetFeed {
         state: Arc::clone(state),
@@ -359,6 +344,10 @@ async fn establish_and_run(
     };
     watchdog_policy.initial_budget_secs = initial_budget_secs;
     let mut watchdog_installed = false;
+    // Set when the machine turns out unable to supervise itself. Setup still
+    // runs the startup commands then (the machine stays usable, and they ran
+    // before these steps until the order was flipped), but no heartbeat loop.
+    let mut unsupervisable = None;
     if watchdog_policy.cleanup == Cleanup::Disabled {
         tracing::info!(instance = machine_id, "Cleanup disabled, skipping watchdog");
     } else if !conn.supports_watchdog() {
@@ -366,52 +355,103 @@ async fn establish_and_run(
             instance = machine_id,
             "Runtime supports lease fencing but not a detached watchdog"
         );
-    } else if let Err(e) = reconcile_finish_marker(conn, &project_dir, machine_id).await {
-        // The marker is only ever consumed by the watchdog's finalizer, so
-        // refusing to install one is what makes a cancelled plan durable:
-        // either the stale marker is gone, or nothing on the machine can act
-        // on it.
-        tracing::warn!(
-            instance = machine_id,
-            "Stale finish marker not cleared: {e:#}"
-        );
-        let caveat = format!(
-            "a cancelled finish() plan could not be cleared from the machine ({e:#}), so the \
-             machine-side auto-cleanup was not installed{NO_AUTO_SHUTDOWN_TAIL}"
-        );
-        mark_unsupervisable(state, machine_id, external_id, &caveat).await;
-        let _ = status.send(SupervisionStatus::Unsupervisable(caveat));
-        return Ok(());
-    } else if let Err(e) = conn.install_watchdog(watchdog_policy.clone()).await {
-        // A failed install means NO machine-side cleanup or budget
-        // enforcement exists — reporting Active here would bypass the
-        // BudgetUnenforceable gate and silently leave a budgeted machine
-        // able to bill unbounded after a disconnect.
-        tracing::warn!(instance = machine_id, "Failed to install watchdog: {e}");
-        let caveat = format!(
-            "installing the machine-side auto-cleanup failed ({e:#}){NO_AUTO_SHUTDOWN_TAIL}"
-        );
-        mark_unsupervisable(state, machine_id, external_id, &caveat).await;
-        let _ = status.send(SupervisionStatus::Unsupervisable(caveat));
-        return Ok(());
     } else {
-        watchdog_installed = true;
+        diagnostics.begin_step("finish-marker check");
+        let marker = reconcile_finish_marker(conn, &project_dir, machine_id).await;
+        step_done(diagnostics, machine_id);
+        if let Err(e) = marker {
+            // The marker is only ever consumed by the watchdog's finalizer,
+            // so refusing to install one is what makes a cancelled plan
+            // durable: either the stale marker is gone, or nothing on the
+            // machine can act on it.
+            tracing::warn!(
+                instance = machine_id,
+                "Stale finish marker not cleared: {e:#}"
+            );
+            unsupervisable = Some(format!(
+                "a cancelled finish() plan could not be cleared from the machine ({e:#}), so the \
+                 machine-side auto-cleanup was not installed{NO_AUTO_SHUTDOWN_TAIL}"
+            ));
+        } else {
+            diagnostics.begin_step("watchdog install");
+            let installed = conn.install_watchdog(watchdog_policy.clone()).await;
+            step_done(diagnostics, machine_id);
+            if let Err(e) = installed {
+                // A failed install means NO machine-side cleanup or budget
+                // enforcement exists — reporting Active here would bypass
+                // the BudgetUnenforceable gate and silently leave a budgeted
+                // machine able to bill unbounded after a disconnect.
+                tracing::warn!(instance = machine_id, "Failed to install watchdog: {e}");
+                unsupervisable = Some(format!(
+                    "installing the machine-side auto-cleanup failed ({e:#}){NO_AUTO_SHUTDOWN_TAIL}"
+                ));
+            } else {
+                watchdog_installed = true;
+            }
+        }
     }
-    // A session with no budget must not inherit a previous owner's budget
-    // deadline: a stale deadline would stop the machine mid-work. Only an
-    // ACTIVE lease is cleared — a budget-armed lease keeps its inherited
-    // absolute deadline (takeover must not extend spend).
-    if budget.is_none()
-        && lease.state == "active"
-        && let Err(e) = crate::machine_scripts::clear_budget_deadline(conn).await
-    {
-        tracing::warn!(
-            instance = machine_id,
-            "Could not clear inherited budget deadline: {e:#}"
-        );
+    if let Some(caveat) = &unsupervisable {
+        mark_unsupervisable(state, machine_id, external_id, caveat).await;
+        let _ = status.send(SupervisionStatus::Unsupervisable(caveat.clone()));
+    } else {
+        // A session with no budget must not inherit a previous owner's
+        // budget deadline: a stale deadline would stop the machine mid-work.
+        // Only an ACTIVE lease is cleared — a budget-armed lease keeps its
+        // inherited absolute deadline (takeover must not extend spend).
+        if budget.is_none() && lease.state == "active" {
+            diagnostics.begin_step("budget-deadline clear");
+            let cleared = crate::machine_scripts::clear_budget_deadline(conn).await;
+            step_done(diagnostics, machine_id);
+            if let Err(e) = cleared {
+                tracing::warn!(
+                    instance = machine_id,
+                    "Could not clear inherited budget deadline: {e:#}"
+                );
+            }
+        }
+        let _ = status.send(SupervisionStatus::Active);
     }
-    let _ = status.send(SupervisionStatus::Active);
+    // Supervision is settled, so the startup commands run outside the budget
+    // gate's window and without the machine oplock: they can take minutes,
+    // and an explicit stop()/terminate() must not queue behind them. The
+    // keepalive inside re-takes the lock around each lease refresh.
     drop(operation_lock);
+    if !startup_commands.is_empty() {
+        diagnostics.begin_step("startup commands");
+    }
+    let startup_result = run_startup_commands(
+        conn,
+        machine_id,
+        startup_commands,
+        lease_generation,
+        lease_owner,
+        &project_dir,
+        budget
+            .as_ref()
+            .filter(|_| watchdog_policy.cleanup != Cleanup::Disabled),
+        Duration::from_mins(1),
+    )
+    .await;
+    step_done(diagnostics, machine_id);
+    let last_refresh_ok = match startup_result {
+        Ok(outcome) => {
+            let _ = startup.send(StartupCommands::Finished(outcome.failure));
+            outcome.last_refresh_ok.unwrap_or(last_refresh_ok)
+        }
+        Err((reason, error)) => {
+            mark_fenced(state, machine_id, external_id, reason).await;
+            let _ = status.send(SupervisionStatus::Refused(error.to_string()));
+            let _ = startup.send(StartupCommands::Abandoned(error.to_string()));
+            tracing::warn!(
+                instance = machine_id,
+                "Supervision stopped during startup commands: {error}"
+            );
+            return Ok(());
+        }
+    };
+    if unsupervisable.is_some() {
+        return Ok(());
+    }
 
     tracing::info!(instance = machine_id, "Starting heartbeat loop");
 
@@ -558,13 +598,8 @@ impl Beat<'_> {
         }
         if self.watchdog_policy.cleanup != Cleanup::Disabled
             && let Some(feed) = self.budget
-            && let Some(secs) = feed.remaining_secs().await
-            && let Err(e) = conn.set_budget_deadline(secs).await
         {
-            tracing::warn!(
-                instance = machine_id,
-                "Failed to refresh budget deadline: {e}"
-            );
+            refresh_budget_deadline(conn, machine_id, feed).await;
         }
         std::ops::ControlFlow::Continue(())
     }
@@ -778,26 +813,41 @@ pub fn start_owned_for_test(
     }
 }
 
+/// How the startup commands ended, when this session saw them through.
+#[derive(Debug, Default)]
+pub(crate) struct StartupOutcome {
+    /// The commands' failure, if they failed (not fatal).
+    pub failure: Option<String>,
+    /// When a keepalive last refreshed the lease, if one did.
+    pub last_refresh_ok: Option<std::time::Instant>,
+}
+
 /// Run startup commands on the machine, refreshing the lease every
 /// `keepalive_interval` while they run: commands may take minutes (up to the
 /// 5-minute exec timeout — as long as the default watchdog stale window), and
-/// on attach a watchdog from a previous boot is already measuring staleness,
-/// so an unrefreshed lease could let it arm or finalize mid-setup. Command
-/// failures are logged but not fatal — the machine is still usable. `Err`
-/// means the keepalive got an authoritative authority-loss answer and the
-/// caller must fence. This session stops waiting then, but it cannot cancel
-/// a command already running on the machine: that runs to completion, as it
-/// always has.
+/// the watchdog is already installed and measuring staleness, so an
+/// unrefreshed lease could let it arm or finalize mid-setup. Each keepalive
+/// takes the machine oplock (the commands themselves run without it, so an
+/// explicit `stop()`/`terminate()` is never stuck behind them). Command failures
+/// are logged but not fatal — the machine is still usable. `Err` means the
+/// keepalive got an authoritative authority-loss answer (or the oplock
+/// failed) and the caller must fence. This session stops waiting then, but
+/// it cannot cancel a command already running on the machine: that runs to
+/// completion, as it always has.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_startup_commands(
     conn: &AnyConnection,
     machine_id: &str,
     commands: &[String],
     lease_generation: u64,
     lease_owner: &str,
+    project_dir: &std::path::Path,
+    budget: Option<&BudgetFeed>,
     keepalive_interval: Duration,
-) -> Result<(), (FenceReason, LeaseError)> {
+) -> Result<StartupOutcome, (FenceReason, anyhow::Error)> {
+    let mut outcome = StartupOutcome::default();
     if commands.is_empty() {
-        return Ok(());
+        return Ok(outcome);
     }
     let combined = commands.join(" && ");
     tracing::info!(instance = machine_id, "Running startup commands");
@@ -810,20 +860,40 @@ pub(crate) async fn run_startup_commands(
                     Ok(_) => tracing::info!(instance = machine_id, "Startup commands completed"),
                     Err(e) => {
                         tracing::warn!(instance = machine_id, "Startup commands failed: {e}");
+                        outcome.failure = Some(format!("{e:#}"));
                     }
                 }
-                return Ok(());
+                return Ok(outcome);
             }
             () = tokio::time::sleep(keepalive_interval) => {
+                let _operation_lock =
+                    match crate::state::acquire_operation_lock(project_dir, machine_id).await {
+                        Ok(lock) => lock,
+                        Err(error) => {
+                            tracing::warn!(
+                                instance = machine_id,
+                                "Stopped waiting for startup commands: operation lock unavailable: {error}"
+                            );
+                            return Err((
+                                FenceReason::AuthorityUnknown,
+                                error.context("operation lock unavailable"),
+                            ));
+                        }
+                    };
                 match crate::machine_scripts::refresh(conn, lease_generation, lease_owner).await {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        outcome.last_refresh_ok = Some(std::time::Instant::now());
+                        if let Some(feed) = budget {
+                            refresh_budget_deadline(conn, machine_id, feed).await;
+                        }
+                    }
                     Err(error) => match classify_refresh_failure(&error) {
                         LeaseAuthority::Lost(reason) => {
                             tracing::warn!(
                                 instance = machine_id,
                                 "Stopped waiting for startup commands: lease authority lost: {error}"
                             );
-                            return Err((reason, error));
+                            return Err((reason, anyhow::Error::new(error)));
                         }
                         LeaseAuthority::Unconfirmed => tracing::warn!(
                             instance = machine_id,
@@ -833,6 +903,19 @@ pub(crate) async fn run_startup_commands(
                 }
             }
         }
+    }
+}
+
+/// Point the watchdog's budget deadline at the session's current spend and
+/// burn rate, which another machine in the session can change at any time.
+async fn refresh_budget_deadline(conn: &AnyConnection, machine_id: &str, feed: &BudgetFeed) {
+    if let Some(secs) = feed.remaining_secs().await
+        && let Err(e) = conn.set_budget_deadline(secs).await
+    {
+        tracing::warn!(
+            instance = machine_id,
+            "Failed to refresh budget deadline: {e}"
+        );
     }
 }
 

@@ -117,8 +117,10 @@ impl Config {
 # include anyway:
 # sync-include = ["data/small-dataset/"]
 
-# Commands run over SSH once the machine is reachable, on any runtime (e.g.
-# install packages). Compare [vast] onstart, which runs as root at first boot.
+# Commands run over SSH once the machine is reachable and its auto-cleanup is
+# set up, on any runtime (e.g. install packages); start() and attach() wait
+# for them (up to 5 minutes). Compare [vast] onstart, which runs as root at
+# first boot.
 # startup-commands = ["pip install my-package"]
 
 # Explicit environment variables to set on the machine. When the same
