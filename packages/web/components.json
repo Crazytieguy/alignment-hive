@@ -5,7 +5,7 @@
   "tsx": true,
   "tailwind": {
     "config": "",
-    "css": "src/app.css",
+    "css": "../ui/src/styles/globals.css",
     "baseColor": "slate",
     "cssVariables": true,
     "prefix": ""
@@ -13,10 +13,10 @@
   "iconLibrary": "lucide",
   "aliases": {
     "components": "@/components",
-    "utils": "@/lib/utils",
-    "ui": "@/components/ui",
+    "hooks": "@/hooks",
     "lib": "@/lib",
-    "hooks": "@/hooks"
+    "utils": "@alignment-hive/ui/lib/utils",
+    "ui": "@alignment-hive/ui/components"
   },
   "registries": {}
 }

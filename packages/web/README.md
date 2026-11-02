@@ -55,6 +55,19 @@ From `web/` directory:
 - `bun run dev:frontend` - Just the Vite dev server
 - `bun run dev:backend` - Just the Convex backend
 
+### Adding shadcn/ui components
+
+Shared components live in `packages/ui` (`@alignment-hive/ui`), which the web app and the review app both use. Add them from `packages/web`:
+
+```bash
+cd packages/web
+bunx shadcn@latest add <component>
+```
+
+The CLI follows shadcn's monorepo layout: primitives go to `packages/ui/src/components` (with their dependencies added to `packages/ui/package.json`), and blocks that compose them go to `packages/web/src/components`, importing from `@alignment-hive/ui/components/<name>`. Running it from `packages/ui` also works for primitives. Both `components.json` files must keep the same `style`, `baseColor` and `iconLibrary`.
+
+The CLI doesn't add new components to the `@alignment-hive/ui` barrel (`src/index.ts`), so import them by path, from either app.
+
 ## Architecture
 
 - **Frontend**: TanStack Start + React 19 + Tailwind CSS v4
@@ -82,7 +95,7 @@ This ensures both Convex backend and Vite frontend are built for production.
 
 ## Dark Mode
 
-The app automatically respects system dark mode preference via CSS `prefers-color-scheme` media query. No user toggle needed. All shadcn components include dark mode colors in `src/app.css`.
+The app automatically respects system dark mode preference via CSS `prefers-color-scheme` media query. No user toggle needed. All shadcn components include dark mode colors in `packages/ui/src/styles/globals.css`.
 
 ## TODO: Branding & Polish
 
