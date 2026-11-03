@@ -99,6 +99,22 @@ enum SettingsCommand {
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
+    /// Set up the -ultrafast twins the Codex plan lists the tier for (every
+    /// one on an API key): /model rows, windows and user-level agents (a
+    /// report, unless --apply).
+    Ultrafast {
+        /// Make the change rather than report it.
+        #[arg(long)]
+        apply: bool,
+        /// Read the Codex plan's tiers first, rather than go by the last
+        /// reading.
+        #[arg(long)]
+        check: bool,
+        /// Accepted like every settings operation's; the edits are to the
+        /// user's own files, whichever the project.
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
     /// Bring Claude Code's context windows for the routes up to setup's:
     /// a 1M declaration and a per-model compaction window for each route
     /// (a report, unless --apply).
@@ -299,6 +315,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::TrustCa { remove } => trust_ca(&dirs, remove),
         Command::Settings { command } => {
+            // A config that does not load is reported by the operation.
+            if let SettingsCommand::Ultrafast { check: true, .. } = command
+                && let Ok(config) = Config::load(&config_path)
+                && let Err(error) = model_router::ultrafast::read_now(&config, &dirs).await
+            {
+                eprintln!("could not read the Codex plan's service tiers: {error:#}");
+            }
             let report = settings(&dirs, &config_path, command)?;
             println!("{}", serde_json::to_string(&report)?);
             Ok(())
@@ -306,6 +329,8 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+// One arm per settings operation.
+#[allow(clippy::too_many_lines)]
 fn settings(
     dirs: &Dirs,
     config_path: &std::path::Path,
@@ -351,6 +376,16 @@ fn settings(
                 } else {
                     settings_edit::Migration::Shipped
                 },
+                claude_version,
+                apply.then_some(lock.as_path()),
+            )
+        }
+        SettingsCommand::Ultrafast { apply, .. } => {
+            let home = home.context("HOME is not set")?;
+            settings_edit::ultrafast(
+                &home,
+                dirs,
+                config.as_ref().map_err(String::as_str),
                 claude_version,
                 apply.then_some(lock.as_path()),
             )
@@ -534,6 +569,24 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
         }
         None => (None, None),
     };
+    // Whether the Codex plan has the Ultrafast tier, for the twins' turns
+    // and the session-start offer: only a subscription has a plan to ask
+    // about (every API key has the tier).
+    if config.gpt.auth == model_router::config::GptAuth::Subscription
+        && let Some(auth_dir) = config.auth_dir.clone()
+    {
+        match model_router::ultrafast::Gate::new(auth_dir, dirs) {
+            Ok(gate) => {
+                let gate = std::sync::Arc::new(gate);
+                gate.clone().spawn_first_read();
+                config.ultrafast_gate = Some(gate);
+            }
+            Err(error) => tracing::warn!(
+                "cannot read the Codex plan's service tiers, so -ultrafast turns go out \
+                 unchecked: {error:#}"
+            ),
+        }
+    }
 
     let result = proxy::serve_listener(listener, config, handle, shutdown_signal()).await;
     if let Some(supervisor) = supervisor {

@@ -180,6 +180,37 @@ impl ChildCredentials {
     }
 }
 
+/// The `payload:` entry that gives the `-ultrafast` twins their tier, which
+/// the Claude translator would drop from the body: written into the final
+/// Codex body of a request the router marked
+/// ([`crate::service_tier::ULTRAFAST_RELAY_HEADER`]), before the routing hint
+/// reads it. A request without the header, or for a model without the tier,
+/// matches nothing.
+fn ultrafast_payload_rule() -> String {
+    use crate::service_tier::{ULTRAFAST, ULTRAFAST_RELAY_HEADER};
+    use std::fmt::Write as _;
+    let mut yaml = String::from("  override:\n    - models:\n");
+    for model in crate::config::ULTRAFAST_MODELS {
+        let _ = writeln!(yaml, "        - name: {}", yaml_quote(model));
+        let _ = writeln!(yaml, "          protocol: {}", yaml_quote("codex"));
+        yaml.push_str("          headers:\n");
+        let _ = writeln!(
+            yaml,
+            "            {}: {}",
+            yaml_quote(ULTRAFAST_RELAY_HEADER),
+            yaml_quote(ULTRAFAST)
+        );
+    }
+    yaml.push_str("      params:\n");
+    let _ = writeln!(
+        yaml,
+        "        {}: {}",
+        yaml_quote("service_tier"),
+        yaml_quote(ULTRAFAST)
+    );
+    yaml
+}
+
 /// Renders the `CLIProxyAPI` YAML config the router owns in managed mode.
 /// Mirrors the config validated in live experiments: loopback bind, dedicated
 /// auth dir, single local api key, cloak/control-panel/telemetry disabled.
@@ -293,8 +324,18 @@ routing:
         .flat_map(|(_, _, models)| models.iter().copied())
         .filter_map(|model| Some((model, model.pinned_providers.as_ref()?)))
         .collect();
+    yaml.push_str(&payload_section(&pinned));
+    yaml
+}
+
+/// The `payload:` section: the `-ultrafast` twins' rule, which matches only
+/// a request the router marked, and one rule per pinned model.
+fn payload_section(pinned: &[(&ProviderModel, &Vec<String>)]) -> String {
+    use std::fmt::Write as _;
+    let mut yaml = String::from("\npayload:\n");
+    yaml.push_str(&ultrafast_payload_rule());
     if !pinned.is_empty() {
-        yaml.push_str("\npayload:\n  override-raw:\n");
+        yaml.push_str("  override-raw:\n");
         for (model, providers) in pinned {
             let alias = derived_alias(&model.routing_id);
             let preference = serde_json::json!({ "only": providers }).to_string();
@@ -1353,6 +1394,46 @@ mod tests {
     }
 
     #[test]
+    fn the_ultrafast_rule_is_one_header_matched_rule_beside_the_pins() {
+        let mut provider = test_provider("openrouter", "glm-5.2");
+        provider.models[0].pinned_providers = Some(vec!["decart".to_string()]);
+        for providers in [vec![], vec![provider]] {
+            let credentials = with_providers(providers.clone());
+            let yaml = upstream_config_yaml(1, Path::new("/a"), "s", &credentials);
+            let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+            let rules = parsed["payload"]["override"].as_sequence().unwrap();
+            assert_eq!(rules.len(), 1, "{yaml}");
+            let rule: serde_json::Value = serde_yaml::from_value(rules[0].clone()).unwrap();
+            assert_eq!(
+                rule,
+                serde_json::json!({
+                    "models": [
+                        {
+                            "name": "gpt-6.1-sol",
+                            "protocol": "codex",
+                            "headers": {"x-model-router-service-tier": "ultrafast"},
+                        },
+                        {
+                            "name": "gpt-6-astra",
+                            "protocol": "codex",
+                            "headers": {"x-model-router-service-tier": "ultrafast"},
+                        },
+                    ],
+                    "params": {"service_tier": "ultrafast"},
+                }),
+                "{yaml}"
+            );
+            assert_eq!(
+                parsed["payload"]["override-raw"]
+                    .as_sequence()
+                    .map(Vec::len),
+                (!providers.is_empty()).then_some(1),
+                "{yaml}"
+            );
+        }
+    }
+
+    #[test]
     fn pinned_models_get_one_payload_rule_each_and_unpinned_askers_are_left_out() {
         let mut provider = test_provider("openrouter", "glm-5.2");
         provider.base_url = "https://openrouter.ai/api/v1".to_string();
@@ -1404,7 +1485,7 @@ mod tests {
             &with_providers(vec![provider.clone()]),
         );
         let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        assert!(parsed["payload"].is_null());
+        assert!(parsed["payload"]["override-raw"].is_null());
         let models = parsed["openai-compatibility"][0]["models"]
             .as_sequence()
             .unwrap();

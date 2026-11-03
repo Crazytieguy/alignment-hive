@@ -19,19 +19,21 @@ use crate::client_window::{
     client_context_window, next_compaction, next_session, resolve_compaction,
 };
 use crate::config::{
-    Config, ModelRoute, SHIPPED_GPT_ROUTES, fast_twin_base, fast_twin_id, is_built_in_route,
-    is_retired_gpt_route, shipped_picker_rows,
+    Config, ModelRoute, SHIPPED_GPT_ROUTES, fast_twin_id, is_built_in_route, is_retired_gpt_route,
+    shipped_picker_rows, twin_of,
 };
 use crate::context_check::{self, is_superseded_default, recommended_entry};
 
 mod file;
 mod proxy;
+mod ultrafast;
 
 #[cfg(test)]
 use file::create_temp;
 use file::{Doc, Read, lock, read, same_file, write};
 use proxy::{EXTRA_CA, HELPER, HELPER_GATE, PROXY, is_our_helper, wired_file};
 pub use proxy::{Install, ProxyEnv, Trust, proxy};
+pub use ultrafast::ultrafast;
 
 const BASE_URL: &str = "ANTHROPIC_BASE_URL";
 /// Keeps a base-URL session on Claude Code's first-party behaviour; it goes
@@ -321,32 +323,10 @@ fn add_windows(
             return blocked(adds, format!("the router config does not load: {error}"));
         }
     };
-    // In picker order.
-    let mut windows = Vec::new();
-    for id in &adds {
-        let Some(route) = config
-            .effective_models()
-            .find(|route| route.routing_id == *id)
-        else {
-            return blocked(
-                adds.clone(),
-                format!("the router config does not serve {id}; run `model-router doctor`"),
-            );
-        };
-        if edited
-            .path(&["modelSettings", id, "autoCompactWindow"])
-            .is_none()
-            && let Some(window) = recommended_entry(route)
-        {
-            windows.push((id.clone(), window));
-        }
-    }
-    if set_windows(&mut edited, &windows).is_err() {
-        return blocked(
-            adds,
-            format!("modelSettings in {USER_SETTINGS_DISPLAY} is not an object of objects"),
-        );
-    }
+    let windows = match set_recommended_windows(&mut edited, config, &adds) {
+        Ok(windows) => windows,
+        Err(reason) => return blocked(adds, reason),
+    };
     if let Some(reason) = too_old(version) {
         return blocked(adds, reason);
     }
@@ -360,10 +340,45 @@ fn add_windows(
     }
 }
 
+/// Sets, in `doc`, the `modelSettings` window doctor recommends for each of
+/// `ids` (routes `config` serves) that has none, and returns them in `ids`
+/// order; the error says what needs the person.
+fn set_recommended_windows(
+    doc: &mut Doc,
+    config: &Config,
+    ids: &[String],
+) -> Result<Vec<(String, u64)>, String> {
+    let mut windows = Vec::new();
+    for id in ids {
+        let Some(route) = config.route(id) else {
+            return Err(format!(
+                "the router config does not serve {id}; run `model-router doctor`"
+            ));
+        };
+        if doc
+            .path(&["modelSettings", id, "autoCompactWindow"])
+            .is_none()
+            && let Some(window) = recommended_entry(route)
+        {
+            windows.push((id.clone(), window));
+        }
+    }
+    set_windows(doc, &windows).map_err(|()| {
+        format!("modelSettings in {USER_SETTINGS_DISPLAY} is not an object of objects")
+    })?;
+    Ok(windows)
+}
+
 fn picker_label(id: &str) -> Option<String> {
-    let base = fast_twin_base(id);
-    let (_, label) = shipped_picker_rows().find(|(model, _)| *model == base.unwrap_or(id))?;
-    Some(base.map_or_else(|| label.to_owned(), |_| format!("{label} Fast")))
+    use crate::service_tier::ServiceTier;
+    let twin = twin_of(id);
+    let base = twin.map_or(id, |(base, _)| base);
+    let (_, label) = shipped_picker_rows().find(|(model, _)| *model == base)?;
+    Some(match twin.map(|(_, tier)| tier) {
+        Some(ServiceTier::Priority) => format!("{label} Fast"),
+        Some(ServiceTier::Ultrafast) => format!("{label} Ultrafast"),
+        Some(ServiceTier::Standard) | None => label.to_owned(),
+    })
 }
 
 fn labels(adds: &[String]) -> Vec<String> {
@@ -649,8 +664,7 @@ fn plan_windows(
 /// that has since moved (setup wrote it, the person did not choose it), and
 /// that have a window to move it to.
 fn outdated_entries<'a>(config: &'a Config, compaction: &Compaction) -> Vec<&'a ModelRoute> {
-    config
-        .effective_models()
+    context_check::window_routes(config, compaction)
         .filter(|route| {
             recommended_entry(route).is_some()
                 && compaction
@@ -2046,7 +2060,7 @@ mod tests {
     /// Codex's default window for built-in GPT route `id`, a twin's being
     /// its base's.
     fn codex_default(id: &str) -> u64 {
-        crate::config::codex_default_window(fast_twin_base(id).unwrap_or(id))
+        crate::config::codex_default_window(crate::config::FAST.base(id).unwrap_or(id))
     }
 
     /// `modelSettings` with every built-in GPT route at Codex's default.

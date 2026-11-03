@@ -255,6 +255,7 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
             checks.push(wiring_check(dirs, &config, home, &project));
         }
         checks.push(shipped_agent_routes_check(&config));
+        checks.extend(ultrafast_check(&config, dirs));
         checks.extend(context_window_checks(
             config,
             dirs,
@@ -776,6 +777,44 @@ fn muse_plan_check(muse_routes: &[&ModelRoute], logins: Option<&Walk>) -> Option
 // The routes the plugin's shipped agents name (reviewers included), each with
 // its `-fast` twin.
 use crate::config::{SHIPPED_GPT_ROUTES as SHIPPED_AGENT_ROUTES, fast_twin_id};
+
+/// The `-ultrafast` twins the Codex plan lists the tier for
+/// ([`crate::ultrafast`]), and the ones it refuses: informational only, and
+/// nothing unless the plan lists one, so most people never see it.
+fn ultrafast_check(config: &Config, dirs: &Dirs) -> Option<Check> {
+    use crate::ultrafast::Plan;
+    let served = crate::ultrafast::served(config);
+    let Plan::Read(listed) = crate::ultrafast::plan(config, dirs) else {
+        return None;
+    };
+    let (usable, refused): (Vec<&str>, Vec<&str>) =
+        served.iter().partition(|model| listed.contains(**model));
+    if usable.is_empty() {
+        return None;
+    }
+    let twins = |models: &[&str]| {
+        models
+            .iter()
+            .map(|model| crate::config::ULTRAFAST.id(model))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let refusals = if refused.is_empty() {
+        String::new()
+    } else {
+        format!("; {} turns are refused", twins(&refused))
+    };
+    let detail = format!(
+        "{} (the Codex plan lists the tier){refusals}",
+        twins(&usable)
+    );
+    Some(Check {
+        name: "ultrafast",
+        ok: true,
+        warn: false,
+        detail,
+    })
+}
 
 /// A hand-written `[[models]]` block replaces the built-in routes wholesale,
 /// so a list written before a route existed keeps the shipped agents that
@@ -1499,6 +1538,37 @@ mod tests {
             check.detail
         );
         assert!(!check.detail.contains("lacks"), "{}", check.detail);
+    }
+
+    #[test]
+    fn the_ultrafast_check_shows_only_where_the_plan_lists_the_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        std::fs::write(
+            dirs.auth_dir().join("codex-a.json"),
+            r#"{"type": "codex", "access_token": "t", "account_id": "acct"}"#,
+        )
+        .unwrap();
+        let subscription = config("");
+        assert!(ultrafast_check(&subscription, &dirs).is_none(), "unread");
+        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &[]);
+        assert!(ultrafast_check(&subscription, &dirs).is_none(), "lacks");
+        assert!(ultrafast_check(&config("[gpt]\nauth = \"api-key\"\n"), &dirs).is_none());
+
+        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6.1-sol"]);
+        let check = ultrafast_check(&subscription, &dirs).unwrap();
+        assert!(check.ok && !check.warn, "{check:?}");
+        assert_eq!(
+            check.detail,
+            "gpt-6.1-sol-ultrafast (the Codex plan lists the tier); gpt-6-astra-ultrafast turns \
+             are refused"
+        );
+        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6.1-sol", "gpt-6-astra"]);
+        assert_eq!(
+            ultrafast_check(&subscription, &dirs).unwrap().detail,
+            "gpt-6.1-sol-ultrafast, gpt-6-astra-ultrafast (the Codex plan lists the tier)"
+        );
     }
 
     #[test]

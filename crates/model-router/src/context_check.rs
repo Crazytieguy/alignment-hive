@@ -190,6 +190,21 @@ fn scaling_note(route: &ModelRoute, compaction: &Compaction, declared: u64) -> S
     }
 }
 
+/// The routes whose windows matter: every route an install sets up, and
+/// each opt-in route ([`Config::opt_in_models`]) the settings give a window
+/// of its own, which is how a person adds one.
+pub(crate) fn window_routes<'a>(
+    config: &'a Config,
+    compaction: &Compaction,
+) -> impl Iterator<Item = &'a ModelRoute> {
+    config.effective_models().chain(
+        config
+            .opt_in_models
+            .iter()
+            .filter(|route| compaction.names(&route.routing_id)),
+    )
+}
+
 /// Builds the `context-windows` check, or `None` when the config says
 /// nothing about context windows (nothing to verify, nothing to warn about).
 /// The config's usage scales must already reflect `declared` (see
@@ -215,7 +230,7 @@ pub fn check(config: &Config, declared: EnvSetting, compaction: &Compaction) -> 
     let mut matched = 0_usize;
     let mut notes = Vec::new();
     let mut deprecations = Vec::new();
-    for route in config.effective_models() {
+    for route in window_routes(config, compaction) {
         if let Some(providers) = &route.pinned_providers {
             notes.push(format!(
                 "{} pinned to {} sub-provider(s) from the service's last lookup",
@@ -402,6 +417,25 @@ context-window = {window}
                  202752; set modelSettings.\"kimi-k3\".autoCompactWindow to 202752 in \
                  ~/.claude/settings.json"
             ),
+            "{check:?}"
+        );
+    }
+
+    #[test]
+    fn an_ultrafast_twin_is_checked_once_its_window_is_set() {
+        let setup = setup_settings(None);
+        let check = checked("", EnvSetting::Settings(1_000_000), &setup);
+        assert!(check.ok && !check.detail.contains("ultrafast"), "{check:?}");
+        let adopted = setup.replace(
+            r#"{"modelSettings":{"#,
+            r#"{"modelSettings":{"gpt-6.1-sol-ultrafast":{"autoCompactWindow":1000000},"#,
+        );
+        let check = checked("", EnvSetting::Settings(1_000_000), &adopted);
+        assert!(!check.ok, "{check:?}");
+        assert!(
+            check
+                .detail
+                .contains("gpt-6.1-sol-ultrafast OVERRUN RISK: Claude Code compacts it at 1000000"),
             "{check:?}"
         );
     }

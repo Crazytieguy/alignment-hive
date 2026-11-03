@@ -42,11 +42,7 @@ pub fn decide<'a>(config: &'a Config, body: &[u8]) -> RoutingDecision<'a> {
     // substitute_model by construction.
     let model = find_top_level_value_range(body, "model")
         .and_then(|range| serde_json::from_slice::<String>(&body[range]).ok());
-    let route = model.as_deref().and_then(|model| {
-        config
-            .effective_models()
-            .find(|route| route.routing_id == model)
-    });
+    let route = model.as_deref().and_then(|model| config.route(model));
     RoutingDecision { model, route }
 }
 

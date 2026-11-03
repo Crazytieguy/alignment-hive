@@ -317,15 +317,21 @@ export function codexIdentityLines(files: Array<GoFile>): Array<string> {
 
 /**
  * What turns the router's `service_tier: "priority"` into Codex's priority tier (8.0.34): the Claude translator's
- * tier normalization and its `speed` mapping, and the routing hint the Codex executor derives from the final body.
+ * tier normalization and its `speed` mapping, and the routing hint the Codex executor derives from the final body; and
+ * what writes an `-ultrafast` route's tier into that body.
  */
 export function serviceTierAnchors(files: Array<GoFile>): Record<string, string | undefined> {
   // The OpenAI chat translator has its own normalizeCodexServiceTier; the router's requests take the Claude one.
   const claude = files.filter((f) => f.path.includes('translator/codex/claude/'));
+  const codexRequest = files.filter((f) => basename(f.path) === 'codex_executor_request.go');
   return {
     normalizeCodexServiceTier: funcAnchor(claude, /^func normalizeCodexServiceTier\(/m),
     'speed mapping': linesAnchor(claude, /Get\("speed"\)/, 1, 3),
     applyCodexRoutingHint: funcAnchor(files, /^func applyCodexRoutingHint\(/m),
+    // The `-ultrafast` relay (8.0.44): a payload rule matched on the router's header writes the tier into the final
+    // body, in the Codex executor's cacheHelper, before the routing hint reads it.
+    'payload finalize': linesAnchor(codexRequest, /helps\.FinalizePayload\(/, 2),
+    payloadHeadersMatch: funcAnchor(files, /^func payloadHeadersMatch\(/m),
   };
 }
 
@@ -352,11 +358,17 @@ export function excludedModelsLines(files: Array<GoFile>): Array<string> {
 
 /** Every YAML key model-router writes into the child's config, read from supervisor.rs `upstream_config_yaml`. */
 export function routerYamlKeys(supervisorRs: string): Array<string> {
-  const start = supervisorRs.indexOf('pub fn upstream_config_yaml(');
-  if (start < 0) return [];
-  const end = supervisorRs.indexOf('\n}\n', start);
-  const body = supervisorRs
-    .slice(start, end < 0 ? undefined : end)
+  // The function and the helpers that render its sections.
+  const fns = ['pub fn upstream_config_yaml(', 'fn payload_section(', 'fn ultrafast_payload_rule('];
+  if (!supervisorRs.includes(fns[0]!)) return [];
+  const body = fns
+    .map((decl) => {
+      const start = supervisorRs.indexOf(decl);
+      if (start < 0) return '';
+      const end = supervisorRs.indexOf('\n}\n', start);
+      return supervisorRs.slice(start, end < 0 ? undefined : end);
+    })
+    .join('\n')
     .split('\n')
     .filter((l) => !l.trim().startsWith('//'))
     .join('\n');
@@ -460,7 +472,7 @@ export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, r
       const { stale, changed, count } = anchorChanges(serviceTierAnchors(pinned), serviceTierAnchors(cand));
       if (stale.length) return { status: 'warn', detail: clip(`service-tier anchors not found in the pinned source (${stale.join(', ')}); update upstream.ts serviceTierAnchors`) };
       if (!changed.length) return { status: 'pass', detail: `unchanged (${count} anchors)` };
-      return { status: 'warn', detail: clip(`priority-tier handling changed (${changed.join(', ')}); recheck that a -fast route still reaches Codex as service_tier priority (service_tier.rs)`) };
+      return { status: 'warn', detail: clip(`service-tier handling changed (${changed.join(', ')}); recheck that a -fast route still reaches Codex as service_tier priority, and an -ultrafast one as ultrafast (service_tier.rs)`, 260) };
     }),
     timed('claude-effort', () => {
       const { stale, changed, count } = anchorChanges(effortAnchors(pinned), effortAnchors(cand));

@@ -245,6 +245,11 @@ Each of the four GPT models has a `-fast` twin on Codex's fast tier, as an
 agent and a Workflow model (`gpt-6.1-sol-fast`): 1.5–2x faster for 2.5x
 the usage. Use one when someone is waiting on the result.
 
+On plans that have OpenAI's Ultrafast tier, the user may have added
+`-ultrafast` twins of GPT-6.1 Sol and GPT-6 Astra (agents
+`gpt-6.1-sol-ultrafast` and `gpt-6-astra-ultrafast`): up to 8x faster for
+8x the usage. Use one only when the user asks for Ultrafast.
+
 Consider setting the Agent tool's `effort` parameter when delegating,
 Claude models included. Without it, the GPT, Grok, Muse and open-weights
 agents run at this session's effort level.

@@ -90,7 +90,7 @@ test('host target names match acquire.rs', () => {
 
 test('router-written YAML keys come from string literals in supervisor.rs, not from Rust identifiers', () => {
   const keys = routerYamlKeys(readFileSync(join(REPO, 'crates/model-router/src/supervisor.rs'), 'utf8'));
-  for (const k of ['host', 'port', 'auth-dir', 'api-keys', 'disable-claude-cloak-mode', 'session-affinity', 'oauth-excluded-models', 'alpha-search', 'api-key-entries', 'override-raw'])
+  for (const k of ['host', 'port', 'auth-dir', 'api-keys', 'disable-claude-cloak-mode', 'session-affinity', 'oauth-excluded-models', 'alpha-search', 'api-key-entries', 'override-raw', 'override', 'headers'])
     expect(keys).toContain(k);
   for (const k of ['served', 'pinned', 'exclusions', 'yaml', 'provider']) expect(keys).not.toContain(k);
 });
@@ -103,10 +103,10 @@ test('goFunc takes a gofmt func through its closing brace; normalizeGo drops com
 });
 
 // A minimal source tree holding every refresh anchor, the identity lines, exclusion reads and all router YAML keys.
-function fakeSource(dir: string, edits: { lead?: string; siwcGuard?: string; siwcTail?: string; ua?: string; dropKey?: string; speed?: string; effort?: string } = {}): string {
+function fakeSource(dir: string, edits: { lead?: string; siwcGuard?: string; siwcTail?: string; ua?: string; dropKey?: string; speed?: string; effort?: string; finalize?: string } = {}): string {
   const root = join(dir, 'CLIProxyAPI-x');
   mkdirSync(join(root, 'sdk/cliproxy/auth'), { recursive: true });
-  mkdirSync(join(root, 'internal/runtime/executor'), { recursive: true });
+  mkdirSync(join(root, 'internal/runtime/executor/helps'), { recursive: true });
   mkdirSync(join(root, 'internal/translator/codex/claude'), { recursive: true });
   mkdirSync(join(root, 'internal/translator/openai/claude'), { recursive: true });
   mkdirSync(join(root, 'internal/thinking'), { recursive: true });
@@ -156,7 +156,12 @@ func authPreferredInterval(a *Auth) time.Duration {
   writeFileSync(
     join(root, 'internal/runtime/executor/codex_executor_request.go'),
     `package executor\n\nconst codexUserAgent = "${edits.ua ?? 'codex-tui/0.154.0'}"\nconst codexOriginator = "codex-tui"\n\n` +
-      'func applyCodexRoutingHint(headers http.Header, body []byte) {\n\tif tier := gjson.GetBytes(body, "service_tier"); tier.Type == gjson.String {\n\t\theaders.Set(hint, "tier="+tier.String())\n\t}\n}\n',
+      'func applyCodexRoutingHint(headers http.Header, body []byte) {\n\tif tier := gjson.GetBytes(body, "service_tier"); tier.Type == gjson.String {\n\t\theaders.Set(hint, "tier="+tier.String())\n\t}\n}\n\n' +
+      `func (e *CodexExecutor) cacheHelper(ctx context.Context, rawJSON []byte) []byte {\n\t${edits.finalize ?? 'rawJSON = normalize(rawJSON)'}\n\trawJSON = helps.FinalizePayload(ctx, rawJSON)\n\treturn rawJSON\n}\n`,
+  );
+  writeFileSync(
+    join(root, 'internal/runtime/executor/helps/payload_helpers.go'),
+    'package helps\n\nfunc payloadHeadersMatch(headers http.Header, rules map[string]string) bool {\n\treturn len(rules) == 0\n}\n',
   );
   writeFileSync(
     join(root, 'internal/translator/codex/claude/codex_claude_request.go'),
@@ -218,7 +223,7 @@ test('an unchanged candidate passes every audit check', () => {
   const r = audit({});
   expect(Object.values(r).map((c) => c.status)).toEqual(['pass', 'pass', 'pass', 'pass', 'pass', 'pass']);
   expect(r['refresh-lead']!.detail).toBe('unchanged (10 anchors)');
-  expect(r['service-tier']!.detail).toBe('unchanged (3 anchors)');
+  expect(r['service-tier']!.detail).toBe('unchanged (5 anchors)');
   expect(r['claude-effort']!.detail).toBe('unchanged (3 anchors)');
 });
 
@@ -233,6 +238,13 @@ test("a change to the Claude translator's speed mapping warns service-tier", () 
   const r = audit({ speed: 'priority' });
   expect(r['service-tier']!.status).toBe('warn');
   expect(r['service-tier']!.detail).toContain('speed mapping');
+});
+
+test('a change before the Codex payload finalizer warns service-tier for the -ultrafast relay', () => {
+  const r = audit({ finalize: 'rawJSON = stripTier(rawJSON)' });
+  expect(r['service-tier']!.status).toBe('warn');
+  expect(r['service-tier']!.detail).toContain('payload finalize');
+  expect(r['service-tier']!.detail).toContain('an -ultrafast one as ultrafast');
 });
 
 test('service-tier anchors read the Claude translator, not the OpenAI one of the same name', () => {

@@ -180,7 +180,8 @@ describe('catalog and config', () => {
     const cat = parseCatalog(src);
     expect(cat.fast).toContain('gpt-6.1-sol');
     for (const id of cat.fast) expect(cat.gpt).toContain(id);
-    expect(parseCatalog(src.replace(/const FAST_SUFFIX\b/, 'const TWIN_SUFFIX')).fast).toEqual([]);
+    expect(parseCatalog(src.replace(/const FAST: Twin\b/, 'const QUICK: Twin')).fast).toEqual([]);
+    expect(parseCatalog('const FAST_SUFFIX: &str = "-fast";\n' + src.replace(/const FAST: Twin\b/, 'const QUICK: Twin')).fast).toContain('gpt-6.1-sol');
   });
 
   const cat = { gpt: ['gpt-a', 'gpt-b'], grok: ['grok-x'], muse: ['muse-y'], fast: ['gpt-a'] };

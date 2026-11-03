@@ -59,8 +59,9 @@ export function parseCatalog(src: string): Catalog {
   };
   // A flat `[&str; N]` list rather than (id, name) pairs.
   const list = (name: string): Array<string> => [...(body(name) ?? '').matchAll(/"([^"]+)"/g)].map((e) => e[1]!);
-  // Each shipped route gets a twin, but routers from before the twins (FAST_SUFFIX) ship routes too.
-  const fast = /const\s+FAST_SUFFIX\b/.test(src) ? list('SHIPPED_GPT_ROUTES') : [];
+  // Each shipped route gets a twin, but routers from before the twins (FAST_SUFFIX, later the FAST twin kind) ship
+  // routes too.
+  const fast = /const\s+FAST_SUFFIX\b|const\s+FAST\s*:\s*Twin\b/.test(src) ? list('SHIPPED_GPT_ROUTES') : [];
   return { gpt: table('CODEX_NATIVE_MODELS'), grok: table('GROK_MODELS'), muse: table('MUSE_MODELS'), fast };
 }
 

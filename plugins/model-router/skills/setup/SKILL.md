@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI) and Muse (Meta) families, OS service, and Claude Code settings wiring.
+description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI) and Muse (Meta) families, Ultrafast GPT models, OS service, and Claude Code settings wiring.
 ---
 
 # model-router setup
@@ -140,7 +140,19 @@ here works until the binary resolves.
    replaces an earlier install's `ANTHROPIC_CUSTOM_MODEL_OPTION` pair. When
    it prints `"applied": false`, its `reason` says what needs the user.
    `--fast` adds the optional Fast twins' rows (1.5–2x faster, 2.5x the usage),
-   also offered by the band; add them in setup only when the user asks. Add
+   also offered by the band; add them in setup only when the user asks.
+   Ultrafast (GPT-6.1 Sol and GPT-6 Astra, up to 8x faster for 8x the
+   usage) needs a plan that has it: Pro $500, some Enterprise and Edu, or
+   any API key (at API Ultrafast prices). The router always serves the
+   `-ultrafast` routes and refuses their turns when the Codex plan lacks
+   the tier. `$ROUTER settings ultrafast --check` reads the plan, then
+   prints `"needed": true` with `labels` when there are twins to set up:
+   on a subscription, offer them; on an API key, only when the user asks.
+   `--apply` adds `-ultrafast` rows after their bases, their windows, and
+   user agents in `~/.claude/agents`. Its `plan` says why nothing is
+   needed: `lists` (already set up), `lacks` (the plan doesn't have the
+   tier), `unread` (the read failed, as printed: retry once the service
+   runs with a working Codex login). Add
    a row per configured Grok, Muse or open-weights route (`routed-models`
    in `$ROUTER doctor`; Muse: per `references/muse.md`, no Full row while
    `muse-plan` warns) by hand, and drop a row when its route goes: rows are
@@ -239,6 +251,10 @@ the user's call.
    `modelPicker` included.
 2. `$ROUTER service uninstall`. On macOS, `$ROUTER trust-ca --remove` takes
    the router's CA out of the keychain.
-3. Optionally delete `~/.config/model-router`, `~/.local/state/model-router`,
+3. Delete the Ultrafast agents the router wrote, if any: the files in
+   `~/.claude/agents` whose frontmatter has the line `# Written by
+   model-router` (`gpt-6.1-sol-ultrafast.md`, `gpt-6-astra-ultrafast.md`).
+   Their routes are gone with the router.
+4. Optionally delete `~/.config/model-router`, `~/.local/state/model-router`,
    and `~/.cache/model-router` (the state dir includes the Codex auth login —
    warn before deleting).

@@ -28,7 +28,9 @@ use crate::config::{Config, ModelFamily, MuseMode, UpstreamMode, WebSearchMode};
 use crate::headers;
 use crate::overflow::OverflowRewrite;
 use crate::routing::{RoutingDecision, decide, substitute_model};
+use crate::service_tier::ServiceTier;
 use crate::stub;
+use crate::ultrafast::Verdict;
 use crate::usage::{GptPolicies, SseUsageTransformer, estimate_input_tokens};
 use crate::websearch;
 
@@ -449,21 +451,89 @@ async fn handle(state: AppState, request: Request) -> Response {
         .await;
     }
 
-    if let Some(message) = login_refusal(&state, decision.route).await {
-        return local_error_response(
-            &state,
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            &message,
-            capture,
-        )
-        .await;
-    }
-
-    match decision.route {
+    let route = match plan_route(&state, decision.route).await {
+        Ok(route) => route,
+        Err(message) => return refusal_response(&state, &message, capture).await,
+    };
+    match route {
         None => claude_response(&state, &parts, body, &decision, capture).await,
-        Some(route) => gpt_response(&state, &parts, body, route, capture).await,
+        Some(route) => gpt_response(&state, &parts, body, &route, capture).await,
     }
+}
+
+/// The client-facing answer to a request refused for `message`.
+async fn refusal_response(
+    state: &AppState,
+    message: &str,
+    capture: Option<RequestCapture>,
+) -> Response {
+    local_error_response(
+        state,
+        StatusCode::BAD_REQUEST,
+        "invalid_request_error",
+        message,
+        capture,
+    )
+    .await
+}
+
+/// The route to send a turn for `route` (none: Claude's) on, or the text
+/// of its refusal:
+/// the logins may refuse it ([`login_refusal`]); an `-ultrafast` twin's
+/// goes by the Codex plan ([`crate::ultrafast::Gate::decide`]), at priority
+/// while the plan is unread, refused where it lacks the tier.
+async fn plan_route<'a>(
+    state: &AppState,
+    route: Option<&'a crate::config::ModelRoute>,
+) -> Result<Option<std::borrow::Cow<'a, crate::config::ModelRoute>>, String> {
+    use std::borrow::Cow;
+    let Some(route) = route else {
+        return Ok(None);
+    };
+    if let Some(message) = login_refusal(state, Some(route)).await {
+        return Err(message);
+    }
+    let Some(gate) = state
+        .config
+        .ultrafast_gate
+        .as_ref()
+        .filter(|_| route.tier == ServiceTier::Ultrafast)
+    else {
+        return Ok(Some(Cow::Borrowed(route)));
+    };
+    match gate.decide(route.split_upstream_model().0).await {
+        Verdict::Forward => Ok(Some(Cow::Borrowed(route))),
+        Verdict::Refuse => {
+            let message = ultrafast_refusal(route);
+            tracing::warn!(route = %route.routing_id, %message, "refused an Ultrafast turn");
+            Err(message)
+        }
+        Verdict::Priority => {
+            tracing::warn!(
+                route = %route.routing_id,
+                "sent an Ultrafast turn at priority: the Codex plan cannot be read"
+            );
+            Ok(Some(Cow::Owned(crate::config::ModelRoute {
+                tier: ServiceTier::Priority,
+                ..route.clone()
+            })))
+        }
+    }
+}
+
+/// The client-facing text for an `-ultrafast` twin's turn the Codex plan
+/// does not list the tier for.
+fn ultrafast_refusal(twin: &crate::config::ModelRoute) -> String {
+    use crate::config::{FAST, ULTRAFAST};
+    let model = twin.split_upstream_model().0;
+    let fast = FAST.id(ULTRAFAST
+        .strip(&twin.routing_id)
+        .expect("an Ultrafast route is a twin"));
+    format!(
+        "model-router refused this request: your Codex plan doesn't have OpenAI's Ultrafast tier \
+         for {model} (Pro $500 and some Enterprise and Edu plans do). {fast} runs on Codex's fast \
+         tier instead."
+    )
 }
 
 /// The client-facing refusal for a request to `route` that must not be
@@ -627,7 +697,7 @@ fn rewrite_gpt_body(
         &route.display_name,
         route.family.maker(),
     )?;
-    crate::service_tier::apply(&mut document, route.fast_tier);
+    crate::service_tier::apply(&mut document, route.tier);
     if route.family.tool_choice_auto_only() {
         let forced = document.get("tool_choice").is_some_and(|choice| {
             choice.get("type").and_then(serde_json::Value::as_str) != Some("auto")
@@ -740,6 +810,7 @@ async fn gpt_response(
         parts,
         rewritten,
         &route.upstream_model,
+        route.tier,
         policies,
         capture,
         tap,
@@ -819,13 +890,16 @@ fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPoli
 }
 
 /// Sends an already-rewritten GPT-branch request to the configured cliproxy
-/// upstream (or the stub / an actionable local error).
+/// upstream (or the stub / an actionable local error). `tier` is the
+/// route's for its own turns, `Standard` for a side call: only Ultrafast
+/// changes the headers ([`headers::GptUpstreamCredential::for_tier`]).
 #[allow(clippy::too_many_arguments)]
 async fn forward_gpt(
     state: &AppState,
     parts: &axum::http::request::Parts,
     rewritten: Bytes,
     upstream_model: &str,
+    tier: crate::service_tier::ServiceTier,
     policies: GptPolicies,
     capture: Option<RequestCapture>,
     tap: Option<SniffTap>,
@@ -833,7 +907,10 @@ async fn forward_gpt(
     let cache_headers = cache_identity_headers(parts, &rewritten);
     let inbound_headers = cache_headers.as_ref().unwrap_or(&parts.headers);
     match gpt_target(&state.cliproxy_upstream) {
-        GptTarget::Forward(target) => {
+        GptTarget::Forward(mut target) => {
+            target.credential = target
+                .credential
+                .map(|credential| credential.for_tier(tier));
             forward(
                 state,
                 &target.base_url,
@@ -1569,5 +1646,153 @@ mod tests {
             record["response_body"].as_str().unwrap().len(),
             CAPTURE_LIMIT
         );
+    }
+
+    type Seen = Arc<std::sync::Mutex<Vec<(HeaderMap, serde_json::Value)>>>;
+
+    /// Sends a turn of each of `models` (each asking for the Ultrafast tier
+    /// itself, header and body) through a router on `config` to a fake
+    /// managed child: each turn's status and body, and what the child saw.
+    async fn ultrafast_turns(
+        config: Config,
+        models: &[&str],
+    ) -> (
+        Vec<(StatusCode, String)>,
+        Vec<(HeaderMap, serde_json::Value)>,
+    ) {
+        use crate::service_tier::ULTRAFAST_RELAY_HEADER;
+        let seen: Seen = Arc::default();
+        let child = {
+            let seen = seen.clone();
+            let app = Router::new().fallback(any(move |request: Request| {
+                let seen = seen.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    seen.lock()
+                        .unwrap()
+                        .push((parts.headers, serde_json::from_slice(&body).unwrap()));
+                    (
+                        [(header::CONTENT_TYPE, "application/json")],
+                        r#"{"id":"m","type":"message","role":"assistant","model":"m",
+                            "content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",
+                            "usage":{"input_tokens":1,"output_tokens":1}}"#,
+                    )
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            format!("http://{address}")
+        };
+        let handle = crate::supervisor::ManagedHandle::ready_for_tests(child);
+        let (app, _) = build(config, Some(handle)).await.unwrap();
+        let mut answers = Vec::new();
+        for model in models {
+            let body = serde_json::json!({
+                "model": model, "max_tokens": 16, "service_tier": "ultrafast",
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            let request = Request::post("/v1/messages")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(ULTRAFAST_RELAY_HEADER, "ultrafast")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            answers.push((status, String::from_utf8_lossy(&body).into_owned()));
+        }
+        let seen = seen.lock().unwrap().clone();
+        (answers, seen)
+    }
+
+    fn relayed(seen: &[(HeaderMap, serde_json::Value)]) -> Vec<(Option<&str>, Option<&str>)> {
+        use crate::service_tier::ULTRAFAST_RELAY_HEADER;
+        seen.iter()
+            .map(|(headers, body)| {
+                (
+                    headers
+                        .get(ULTRAFAST_RELAY_HEADER)
+                        .map(|value| value.to_str().unwrap()),
+                    body.get("service_tier").and_then(|tier| tier.as_str()),
+                )
+            })
+            .collect()
+    }
+
+    /// An `-ultrafast` twin's turn reaches the managed child with the relay
+    /// header and no tier in the body; no other route's does, whatever the
+    /// client sent. With no gate (an API key), every twin turn goes out.
+    #[tokio::test]
+    async fn only_an_ultrafast_twin_turn_carries_the_relay() {
+        let models = [
+            "gpt-6.1-sol-ultrafast",
+            "gpt-6-astra-ultrafast",
+            "gpt-6.1-sol",
+            "gpt-6.1-sol-fast",
+        ];
+        let (answers, seen) = ultrafast_turns(Config::default(), &models).await;
+        assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
+        assert_eq!(
+            relayed(&seen),
+            [
+                (Some("ultrafast"), None),
+                (Some("ultrafast"), None),
+                (None, None),
+                (None, Some("priority")),
+            ]
+        );
+        assert_eq!(seen[0].1["model"], "gpt-6.1-sol");
+        assert_eq!(seen[1].1["model"], "gpt-6-astra");
+    }
+
+    /// A subscription's twin turns go by the Codex plan: refused where it
+    /// does not list the tier, at priority while it is unread.
+    #[tokio::test]
+    async fn a_subscription_twin_turn_goes_by_the_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = crate::state::Dirs::under(root.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        std::fs::write(
+            dirs.auth_dir().join("codex-a.json"),
+            r#"{"type": "codex", "access_token": "t", "account_id": "acct"}"#,
+        )
+        .unwrap();
+        let with_gate = || {
+            let mut config = Config::default();
+            // Nothing listens there: a read fails at once.
+            let gate = crate::ultrafast::Gate::with_url(
+                dirs.auth_dir(),
+                &dirs,
+                "http://127.0.0.1:9/backend-api/codex/models",
+            )
+            .unwrap();
+            config.ultrafast_gate = Some(Arc::new(gate));
+            config
+        };
+        let models = ["gpt-6.1-sol-ultrafast", "gpt-6-astra-ultrafast"];
+
+        let (answers, seen) = ultrafast_turns(with_gate(), &models).await;
+        assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
+        assert_eq!(
+            relayed(&seen),
+            [(None, Some("priority")), (None, Some("priority"))],
+            "unread"
+        );
+
+        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6-astra"]);
+        let (answers, seen) = ultrafast_turns(with_gate(), &models).await;
+        assert_eq!(answers[0].0, StatusCode::BAD_REQUEST);
+        assert!(
+            answers[0].1.contains(
+                "doesn't have OpenAI's Ultrafast tier for gpt-6.1-sol (Pro $500 and some \
+                 Enterprise and Edu plans do). gpt-6.1-sol-fast runs"
+            ),
+            "{}",
+            answers[0].1
+        );
+        assert_eq!(answers[1].0, StatusCode::OK);
+        assert_eq!(relayed(&seen), [(Some("ultrafast"), None)]);
     }
 }

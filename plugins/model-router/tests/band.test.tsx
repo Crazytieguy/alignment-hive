@@ -136,6 +136,53 @@ describe('model-router settings buttons', () => {
     await ui.unmount()
   })
 
+  const ultrafastModels = {
+    id: 'ultrafast-models',
+    severity: 'action',
+    text: 'Ultrafast models can be added to /model: up to 8x faster for 8x the usage',
+    version: 'ultrafast:gpt-6.1-sol-ultrafast',
+    actions: [
+      { id: 'add-ultrafast-models', label: 'Add to /model', kind: 'plugin' },
+      { id: 'decline-ultrafast-models', label: "Don't add", kind: 'plugin' },
+    ],
+  }
+
+  test('Add on the Ultrafast row applies it, with no router restart', async ($, on) => {
+    const { toasts, settingsCalls, checks } = await startWithSettings($, on, [ultrafastModels], {
+      applied: true, added: ['gpt-6.1-sol-ultrafast'],
+      windows: { 'gpt-6.1-sol-ultrafast': 475000 }, agents: ['/home/me/.claude/agents/gpt-6.1-sol-ultrafast.md'],
+    })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:ultrafast-models:add-ultrafast-models' })
+    expect(settingsCalls).toEqual([['settings', 'ultrafast', '--apply', '--project-dir', '/proj']])
+    expect(toasts).toEqual(['Ultrafast added; restart Claude Code to pick it in /model or as an agent.'])
+    expect(toasts.every(fitsToast)).toBe(true)
+    // The check at start, then the check again.
+    expect(checks).toHaveLength(2)
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('Add on the Ultrafast row says why when the binary refuses', async ($, on) => {
+    const { toasts } = await startWithSettings($, on, [ultrafastModels], {
+      applied: false, reason: 'Claude Code 2.1.200 predates per-model windows (2.1.288); update it first',
+    })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:ultrafast-models:add-ultrafast-models' })
+    expect(toasts[0]).toStartWith('Not added, run /model-router:setup: Claude Code 2.1.200')
+    await ui.unmount()
+  })
+
+  test('Don’t add on the Ultrafast row declines it for good', async ($, on) => {
+    const { toasts, settingsCalls, checks } = await startWithSettings($, on, [ultrafastModels], {})
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    await ui.press({ key: 'model-router:ultrafast-models:decline-ultrafast-models' })
+    expect(checks.map(env => env.ULTRAFAST_MODELS_DISMISSED)).toEqual(['', 'declined'])
+    expect(settingsCalls).toEqual([])
+    expect(toasts).toEqual(['Ultrafast not added; /model-router:setup can add it later.'])
+    await ui.unmount()
+  })
+
   test('Migrate has the binary move the windows and says at what window', async ($, on) => {
     const windowsRow = {
       id: 'windows',
@@ -448,6 +495,7 @@ describe('model-router rows that overlap', () => {
     expect(checks[0]?.FAST_MODELS_DISMISSED).toBe('')
     expect(Object.keys(checks[0] ?? {}).sort()).toEqual([
       'CLAUDE_PLUGIN_ROOT', 'CLAUDE_PROJECT_DIR', 'FAST_MODELS_DISMISSED', 'NEW_MODEL_DISMISSED',
+      'ULTRAFAST_MODELS_DISMISSED',
     ])
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     expect(await ui.find({ key: 'model-router:fast-models:add-fast-models' })).toBeDefined()

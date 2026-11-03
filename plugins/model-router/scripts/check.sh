@@ -143,6 +143,24 @@ if [ -n "$HEALTH" ]; then
         "{\"id\": \"decline-fast-models\", \"label\": \"Don't add\", \"kind\": \"plugin\"}"
     fi
   fi
+  # Optional Ultrafast twins, offered only where the Codex plan lists the
+  # tier (the router reads it), never on an API key (setup adds them there
+  # when asked). Most plans lack it, so the binary is asked only when its
+  # last reading lists a model. A decline holds for good; Dismiss holds
+  # until the offered twins change.
+  MR_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/model-router"
+  if [ "${ULTRAFAST_MODELS_DISMISSED:-}" != declined ] &&
+    grep -qsE '"ultrafast": *\[ *("|$)' "$MR_STATE/codex-service-tiers.json" &&
+    needed ultrafast &&
+    printf '%s' "$OUT" | grep -q '"plan":"lists"' &&
+    printf '%s' "$OUT" | grep -q '"canApply":true'; then
+    UF_VERSION="ultrafast:$(json_list adds | tr -d '"')"
+    if [ "${ULTRAFAST_MODELS_DISMISSED:-}" != "$UF_VERSION" ]; then
+      add_row ultrafast-models "Ultrafast models can be added to /model: up to 8x faster for 8x the usage" \
+        add-ultrafast-models "Add to /model" "$UF_VERSION" \
+        "{\"id\": \"decline-ultrafast-models\", \"label\": \"Don't add\", \"kind\": \"plugin\"}"
+    fi
+  fi
   # The next session's context windows are not setup's: the old setup's single
   # declaration, usage scaling or a behavesAs row (`legacy`), a route with no
   # compaction window, or one still at a Codex default that has since moved

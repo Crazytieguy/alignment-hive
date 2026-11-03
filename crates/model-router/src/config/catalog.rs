@@ -4,6 +4,7 @@
 //! and the model-ID predicates config validation keys off.
 
 use super::{CLIPROXY_UPSTREAM, ModelFamily, ModelRoute, split_effort_suffix};
+use crate::service_tier::ServiceTier;
 
 /// The largest usable window of the built-in GPT routes: Codex's opt-in
 /// `max_context_window` (872K) with its 95% usable multiplier
@@ -84,60 +85,111 @@ pub(crate) fn shipped_picker_rows() -> impl Iterator<Item = (&'static str, &'sta
 }
 
 /// A built-in GPT route that is no longer shipped (see [`SHIPPED_GPT_ROUTES`]).
-/// A retired route's `-fast` twin is retired too, and no longer served.
+/// A retired route's `-fast` and `-ultrafast` twins are retired too, and no
+/// longer served.
 #[must_use]
 pub(crate) fn is_retired_gpt_route(model: &str) -> bool {
-    let base = fast_route_base(model).unwrap_or(split_effort_suffix(model).0);
+    let base = twin_route_base(model).unwrap_or(split_effort_suffix(model).0);
     is_codex_native_model(base) && !SHIPPED_GPT_ROUTES.contains(&base)
 }
 
-/// What a `-fast` twin's routing ID adds to its route's.
-const FAST_SUFFIX: &str = "-fast";
+/// The models `OpenAI`'s Ultrafast tier covers (Codex's speed page,
+/// 2026-11-01). Both are shipped routes; their twins are served in managed
+/// mode only, outside the routes every install sets up
+/// ([`super::Config::opt_in_models`]).
+pub(crate) const ULTRAFAST_MODELS: [&str; 2] = ["gpt-6.1-sol", "gpt-6-astra"];
 
-/// Whether `route` gets a `-fast` twin: a `gpt` route to a shipped model
-/// ([`SHIPPED_GPT_ROUTES`]). Each listed Codex's `priority` service tier
-/// (Codex's `/fast`) in the child's `/v1/models?client_version=` catalog
-/// (2026-10-29); the backend accepts the tier on models that list none, so
-/// only the canary checks that catalog. The child forwards `service_tier` to
-/// xAI and Meta untouched, with nothing saying what it does there, and
-/// openai-compat hosts have no such tier.
-///
-/// Matched exhaustively on purpose: a new family must decide.
-pub(crate) fn has_fast_tier(route: &ModelRoute) -> bool {
-    match route.family {
-        ModelFamily::Gpt => SHIPPED_GPT_ROUTES.contains(&route.split_upstream_model().0),
-        ModelFamily::Grok | ModelFamily::Muse | ModelFamily::OpenAiCompat => false,
+/// A kind of twin route: a copy of a `gpt` route to one of `models`, under
+/// the route's ID plus `suffix`, that asks for `tier`
+/// ([`crate::service_tier`]).
+pub(crate) struct Twin {
+    suffix: &'static str,
+    models: &'static [&'static str],
+    pub(crate) tier: ServiceTier,
+}
+
+/// The `-fast` twins, of every shipped model ([`SHIPPED_GPT_ROUTES`]). Each
+/// listed Codex's `priority` service tier (Codex's `/fast`) in the child's
+/// `/v1/models?client_version=` catalog (2026-10-29); the backend accepts the
+/// tier on models that list none, so only the canary checks that catalog.
+pub(crate) const FAST: Twin = Twin {
+    suffix: "-fast",
+    models: &SHIPPED_GPT_ROUTES,
+    tier: ServiceTier::Priority,
+};
+
+/// The `-ultrafast` twins, of [`ULTRAFAST_MODELS`].
+pub(crate) const ULTRAFAST: Twin = Twin {
+    suffix: "-ultrafast",
+    models: &ULTRAFAST_MODELS,
+    tier: ServiceTier::Ultrafast,
+};
+
+impl Twin {
+    /// Whether `route` gets this twin: a `gpt` route to one of its models.
+    /// The child forwards `service_tier` to xAI and Meta untouched, with
+    /// nothing saying what it does there, and openai-compat hosts have no
+    /// such tier.
+    ///
+    /// Matched exhaustively on purpose: a new family must decide.
+    pub(crate) fn serves(&self, route: &ModelRoute) -> bool {
+        match route.family {
+            ModelFamily::Gpt => self.models.contains(&route.split_upstream_model().0),
+            ModelFamily::Grok | ModelFamily::Muse | ModelFamily::OpenAiCompat => false,
+        }
+    }
+
+    pub(crate) fn id(&self, routing_id: &str) -> String {
+        format!("{routing_id}{}", self.suffix)
+    }
+
+    /// This twin of each route in `routes` that has one ([`Self::serves`]).
+    pub(super) fn of(&self, routes: &[ModelRoute]) -> Vec<ModelRoute> {
+        routes
+            .iter()
+            .filter(|route| self.serves(route))
+            .map(|route| ModelRoute {
+                routing_id: self.id(&route.routing_id),
+                tier: self.tier,
+                ..route.clone()
+            })
+            .collect()
+    }
+
+    /// A routing ID without its effort suffix and this twin's, if it has the
+    /// latter.
+    pub(crate) fn strip<'a>(&self, routing_id: &'a str) -> Option<&'a str> {
+        split_effort_suffix(routing_id).0.strip_suffix(self.suffix)
+    }
+
+    /// The built-in route whose twin of this kind `routing_id` is, if it is
+    /// one. Config-free, like [`is_built_in_route`].
+    pub(crate) fn base<'a>(&self, routing_id: &'a str) -> Option<&'a str> {
+        self.strip(routing_id)
+            .filter(|base| self.models.contains(base))
     }
 }
 
-pub(crate) fn fast_twin_id(routing_id: &str) -> String {
-    format!("{routing_id}{FAST_SUFFIX}")
-}
-
-/// The `-fast` twin of each route in `routes` that has one
-/// ([`has_fast_tier`]): a copy under `<routing-id>-fast` that asks for
-/// Codex's priority tier ([`crate::service_tier`]).
-pub(super) fn fast_twins(routes: &[ModelRoute]) -> Vec<ModelRoute> {
-    routes
+/// The built-in route `routing_id` is a twin of, and the twin's tier.
+pub(crate) fn twin_of(routing_id: &str) -> Option<(&str, ServiceTier)> {
+    [FAST, ULTRAFAST]
         .iter()
-        .filter(|route| has_fast_tier(route))
-        .map(|route| ModelRoute {
-            routing_id: fast_twin_id(&route.routing_id),
-            fast_tier: true,
-            ..route.clone()
-        })
-        .collect()
+        .find_map(|twin| Some((twin.base(routing_id)?, twin.tier)))
 }
 
-/// A routing ID without its effort and `-fast` suffixes, if it has the latter.
-fn fast_route_base(routing_id: &str) -> Option<&str> {
-    split_effort_suffix(routing_id).0.strip_suffix(FAST_SUFFIX)
+/// A routing ID without its effort suffix and any twin's, if it has one.
+fn twin_route_base(routing_id: &str) -> Option<&str> {
+    [FAST, ULTRAFAST]
+        .iter()
+        .find_map(|twin| twin.strip(routing_id))
 }
 
-/// The shipped GPT route whose `-fast` twin `routing_id` is, if it is one.
-/// Config-free, like [`is_built_in_route`].
-pub(crate) fn fast_twin_base(routing_id: &str) -> Option<&str> {
-    fast_route_base(routing_id).filter(|base| SHIPPED_GPT_ROUTES.contains(base))
+pub(crate) fn has_fast_tier(route: &ModelRoute) -> bool {
+    FAST.serves(route)
+}
+
+pub(crate) fn fast_twin_id(routing_id: &str) -> String {
+    FAST.id(routing_id)
 }
 
 /// Whether `upstream_model` is served by the Codex backend. Derived aliases
@@ -193,13 +245,13 @@ pub(crate) fn forces_text_on_compaction(route: &ModelRoute) -> bool {
 }
 
 /// Whether `model` is one of the router's built-in routes in any family,
-/// enabled or not, or a `-fast` twin of one. Config-free on purpose:
+/// enabled or not, or a `-fast` or `-ultrafast` twin of one. Config-free on purpose:
 /// `settings bypass` runs when the router is down or its config is broken,
 /// and must still recognise a default `model` that only the router can
 /// serve.
 #[must_use]
 pub(crate) fn is_built_in_route(model: &str) -> bool {
-    is_codex_native_model(fast_route_base(model).unwrap_or(model))
+    is_codex_native_model(twin_route_base(model).unwrap_or(model))
         || [GROK_MODELS.as_slice(), MUSE_MODELS.as_slice()]
             .into_iter()
             .any(|table| is_built_in(table, model))

@@ -321,6 +321,12 @@ impl Compaction {
         }
     }
 
+    /// Whether `routing_id` has a `modelSettings` entry of its own.
+    #[must_use]
+    pub fn names(&self, routing_id: &str) -> bool {
+        self.by_model.contains_key(routing_id)
+    }
+
     fn entry(&self, routing_id: &str) -> Option<&Entry> {
         self.by_model.get(routing_id).or(self.default.as_ref())
     }

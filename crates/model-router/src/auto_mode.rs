@@ -86,19 +86,19 @@ struct Stage {
 
 /// The route a stage's `model` names, or a GPT route to the model of that
 /// ID on the `cliproxy` upstream (validation keeps every other family's
-/// models behind their own routes). A shipped model's `-fast` twin ID with
-/// no route behind it, as when `[[models]]` leaves its base out, still asks
-/// for the base model on the priority tier.
+/// models behind their own routes). A built-in model's twin ID with no route
+/// behind it, as when `[[models]]` leaves its base out, still asks for the
+/// base model at the twin's tier.
 pub(crate) fn stage_route(config: &Config, model: &str) -> ModelRoute {
     config.route(model).cloned().unwrap_or_else(|| {
-        let base = crate::config::fast_twin_base(model);
+        let twin = crate::config::twin_of(model);
         ModelRoute {
             routing_id: model.to_string(),
             upstream: crate::config::CLIPROXY_UPSTREAM.to_string(),
-            upstream_model: base.unwrap_or(model).to_string(),
+            upstream_model: twin.map_or(model, |(base, _)| base).to_string(),
             display_name: model.to_string(),
             family: crate::config::ModelFamily::Gpt,
-            fast_tier: base.is_some(),
+            tier: twin.map(|(_, tier)| tier).unwrap_or_default(),
             ..ModelRoute::default()
         }
     })
@@ -132,10 +132,12 @@ impl Runtime {
                     .filter(|_| !route.family.effort_via_model_suffix())
                     .map(ToOwned::to_owned),
                 // A `-fast` twin asks for the priority tier, as its agent
-                // turns do ([`crate::service_tier`]).
-                service_tier: tier
-                    .map(ToOwned::to_owned)
-                    .or_else(|| route.fast_tier.then(|| "priority".to_string())),
+                // turns do, and an `-ultrafast` one too: this call has no
+                // Ultrafast relay ([`crate::service_tier`]).
+                service_tier: tier.map(ToOwned::to_owned).or_else(|| {
+                    (route.tier.side_call_tier() == crate::service_tier::ServiceTier::Priority)
+                        .then(|| "priority".to_string())
+                }),
                 forced_choice: !route.family.tool_choice_auto_only(),
                 capture: capture.cloned(),
                 permits: permits.clone(),

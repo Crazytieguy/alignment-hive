@@ -26,6 +26,7 @@ use crate::capture::RequestCapture;
 use crate::config::WebSearchMode;
 use crate::headers;
 use crate::routing::substitute_model;
+use crate::service_tier::ServiceTier;
 use crate::usage::{GptPolicies, estimate_input_tokens};
 use crate::websearch;
 
@@ -84,7 +85,7 @@ pub(super) async fn gpt_origin_on_claude_branch(
     match (route, gpt_forward_target(&state.cliproxy_upstream)) {
         (Some(route), Some(target)) => match substitute_model(&body, &route.upstream_model)
             .and_then(|body| crate::tool_changes::portable_tools_in_body(&body, route.family))
-            .and_then(|body| at_tier(&body, route.fast_tier))
+            .and_then(|body| at_tier(&body, route.tier.side_call_tier()))
         {
             Ok(rewritten) => {
                 match gpt_backend_answer(
@@ -160,18 +161,26 @@ pub(super) async fn gpt_branch_subcall(
     }
     // Dropping the tier is always safe; asking for it only on a carrier that
     // has one (never Grok, Muse or an openai-compat host).
-    let fast = match &origin {
+    let tier = match &origin {
         Some(websearch::Origin::Gpt { routing_id }) => state.config.route(routing_id),
         _ => None,
     }
-    .map_or(route.fast_tier, |origin| {
-        origin.fast_tier && crate::config::has_fast_tier(route)
+    .map_or(route.tier.side_call_tier(), |origin| {
+        match origin.tier.side_call_tier() {
+            ServiceTier::Priority if crate::config::has_fast_tier(route) => ServiceTier::Priority,
+            _ => ServiceTier::Standard,
+        }
     });
-    let rewritten = if fast == route.fast_tier {
+    // What `rewrite_gpt_body` left in the body: priority on a `-fast` carrier only.
+    let carried = match route.tier {
+        ServiceTier::Priority => ServiceTier::Priority,
+        _ => ServiceTier::Standard,
+    };
+    let rewritten = if tier == carried {
         rewritten
     } else {
         // `rewrite_gpt_body` wrote it, so it parses.
-        at_tier(&rewritten, fast).map_or(rewritten, Bytes::from)
+        at_tier(&rewritten, tier).map_or(rewritten, Bytes::from)
     };
     // Past the native arm no origin searches natively, so only `[web-search]
     // mode` decides, as `AppState::intercepts` would for any origin.
@@ -194,6 +203,7 @@ pub(super) async fn gpt_branch_subcall(
         parts,
         rewritten,
         &route.upstream_model,
+        ServiceTier::Standard,
         policies,
         capture,
         None,
@@ -744,9 +754,9 @@ async fn alpha_search(
 
 /// `body` at the requested service tier ([`crate::service_tier`]): a search
 /// sub-call runs at the tier of the agent that asked for it.
-fn at_tier(body: &[u8], fast: bool) -> anyhow::Result<Vec<u8>> {
+fn at_tier(body: &[u8], tier: ServiceTier) -> anyhow::Result<Vec<u8>> {
     let mut document = serde_json::from_slice::<serde_json::Value>(body)?;
-    crate::service_tier::apply(&mut document, fast);
+    crate::service_tier::apply(&mut document, tier);
     Ok(serde_json::to_vec(&document)?)
 }
 

@@ -38,6 +38,7 @@ mod stub;
 pub mod supervisor;
 mod tool_changes;
 mod tool_schema;
+pub mod ultrafast;
 mod usage;
 pub mod verify;
 mod websearch;

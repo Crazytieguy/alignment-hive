@@ -39,12 +39,15 @@ pub fn is_credential_header(name: &str) -> bool {
 /// What every request to the `CLIProxyAPI` upstream carries: the local
 /// gateway secret, in both the `x-api-key` and bearer forms, each marked
 /// sensitive, and, in Muse Contributor mode, the trigger for the Contributor
-/// header relay ([`crate::muse::CONTRIBUTOR_TRIGGER`]).
+/// header relay ([`crate::muse::CONTRIBUTOR_TRIGGER`]). An `-ultrafast`
+/// twin's own turns also carry the Ultrafast relay
+/// ([`crate::service_tier::ULTRAFAST_RELAY_HEADER`], [`Self::for_tier`]).
 #[derive(Clone)]
 pub struct GptUpstreamCredential {
     api_key: HeaderValue,
     authorization: HeaderValue,
     muse_contributor: bool,
+    ultrafast: bool,
 }
 
 impl GptUpstreamCredential {
@@ -61,7 +64,18 @@ impl GptUpstreamCredential {
             api_key,
             authorization,
             muse_contributor: false,
+            ultrafast: false,
         })
+    }
+
+    /// The same credential, adding the Ultrafast relay to the request when
+    /// `tier` is Ultrafast: for a route's own turns only, never a side call.
+    #[must_use]
+    pub fn for_tier(self, tier: crate::service_tier::ServiceTier) -> Self {
+        Self {
+            ultrafast: tier == crate::service_tier::ServiceTier::Ultrafast,
+            ..self
+        }
     }
 
     /// The same credential, adding [`crate::muse::CONTRIBUTOR_TRIGGER`] to
@@ -84,6 +98,12 @@ impl GptUpstreamCredential {
             headers.insert(
                 crate::muse::CONTRIBUTOR_TRIGGER,
                 HeaderValue::from_static("1"),
+            );
+        }
+        if self.ultrafast {
+            headers.insert(
+                crate::service_tier::ULTRAFAST_RELAY_HEADER,
+                HeaderValue::from_static(crate::service_tier::ULTRAFAST),
             );
         }
     }
@@ -126,15 +146,16 @@ pub fn request_headers(
     body_changed: bool,
     gpt_credential: Option<&GptUpstreamCredential>,
 ) -> HeaderMap {
-    // A client's Contributor trigger never passes: only the credential
-    // decides it.
+    // A client's Contributor trigger or Ultrafast relay never passes: only
+    // the credential decides them.
     let mut output = filter(input, |name| {
         name == header::HOST
             || (body_changed && name == header::CONTENT_LENGTH)
             || (strip_credentials
                 && (is_credential_header(name.as_str())
                     || name == "anthropic-beta"
-                    || name == crate::muse::CONTRIBUTOR_TRIGGER))
+                    || name == crate::muse::CONTRIBUTOR_TRIGGER
+                    || name == crate::service_tier::ULTRAFAST_RELAY_HEADER))
     });
     if strip_credentials && let Some(credential) = gpt_credential {
         credential.insert_into(&mut output);

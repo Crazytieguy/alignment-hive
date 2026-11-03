@@ -25,9 +25,10 @@ let projectDir = ''
  */
 async function check($: EngineInterface): Promise<void> {
   try {
-    const [newModelDismissed, fastModelsDismissed] = await Promise.all([
+    const [newModelDismissed, fastModelsDismissed, ultrafastModelsDismissed] = await Promise.all([
       $.store.get('dismissed:new-model'),
       $.store.get('dismissed:fast-models'),
+      $.store.get('dismissed:ultrafast-models'),
     ])
     const { exitCode, stdout } = await $.process.run(['bash', `${$.plugin.root}/scripts/check.sh`], {
       env: {
@@ -35,6 +36,7 @@ async function check($: EngineInterface): Promise<void> {
         CLAUDE_PROJECT_DIR: projectDir,
         NEW_MODEL_DISMISSED: typeof newModelDismissed === 'string' ? newModelDismissed : '',
         FAST_MODELS_DISMISSED: typeof fastModelsDismissed === 'string' ? fastModelsDismissed : '',
+        ULTRAFAST_MODELS_DISMISSED: typeof ultrafastModelsDismissed === 'string' ? ultrafastModelsDismissed : '',
       },
     })
     const found = exitCode === 0 && stdout.trim() ? (JSON.parse(stdout) as { notices: Notice[] }).notices : []
@@ -83,6 +85,7 @@ const firstFitting = (...texts: string[]): string => texts.find(fitsToast) ?? te
 const SETTINGS_ARGS = new Map<string, readonly string[]>([
   ['add-models', ['models', '--apply']],
   ['add-fast-models', ['models', '--fast', '--apply']],
+  ['add-ultrafast-models', ['ultrafast', '--apply']],
   ['windows', ['windows', '--apply']],
   ['bypass', ['bypass']],
 ])
@@ -130,6 +133,11 @@ async function editSettings($: EngineInterface, args: readonly string[]): Promis
     const compacts = Object.keys(added).length ? ` Compacts ${compactsAt(added)}.` : ''
     const withCompacts = `Added to /model; restart Claude Code to pick.${compacts}`
     return firstFitting(withCompacts, 'Added to /model; restart Claude Code to pick.')
+  }
+  if (operation === 'ultrafast') {
+    if (!result.applied) return `Not added, run /model-router:setup: ${result.reason ?? 'no reason given'}`
+    if (result.unchanged) return 'Ultrafast is already set up; restart Claude Code to pick it.'
+    return 'Ultrafast added; restart Claude Code to pick it in /model or as an agent.'
   }
   if (operation === 'windows') {
     if (!result.applied) return `Not changed, run /model-router:setup: ${result.reason ?? 'no reason given'}`
@@ -201,6 +209,9 @@ export const register: Register = on => {
       } else if (action.id === 'decline-fast-models') {
         await $.store.set('dismissed:fast-models', 'declined')
         said = 'Not added to /model; /model-router:setup can add them later.'
+      } else if (action.id === 'decline-ultrafast-models') {
+        await $.store.set('dismissed:ultrafast-models', 'declined')
+        said = 'Ultrafast not added; /model-router:setup can add it later.'
       } else {
         // Running setup (or Customize) dismisses the row for this session; the next session's
         // check decides whether it comes back.
@@ -218,7 +229,7 @@ export const register: Register = on => {
       await dismiss(notice)
       if (notice.version !== undefined) await $.store.set(`dismissed:${notice.id}`, notice.version)
       // The windows row takes back the routes the picker row would have added.
-      if (notice.id === 'new-model' || notice.id === 'fast-models') await check($)
+      if (['new-model', 'fast-models', 'ultrafast-models'].includes(notice.id)) await check($)
     }
 
     const ui = $.ui.resolve(e)

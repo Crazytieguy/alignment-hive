@@ -33,6 +33,14 @@ present themselves as Claude.
   row: 1.5–2x faster for 2.5x the subscription usage (about twice the
   per-token price on an API key). Claude Code's own `/fast` doesn't reach
   GPT routes.
+- `-ultrafast` twins of GPT-6.1 Sol and GPT-6 Astra on OpenAI's Ultrafast
+  tier: up to 8x faster for 8x the subscription usage. Only some plans have
+  it (Pro $500, some Enterprise and Edu), so the router reads your plan's
+  model list from Codex with your Codex login when it starts (at most daily)
+  and when the routes are used, and refuses their requests if your plan
+  lacks the tier. When it has it, the session-start notice offers to add
+  them to `/model` and as agents. Every API key has the tier;
+  `/model-router:setup` adds them there.
 - Optional open-weights subagents — add Kimi, GLM, or other models from any
   OpenAI-compatible host you have an API key for during `/model-router:setup`.
 - Optional Grok family — grok-4.7 under your own xAI subscription OAuth
