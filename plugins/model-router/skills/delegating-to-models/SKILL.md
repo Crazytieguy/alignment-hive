@@ -252,4 +252,5 @@ On plans that have OpenAI's Ultrafast tier, the user may have added
 
 Consider setting the Agent tool's `effort` parameter when delegating,
 Claude models included. Without it, the GPT, Grok, Muse and open-weights
-agents run at this session's effort level.
+agents run at this session's effort level, or at `CLAUDE_CODE_SUBAGENT_EFFORT`
+when that is set.
