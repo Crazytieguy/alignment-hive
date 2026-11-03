@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { FAILED, citations, collapsePasted, history, newThreads, promptBlocks, quotesIn, recalledIn, recalledOf, report, reportOf, sessionsFor } from '../hooks/recall-text'
+import { FAILED, citations, collapsePasted, history, newThreads, noteText, noteWords, promptBlocks, quotesIn, recalledIn, recalledOf, report, reportOf, sessionsFor } from '../hooks/recall-text'
 import type { Row } from '../hooks/recall-text'
 
 const HOUR = 3_600_000
@@ -219,6 +219,19 @@ test('history: a message the user typed prints whole; a reply is clipped', () =>
   const text = h.closed.join('') + h.open
   expect(text).toContain(`[aaaa0001:1] user: ${long}\n`)
   expect(text).toContain(`[aaaa0001:2] assistant: ${'w'.repeat(6_000)} [+3000 chars]`)
+})
+
+test("history: a note the user saved with /remember prints whole as their note, without its header; it is quoted as one", () => {
+  const words = `Deploys go out on Fridays only.\n\n${'w'.repeat(9_000)}`
+  const note: Row = { loc: 'aaaa0001:3', time: at(1), kind: 'user', origin: 'note', text: noteText(words) }
+  const h = history([{ loc: 'aaaa0001', rows: [note] }], NOW, 100_000)
+  expect(h.closed.join('') + h.open).toContain(`[aaaa0001:3] user note: ${words}\n`)
+  const r = report('- aaaa0001:3 |', h)!
+  expect(r).toContain('> [user note] Deploys go out on Fridays only.')
+  expect(recalledOf(r)).toMatchObject({ entries: [{ loc: 'aaaa0001:3', label: 'user note' }] })
+  // A note's words alone are kept whatever they hold, and a text without the header is its own words.
+  expect(noteWords(noteText('a\n\nb'))).toBe('a\n\nb')
+  expect(noteWords('plain')).toBe('plain')
 })
 
 test('promptBlocks: one block per closed chunk; the last marked for the cache, or each of them for GPT', () => {

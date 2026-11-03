@@ -62,8 +62,11 @@ export function repeatsSession(agentId: string): boolean {
   return REPEATING_AGENT_PREFIXES.some((p) => agentId.startsWith(p));
 }
 
-/** User entries the human did not type that still show: messages from other agents and sessions, and recall. */
-const VISIBLE_META_ORIGINS: ReadonlyArray<string> = ['peer', 'coordinator', 'recall'];
+/**
+ * User entries the human did not type as a prompt that still show: messages from other agents and sessions, recall,
+ * and the human's notes.
+ */
+const VISIBLE_META_ORIGINS: ReadonlyArray<string> = ['peer', 'coordinator', 'recall', 'note'];
 
 /** How the hive plugin's automatic recall opens the report it hands to the main agent (plugins/hive/hooks/recall-text.ts). */
 const RECALL_PREFIX = '[hive recall] ';
@@ -71,6 +74,17 @@ const RECALL_PREFIX = '[hive recall] ';
 /** A report of a past-session search handed to the main agent: origin `recall`, whatever sent it. */
 export function isRecallText(text: string): boolean {
   return text.trimStart().startsWith(RECALL_PREFIX);
+}
+
+/** How the hive plugin opens a note the human saved with its /remember command (plugins/hive/hooks/recall-text.ts). */
+const NOTE_PREFIX = '[hive note] ';
+
+/**
+ * A note the human saved with /remember, which the hive plugin adds to the session without starting a turn: origin
+ * `note`, when a plugin added it.
+ */
+export function isNoteText(text: string): boolean {
+  return text.trimStart().startsWith(NOTE_PREFIX);
 }
 
 /**
@@ -177,8 +191,8 @@ function carriesHumanWords(e: ToolEntry): boolean {
 const READS: ReadonlyArray<string> = ['read', 'comments'];
 
 /**
- * The outline: the human's messages (user entries without `origin`, interrupts included), tool
- * calls whose result holds their words (AskUserQuestion answers, artifact comments read),
+ * The outline: the human's messages (user entries without `origin`, interrupts included) and notes
+ * (origin `note`), tool calls whose result holds their words (AskUserQuestion answers, artifact comments read),
  * compactions, tool calls that started or messaged agents, recall, and fork and continuation links. In an
  * agent's transcript, its session's later messages to it (origin `coordinator`) count as the human's.
  * `startsAgents`: the caller linked the tool entry to agent transcripts.
@@ -186,7 +200,7 @@ const READS: ReadonlyArray<string> = ['read', 'comments'];
 export function inOutline(e: Entry, startsAgents: boolean, agentTranscript = false): boolean {
   switch (e.kind) {
     case 'user':
-      return e.origin === undefined || isRecall(e) || (agentTranscript && e.origin === 'coordinator');
+      return e.origin === undefined || e.origin === 'note' || isRecall(e) || (agentTranscript && e.origin === 'coordinator');
     case 'system':
       return e.subtype === 'compact_boundary';
     case 'tool':
@@ -199,8 +213,14 @@ export function inOutline(e: Entry, startsAgents: boolean, agentTranscript = fal
   }
 }
 
-/** A session with no human message and no reply of any kind is left out of listings. */
+/**
+ * A session with no human message, no note and no reply of any kind is left out of listings. A session of notes alone
+ * is listed, so recall reads them.
+ */
 export function isEmptySession(t: Transcript): boolean {
   const reply = ['assistant', 'thinking', 'tool', 'other'];
-  return !t.entries.some((e) => isHumanMessage(e) || reply.includes(e.kind));
+  return !t.entries.some((e) => isHumanMessage(e) || isNote(e) || reply.includes(e.kind));
 }
+
+/** A note the human saved with the hive plugin's /remember, shown. */
+export const isNote = (e: Entry): boolean => e.kind === 'user' && e.origin === 'note' && hiddenBy(e) === undefined;

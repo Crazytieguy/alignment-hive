@@ -203,9 +203,11 @@ test('a user entry the human did not type says what it is, from the shared class
     { ...prompt('Base directory for this skill: /skills/review'), record: { isMeta: true } },
     prompt('[Request interrupted by user]'),
     prompt('<command-name>/model</command-name>\n<command-args></command-args>'),
+    // A note the user saved with hive's /remember, as the plugin appends it.
+    { ...prompt('[hive note] The user saved this note.\n\nUse bun.'), record: { isMeta: true, origin: { kind: 'plugin', name: 'hive' } } },
   ]);
-  const result = await f.resolve({ transcript: [1, 2, 3, 4, 5, 6].map((n) => `${FIXTURE_SESSION}:${n}`).join(', '), summary: ['a', 'b', 'c', 'd', 'e', 'f'] });
-  expect(labels(result).map(({ label, role }) => [label, role])).toEqual([['YOU', 'user'], ['NOTICE', 'tool'], ['PEER', 'agent'], ['CLAUDE CODE', 'tool'], ['INTERRUPT', 'user'], ['COMMAND', 'tool']]);
+  const result = await f.resolve({ transcript: [1, 2, 3, 4, 5, 6, 7].map((n) => `${FIXTURE_SESSION}:${n}`).join(', '), summary: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] });
+  expect(labels(result).map(({ label, role }) => [label, role])).toEqual([['YOU', 'user'], ['NOTICE', 'tool'], ['PEER', 'agent'], ['CLAUDE CODE', 'tool'], ['INTERRUPT', 'user'], ['COMMAND', 'tool'], ['YOUR NOTE', 'user']]);
 });
 
 test('a transcript ref mixes locators and captures; a capture is a Bash call like the session\'s own', async () => {

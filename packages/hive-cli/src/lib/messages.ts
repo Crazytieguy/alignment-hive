@@ -32,7 +32,7 @@ export const review = {
   judgementNeedsAlternatives: 'A judgement call outside side-effects and unverified lists its alternatives',
   lowerPriorityJudgement: 'lower-priority cannot be combined with judgement-call or alternatives',
   /** Role labels; user entries the human did not type say what they are (at most 11 characters). */
-  transcriptLabels: { you: 'YOU', prompt: 'PROMPT', claude: 'CLAUDE', agent: 'AGENT', interrupt: 'INTERRUPT', notice: 'NOTICE', command: 'COMMAND', summary: 'SUMMARY', claudeCode: 'CLAUDE CODE' },
+  transcriptLabels: { you: 'YOU', note: 'YOUR NOTE', prompt: 'PROMPT', claude: 'CLAUDE', agent: 'AGENT', interrupt: 'INTERRUPT', notice: 'NOTICE', command: 'COMMAND', summary: 'SUMMARY', claudeCode: 'CLAUDE CODE' },
   invalidRange: 'Expected a 1-based inclusive range L1-L2 with start <= end',
   gitFailed: (detail: string) => `Git read failed: ${detail}`,
   missingStamp: (session: string) => `No session-start commit for ${session}; supply base in frontmatter`,
@@ -275,8 +275,9 @@ Output: JSON Lines on stdout, one entry per line. Keys that don't apply are left
            (a4eff20e/agent-a6ee7bb6:21), or SESSION/wf_RUN/agent-ID when a Workflow run's agent shares its id
            with another transcript. N counts every entry of that transcript, hidden or not, and never changes.
   time     local time on this machine, to the second, with its offset from UTC
-  origin   on a user entry the human did not type: peer or coordinator (another agent or session), recall; with
-           --all-entries, also task-notification
+  origin   on a user entry the human did not type as a prompt: peer or coordinator (another agent or session),
+           recall, note (a note the human saved with /remember, for later sessions); with --all-entries, also
+           task-notification
   recall   true on a report from past sessions (origin recall) and on calls that started a hive:retrieval agent
   error    true when the tool call failed or was denied
   agents   locs of the agent transcripts a tool call started or messaged; outline prints the first 5 and

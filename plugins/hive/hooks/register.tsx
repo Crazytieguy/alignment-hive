@@ -7,7 +7,8 @@ import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 import { cli, hive } from './cli'
 import { noticeBand, noticeLabel } from './notice-band'
 import type { Notice, NoticeAction } from './notice-band'
-import { drawRecalled, endRecallTurn, onPromptStored, readWithRecall, submitWithRecall, warm } from './recall'
+import { REMEMBER_DESCRIPTION, drawRecalled, endRecallTurn, onPromptStored, readWithRecall, remember, submitWithRecall, warm } from './recall'
+import { RECALL_SECTION } from './recall-text'
 import type { HiveBusy, HiveFolded, HiveNotices } from '../types'
 
 // `when`: which phase of the session shows the row (packages/hive-cli/src/commands/notices.ts).
@@ -204,6 +205,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     cli.projectDir = await $.session.root()
+    // A refused registration (a name taken) leaves the rest of the start as it was.
+    await $.command.register({ name: 'remember', description: REMEMBER_DESCRIPTION, argumentHint: '<note>', immediate: true }).catch(() => undefined)
     // While recall is on, a warm follows the notices: its CLI call waits for theirs, which may download the CLI first.
     inBackground(refresh($).finally(() => options.recall === true && warmLater($, recallModel)))
     return started
@@ -215,9 +218,19 @@ export const register: Register = (on, options) => {
     return options.recall === true ? submitWithRecall($, e, next, recallModel) : next(e)
   })
 
+  // `/remember <note>`: a note for later sessions, saved without a turn (recall.tsx).
+  on('command.run', { command: 'remember' }, ($, e) => remember($, e.args, options.recall === true))
+
   // What recall gave a prompt shows under it (recall.tsx); the prompt's stored row names it. A comments read gets
-  // recall too.
+  // recall too. The main agent's system prompt says what recall covers, so it saves nothing recall already does.
   if (options.recall === true) {
+    on('prompt.compose', async ($, e, next) => {
+      const { sections } = await next(e)
+      // Right after the auto-memory section, which it overrides, where that is on the same side of the cache boundary.
+      const memory = sections.findIndex(s => s.id === 'memory' && s.scope === 'session')
+      const at = memory < 0 ? sections.length : memory + 1
+      return { sections: [...sections.slice(0, at), { id: 'hive:recall', text: RECALL_SECTION, scope: 'session' }, ...sections.slice(at)] }
+    })
     on('session.append', { door: ['prompt', 'delivery'] }, onPromptStored)
     on('ui.render', { component: 'UserMessage' }, drawRecalled)
     on('tool.call', { tool: 'ArtifactComments' }, ($, e, next) => readWithRecall($, e, next, recallModel))

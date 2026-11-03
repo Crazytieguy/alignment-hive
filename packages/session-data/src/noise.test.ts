@@ -146,6 +146,21 @@ describe('selection', () => {
     expect(isRecall(typed)).toBe(false);
   });
 
+  test("notes: a plugin's row opening `[hive note]`, as the hive plugin's /remember adds it, shows in the outline", () => {
+    const note = '[hive note] A note the user saved with /remember.\n\nuse bun, not npm';
+    // As Claude Code stores a plugin's $.session.append: a meta user row with the plugin as origin.
+    const added = { type: 'user', uuid: 'n1', isMeta: true, origin: { kind: 'plugin', name: 'hive' }, message: { content: [{ type: 'text', text: note }] } };
+    const t = parseTranscript(
+      [added, { type: 'user', uuid: 'n2', origin: { kind: 'human' }, message: { content: note } }].map((r) => JSON.stringify(r)).join('\n'),
+    );
+    const [saved, typed] = t.entries;
+    expect([saved.n, saved.kind === 'user' && saved.origin, hiddenBy(saved), inOutline(saved, false), isHumanMessage(saved)]).toEqual([1, 'note', undefined, true, false]);
+    // The prefix typed as a prompt is the human's message, not a note.
+    expect(typed.kind === 'user' && typed.origin).toBeUndefined();
+    // A session of notes alone is listed.
+    expect(isEmptySession(parseTranscript(JSON.stringify(added)))).toBe(false);
+  });
+
   test('isEmptySession', () => {
     const J = (...rs: Array<object>) => rs.map((r) => JSON.stringify(r)).join('\n') + '\n';
     const meta = { type: 'user', uuid: 'm', message: { content: 'caveat' }, isMeta: true };

@@ -3,7 +3,7 @@ import type { EngineInterface, Hook, MatchedHook, RenderElement, RenderInput } f
 
 import { CliFailed, localReads } from './cli'
 import type { Read } from './cli'
-import { FAILED, INSTRUCTIONS, budgetFor, entries, history, newThreads, promptBlocks, recalledIn, reportOf, sessionsFor } from './recall-text'
+import { FAILED, INSTRUCTIONS, budgetFor, entries, history, newThreads, noteText, promptBlocks, recalledIn, reportOf, sessionsFor } from './recall-text'
 import type { Ask, Listed, Row, Session } from './recall-text'
 import type { HiveRecalled } from '../types'
 
@@ -220,6 +220,25 @@ export async function readWithRecall($: EngineInterface, e: Call[1], next: Call[
   return context && typeof shown === 'object' ? { ...read, context: [...(read.context ?? []), context] } : read
 }
 
+/** What the typeahead says of `/remember <note>`, which register.tsx's session.start registers. */
+export const REMEMBER_DESCRIPTION = 'Save a note for automatic recall in later sessions, without starting a turn'
+
+/**
+ * `/remember <note>`: the note joins the session as a user row the main agent reads with its next request, and starts
+ * no turn; typed mid-turn it joins the running one. Recall reads it in later sessions as the user's note (recall-text's
+ * label). The command's own row keeps no arguments, so its output repeats the note for the person.
+ */
+export async function remember($: EngineInterface, words: string, isRecallOn: boolean): Promise<{ text: string }> {
+  const note = words.trim()
+  if (!note) return { text: 'Usage: /remember <note>. Saves the note for automatic recall in later sessions, without starting a turn.' }
+  // A plugin above refuses with `{ deny }`; the engine's own refusal rejects.
+  const added = await $.session
+    .append({ message: { type: 'user', content: [{ type: 'text', text: noteText(note) }] } })
+    .catch((error: unknown) => ({ deny: error instanceof Error ? error.message : String(error) }))
+  if (added.deny !== undefined) return { text: `Not saved: ${added.deny}` }
+  return { text: isRecallOn ? 'Saved for recall' : 'Saved. Automatic recall is off, so only the hive:retrieval agent will find it; /config turns recall on.' }
+}
+
 type Append = Parameters<Hook<'session.append'>>
 
 /** register.tsx's hook on a prompt's row as it is stored: what recall gave the prompt is kept under the row's id. */
@@ -236,7 +255,7 @@ export async function onPromptStored($: EngineInterface, e: Append[1], next: App
 type UserMessage = RenderInput<'UserMessage'>
 
 // Who wrote an entry, by its label in the history.
-const WHO: Record<string, string> = { user: 'You', assistant: 'Claude', 'user answer': 'Your answer', comments: 'Page comments' }
+const WHO: Record<string, string> = { user: 'You', 'user note': 'Your note', assistant: 'Claude', 'user answer': 'Your answer', comments: 'Page comments' }
 
 /**
  * What recall gave a prompt, under it: a dim line counting the entries it found, drawn like the transcript's own

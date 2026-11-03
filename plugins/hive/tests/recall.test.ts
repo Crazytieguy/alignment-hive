@@ -1,7 +1,8 @@
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
-import { reportOf } from '../hooks/recall-text'
+import { RECALL_SECTION, noteText, reportOf } from '../hooks/recall-text'
 
 const NOW = Date.parse('2026-10-20T15:30:00Z')
 const SESSION = 'abcd1234-0000-4000-8000-000000000000'
@@ -117,7 +118,7 @@ function world(on: On, { isSolMissing = false } = {}) {
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ code, stdout, stderr: '' }) } } as never
   })
   // Streamed in pieces that cut lines, as a pipe does.
-  on('process.spawn', async function* (_$, e) {
+  on('process.spawn', async function* (_$: unknown, e: { cwd: string; argv: string[] }) {
     dirs.push(e.cwd)
     if (state.isCliSlow) await clock.sleep(60_000)
     const stdout = cli(e.argv.slice(2)).map(r => JSON.stringify(r)).join('\n')
@@ -146,7 +147,7 @@ function world(on: On, { isSolMissing = false } = {}) {
   return { asked, contexts, clock, dirs, logs, prompts, served, state, timeouts }
 }
 
-const start = ($: Parameters<Parameters<typeof test>[1]>[0]) => $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+const start = ($: Engine) => $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
 const typed = (text: string) => ({ text, origin: { kind: 'composer' } }) as never
 
 describe('automatic recall', () => {
@@ -538,8 +539,47 @@ describe('the local server', () => {
   })
 })
 
+describe('/remember and what the main agent is told', () => {
+  const NOTE = 'Deploys go out on Fridays only.'
+  const textsOf = (session: ReturnType<typeof mock.session>) => session.appended().map(r => r.message.content)
+  const run = ($: Engine, args: string) => $.command.run({ command: 'remember', args } as never)
+
+  test('on: the note joins the session as a user row, confirmed without repeating it; with no note, nothing is saved', { options: { recall: true } }, async ($, on) => {
+    const { asked } = world(on)
+    const session = mock.session(on)
+    await start($)
+    expect((await run($, `  ${NOTE} `)).text).toBe('Saved for recall')
+    expect(textsOf(session)).toEqual([[{ type: 'text', text: noteText(NOTE) }]])
+    expect((await run($, ' ')).text).toContain('Usage: /remember <note>')
+    expect(textsOf(session)).toHaveLength(1)
+    // A command is no prompt: no recall ran for it.
+    expect(asked).toEqual([])
+  })
+
+  test('off: the note is saved all the same, and the output says only the retrieval agent finds it', async ($, on) => {
+    world(on)
+    const session = mock.session(on)
+    await start($)
+    const { text } = await run($, NOTE)
+    expect(text).toContain('Automatic recall is off')
+    expect(text).not.toContain(NOTE)
+    expect(textsOf(session)).toHaveLength(1)
+  })
+
+  for (const isOn of [true, false])
+    test(`${isOn ? 'on' : 'off'}: the system prompt ${isOn ? 'ends with what recall covers' : 'is as composed'}`, { options: { recall: isOn } }, async ($, on) => {
+      world(on)
+      on('prompt.compose', async () => ({ sections: [{ id: 'intro', text: 'You are Claude.', scope: 'shared' }] }))
+      await start($)
+      const model = 'claude-opus-5-5'
+      const { sections } = await $.prompt.compose({ model, promptModel: model, surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] })
+      expect(sections.map(s => s.id)).toEqual(isOn ? ['intro', 'hive:recall'] : ['intro'])
+      if (isOn) expect(sections[1]).toEqual({ id: 'hive:recall', text: RECALL_SECTION, scope: 'session' })
+    })
+})
+
 /** The prompt's row as the session stores it, under `uuid`. */
-const stored = ($: Parameters<Parameters<typeof test>[1]>[0], text: string, uuid: string) =>
+const stored = ($: Engine, text: string, uuid: string) =>
   $.session.append({ message: { type: 'user', role: 'user', content: [{ type: 'text', text }] }, door: 'prompt', origin: { kind: 'composer' }, uuid } as never)
 
 /** The prompt's row on `surface`: in the ctrl+o transcript (`isExpanded`), and on a fullscreen terminal. */

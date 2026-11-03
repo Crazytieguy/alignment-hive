@@ -4,7 +4,7 @@
  * schema validation, noise rules or later records, so appending never renumbers and an uploaded
  * copy numbers like the local file. Branch states come only from positively established rewinds.
  */
-import { hiddenBy, isCommandMarkup, isRecallText, isRetrievalCall, untaggedOrigin } from './noise';
+import { hiddenBy, isCommandMarkup, isNoteText, isRecallText, isRetrievalCall, untaggedOrigin } from './noise';
 import { leanRecord, readRecords } from './records';
 import type { RawRecord } from './records';
 
@@ -29,7 +29,10 @@ export interface EntryBase {
 export type UserEntry = EntryBase & {
   kind: 'user';
   text: string;
-  /** Who sent it when the human did not type it: Claude Code's origin.kind, e.g. peer, coordinator; or recall. */
+  /**
+   * Who sent it when the human did not type it as a prompt: Claude Code's origin.kind, e.g. peer, coordinator; recall;
+   * or note, a note the human saved with the hive plugin's /remember.
+   */
   origin?: string;
   isMeta?: true;
   isCompactSummary?: true;
@@ -167,9 +170,10 @@ function slashCommand(text: string): { command: string; text: string } | undefin
   return { command: name, text: args ? `/${name} ${args}` : `/${name}` };
 }
 
-/** Origin of a user entry the human did not type; undefined for the human's own messages. */
+/** Origin of a user entry the human did not type as a prompt; undefined for the human's own messages. */
 function originOf(kind: string | undefined, text: string, fallback?: string): string | undefined {
   if (isRecallText(text)) return 'recall';
+  if (kind === 'plugin' && isNoteText(text)) return 'note';
   if (kind) return kind === 'human' ? undefined : kind;
   return fallback ?? untaggedOrigin(text);
 }

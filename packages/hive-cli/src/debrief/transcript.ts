@@ -1,7 +1,7 @@
 // Transcript evidence through the shared session-data parser and locator resolver: cited entries with their role
 // labels, Write calls, key asks and the user's other messages. Locators into another session are refused.
 import { readFile } from 'node:fs/promises';
-import { hiddenBy, isHumanMessage, parseTranscript } from '@alignment-hive/session-data';
+import { hiddenBy, isHumanMessage, isNote, parseTranscript } from '@alignment-hive/session-data';
 import { claudeProjectsRoot } from '../lib/config';
 import { commentThreads, commentsOnly } from '../lib/local-transcript';
 import { LocatorError, canonicalLocator, parseLocator, resolveTranscript } from '../lib/locators';
@@ -75,13 +75,14 @@ export function isDeniedResult(text: string): boolean {
   return /^Permission for this action was denied/.test(text);
 }
 
-/** A message another session sent (a peer or coordinator): a user entry with an origin that is shown. */
-const fromPeer = (e: UserEntry) => e.origin !== undefined && hiddenBy(e) === undefined;
+/** A message another session sent (a peer or coordinator): a user entry with an origin that is shown, other than a note. */
+const fromPeer = (e: UserEntry) => e.origin !== undefined && !isNote(e) && hiddenBy(e) === undefined;
 
 /** A user entry the human did not type says what it is, from the shared classification: who sent it, or why it is hidden. */
 function userDisplay(e: UserEntry, sub: boolean): { label: string; role: TranscriptRole } {
   const labels = msg.transcriptLabels;
   if (isHumanMessage(e)) return { role: 'user', label: sub ? labels.prompt : labels.you };
+  if (isNote(e)) return { role: 'user', label: labels.note };
   if (fromPeer(e)) return { role: 'agent', ...capped(e.origin!.toUpperCase().slice(0, MAX_LABEL), e.origin!) };
   const hidden = hiddenBy(e);
   // Visible, untagged and still not a human message: the interrupt marker.
@@ -107,8 +108,8 @@ function display(e: Entry, sub: boolean): { label: string; title?: string; role:
 
 /** One of the user's own messages on the final conversation: the shared rule, less what was rewound or edited away. */
 const ownMessage = (e: Entry): e is UserEntry => isHumanMessage(e) && e.branch !== 'abandoned';
-/** A message that can set the task's direction: the user's own, or one another session sent. */
-const sent = (e: Entry): e is UserEntry => e.kind === 'user' && (isHumanMessage(e) || fromPeer(e));
+/** A message that can set the task's direction: the user's own (a note they saved too), or one another session sent. */
+const sent = (e: Entry): e is UserEntry => e.kind === 'user' && (isHumanMessage(e) || isNote(e) || fromPeer(e));
 
 /**
  * Locators name this debrief's session or its own agents, in any form `hive local` prints or accepts; the shared
