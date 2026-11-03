@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import { REPO } from './env';
 import { Recorder } from './report';
 import {
+  anchorHash,
   auditSource,
   compareVersions,
+  goFiles,
   goFunc,
   hostTarget,
   normalizeGo,
@@ -15,6 +17,8 @@ import {
   parseVendoredChecksums,
   pickCandidate,
   pinnedVersion,
+  refreshAnchors,
+  REVIEWED_REFRESH,
   routerYamlKeys,
   serviceTierAnchors,
   vendoredChecksums,
@@ -143,6 +147,14 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 \treturn false
 }
 
+func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool) (*Auth, bool) {
+\treturn auth, false
+}
+
+func isUnauthorizedError(err error) bool {
+\treturn strings.Contains(err.Error(), "status 401")
+}
+
 func authPreferredInterval(a *Auth) time.Duration {
 \treturn 0
 }
@@ -222,7 +234,7 @@ function audit(edits: Parameters<typeof fakeSource>[1]): Record<string, { status
 test('an unchanged candidate passes every audit check', () => {
   const r = audit({});
   expect(Object.values(r).map((c) => c.status)).toEqual(['pass', 'pass', 'pass', 'pass', 'pass', 'pass']);
-  expect(r['refresh-lead']!.detail).toBe('unchanged (10 anchors)');
+  expect(r['refresh-lead']!.detail).toBe('unchanged (12 anchors)');
   expect(r['service-tier']!.detail).toBe('unchanged (5 anchors)');
   expect(r['claude-effort']!.detail).toBe('unchanged (3 anchors)');
 });
@@ -280,7 +292,31 @@ test('missing pinned anchors keep each check’s own verdict', () => {
 test('a changed refresh lead fails refresh-lead', () => {
   const r = audit({ lead: '120 * time.Hour' });
   expect(r['refresh-lead']!.status).toBe('fail');
-  expect(r['refresh-lead']!.detail).toContain('CodexOuterRefreshLead');
+  expect(r['refresh-lead']!.detail).toMatch(/CodexOuterRefreshLead [0-9a-f]{16}/);
+});
+
+test('a refresh change reviewed by hand passes, and only for the reviewed body', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'canary-upstream-'));
+  try {
+    const pinned = fakeSource(join(dir, 'a'));
+    const cand = fakeSource(join(dir, 'b'), { lead: '120 * time.Hour' });
+    const other = fakeSource(join(dir, 'c'), { lead: '200 * time.Hour' });
+    const body = refreshAnchors(goFiles(cand)).CodexOuterRefreshLead!;
+    const reviewed = { CodexOuterRefreshLead: { [anchorHash(body)]: 'test' } };
+    const ok = auditSource(pinned, cand, new Recorder(), undefined, reviewed)[0]!;
+    expect(ok.status).toBe('pass');
+    expect(ok.detail).toContain('reviewed by hand (CodexOuterRefreshLead');
+    expect(auditSource(pinned, other, new Recorder(), undefined, reviewed)[0]!.status).toBe('fail');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('REVIEWED_REFRESH names real anchors by short hashes', () => {
+  for (const [k, hashes] of Object.entries(REVIEWED_REFRESH)) {
+    expect(Object.keys(refreshAnchors([])).includes(k)).toBe(true);
+    for (const h of Object.keys(hashes)) expect(h).toMatch(/^[0-9a-f]{16}$/);
+  }
 });
 
 test('a SIWC-only change warns, but a change to the guard every login passes through fails', () => {

@@ -297,6 +297,10 @@ export function refreshAnchors(files: Array<GoFile>): Record<string, string | un
     'CodexSIWCNeedsRefresh guard': siwc && guardEnd >= 0 ? siwc.slice(0, guardEnd + 3).join('\n') : undefined,
     CodexSIWCNeedsRefresh: siwc?.join('\n'),
     shouldRefresh: funcAnchor(files, /^func \(\w+ \*Manager\) shouldRefresh\(/m),
+    // A request that fails as unauthorized refreshes at once, whatever the token's age; what counts as one decides
+    // whether a sandbox request can rotate the copied login.
+    tryRefreshAfterUnauthorized: funcAnchor(files, /^func \(\w+ \*Manager\) tryRefreshAfterUnauthorized\(/m),
+    isUnauthorizedError: funcAnchor(files, /^func isUnauthorizedError\(/m),
     authPreferredInterval: funcAnchor(files, /^func authPreferredInterval\(/m),
     StartAutoRefresh: funcAnchor(files, /^func \(\w+ \*Manager\) StartAutoRefresh\(/m),
     'CodexAuthenticator.RefreshLead': funcAnchor(files, /^func \(\w+ \*?CodexAuthenticator\) RefreshLead\(/m),
@@ -308,6 +312,30 @@ export function refreshAnchors(files: Array<GoFile>): Record<string, string | un
 
 /** Anchors that only matter for a login with a `siwc` section, which credentialPrecheck refuses to copy. */
 export const SIWC_ONLY = new Set(['CodexSIWCRefreshLead', 'CodexSIWCNeedsRefresh']);
+
+/**
+ * Refresh anchor bodies reviewed by hand and found safe for sandbox copies: anchor → `anchorHash` of the candidate's
+ * body → the release and why. A changed anchor whose body is listed here doesn't fail refresh-lead; a further change
+ * to it does. Entries are moot once the pin reaches their release; drop them at that re-pin.
+ */
+export const REVIEWED_REFRESH: Record<string, Record<string, string>> = {
+  CodexOuterNeedsRefresh: {
+    '2ce62a56849a9516':
+      '8.0.48: returns early while the refresh token equals RejectedRefreshToken, which is runtime-only (json:"-") and set only after a refresh was rejected as terminal. It suppresses refreshes, never adds one.',
+  },
+  shouldRefresh: {
+    d0666c6776766507: '8.0.51: returns false for a Codex login with no refresh_token and no SIWC section (95f125ff). A login that can be copied has one, so it is not affected.',
+  },
+  isUnauthorizedError: {
+    // Accepted, not harmless: a request error whose text has "(401)" now refreshes at once, as the pin already does on
+    // a real 401 or an error saying "status 401". The live router is using the same login, so a sandbox request should
+    // see neither, and a refresh that does happen is written back to the live login by the credential postcheck.
+    f450358e69617e7e: '8.0.48: also matches "(401)" in the error text, e.g. a 500 body reporting an inner 401. The only text in the source that produces it is a failed SIWC token request ("token request failed (401)").',
+  },
+};
+
+/** The short hash REVIEWED_REFRESH keys an anchor body by. */
+export const anchorHash = (body: string): string => createHash('sha256').update(body).digest('hex').slice(0, 16);
 
 /** Lines of the Codex executor that set the upstream identity (Originator, User-Agent, version strings). */
 export function codexIdentityLines(files: Array<GoFile>): Array<string> {
@@ -426,7 +454,7 @@ const clip = (s: string, n = 200): string => (s.length > n ? s.slice(0, n - 1) +
  * identity (load-shedding history), the priority tier the `-fast` routes ask for, how Claude-format effort is read,
  * and per-login exclusions. Returns the checks it recorded.
  */
-export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, repo = REPO): Array<Check> {
+export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, repo = REPO, reviewedRefresh = REVIEWED_REFRESH): Array<Check> {
   const base = { tier: 'candidate' as const, target: 'candidate' };
   const timed = (name: string, fn: () => Pick<Check, 'status' | 'detail' | 'metrics'>): Check => {
     const t0 = performance.now();
@@ -441,12 +469,20 @@ export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, r
 
   const checks = [
     timed('refresh-lead', () => {
-      const { stale, changed, count } = anchorChanges(refreshAnchors(pinned), refreshAnchors(cand));
+      const candAnchors = refreshAnchors(cand);
+      const { stale, changed: all, count } = anchorChanges(refreshAnchors(pinned), candAnchors);
       if (stale.length) return { status: 'fail', detail: clip(`audit anchors not found in the pinned source (${stale.join(', ')}); update upstream.ts refreshAnchors — review refresh behavior by hand`) };
-      if (!changed.length) return { status: 'pass', detail: `unchanged (${count} anchors)` };
+      const reviewed = all.filter((k) => {
+        const body = candAnchors[k];
+        return body !== undefined && reviewedRefresh[k]?.[anchorHash(body)] !== undefined;
+      });
+      const changed = all.filter((k) => !reviewed.includes(k));
+      if (!changed.length) {
+        return { status: 'pass', detail: reviewed.length ? clip(`changed, reviewed by hand (${reviewed.join(', ')}; see REVIEWED_REFRESH)`) : `unchanged (${count} anchors)` };
+      }
       const hard = changed.filter((k) => !SIWC_ONLY.has(k));
       if (!hard.length) return { status: 'warn', detail: clip(`only the SIWC refresh path changed (${changed.join(', ')}); a login without a siwc section returns before it, and the precheck refuses SIWC logins`) };
-      return { status: 'fail', detail: clip(`refresh behavior changed; credential copies could rotate the live login — review by hand (${hard.join(', ')})`) };
+      return { status: 'fail', detail: clip(`refresh behavior changed; credential copies could rotate the live login — review by hand (${hard.map((k) => `${k} ${anchorHash(candAnchors[k] ?? '')}`).join(', ')})`) };
     }),
     timed('config-keys', () => {
       const keys = routerYamlKeys(readFileSync(join(repo, 'crates/model-router/src/supervisor.rs'), 'utf8'));

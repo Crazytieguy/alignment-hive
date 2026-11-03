@@ -4,7 +4,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { childEnv, DATA, logMark, logSince, run, writeJsonAtomic } from './env';
+import { childEnv, DATA, logMark, logSince, run, sleep, writeJsonAtomic } from './env';
 import type { Recorder, RouterTarget, Status, Tier } from './report';
 
 /** The 12 tasks of the original subset (short enough at medium effort, varied: git, build, server, text, security). */
@@ -98,9 +98,20 @@ export async function ensureHarbor(): Promise<string> {
   return bin;
 }
 
-export async function dockerReady(): Promise<boolean> {
+async function dockerReady(): Promise<boolean> {
   const r = await run('docker', ['info'], { timeoutMs: 10_000 });
   return r.code === 0 && !r.timedOut;
+}
+
+/** Whether Docker is up, starting Docker Desktop in the background if it's off (it can take a minute or two). */
+export async function ensureDocker(): Promise<boolean> {
+  if (await dockerReady()) return true;
+  const open = await run('open', ['-g', '-a', 'Docker'], { timeoutMs: 10_000 });
+  if (open.code !== 0) return false;
+  for (const deadline = Date.now() + 180_000; Date.now() < deadline; await sleep(5_000)) {
+    if (await dockerReady()) return true;
+  }
+  return false;
 }
 
 /** The router's ingress URL as a container sees it. The router binds loopback only (proxy.rs refuses anything else);

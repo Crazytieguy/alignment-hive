@@ -12,7 +12,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { TASKS, compareArms, dockerReady, runBench } from './lib/bench';
+import { TASKS, compareArms, ensureDocker, runBench } from './lib/bench';
 import { claudeVersion, runCells } from './lib/cells';
 import { DATA, DOWNLOADS, LIVE, LIVE_AUTH_DIR, REPO, RUNS, SANDBOXES, cachedCpaBinary, portFree, readJson, routerBinary, run, sleep, stamp, writeJsonAtomic } from './lib/env';
 import { changedGoFiles, judgePrompt, judgeRelease } from './lib/judge';
@@ -198,7 +198,7 @@ function compareLatency(rec: Recorder): void {
 async function refreshGate(pinned: string, version: string, rec: Recorder): Promise<string | undefined> {
   auditSource(await downloadSource(pinned), await downloadSource(version), rec);
   return rec.checks.some((c) => c.name === 'refresh-lead' && c.status === 'fail')
-    ? 'refresh behaviour changed; a sandbox copy of the Codex login could rotate the live one. Review by hand before running it'
+    ? 'refresh behaviour changed; a sandbox copy of the Codex login could rotate the live one. Review it by hand, and list it in upstream.ts REVIEWED_REFRESH if it is safe'
     : undefined;
 }
 
@@ -356,9 +356,9 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
  * gap of about two standard deviations reruns the tasks the candidate lost, judged on their own.
  */
 async function benchTier(report: RunReport, rec: Recorder, sandboxes: Array<Sandbox>, model: string, opts: { attempts?: number; tasks?: Array<string> }): Promise<string | undefined> {
-  if (!(await dockerReady())) {
-    rec.add({ tier: 'bench', target: 'canary', name: 'bench', status: 'skip', detail: 'Docker is not running; run `bun canary.ts bench --version <v>` later' });
-    return 'Docker is not running';
+  if (!(await ensureDocker())) {
+    rec.add({ tier: 'bench', target: 'canary', name: 'docker', status: 'skip', detail: "Docker didn't start; run `bun canary.ts bench --version <v>` later" });
+    return "Docker didn't start";
   }
   // Two emulated amd64 containers per arm: at higher concurrency agent setup times out (seen on kv-store-grpc).
   const attempts = opts.attempts ?? 2;
@@ -534,6 +534,8 @@ function findingsOf(report: RunReport, rec: Recorder): Array<Finding> {
       }
     }
   }
+  // Candidates that needed the bench stay inconclusive, and a newer release restarts their tries, so this can stall the pin unseen.
+  if (rec.checks.some((c) => c.name === 'docker')) out.push({ key: 'docker', text: "Docker didn't start, so candidates can't get the bench" });
   const releases = rec.checks.find((c) => c.name === 'releases' && c.status === 'fail');
   if (releases) out.push({ key: 'releases', text: `candidates have stopped: ${releases.detail}` });
   if (report.command === 'bench') out.push({ key: `bench:${report.dir}`, text: 'bench run finished' });
