@@ -124,6 +124,30 @@ describe('session start', () => {
     expect(await notices()).toEqual([]);
   });
 
+  test('schedules at most 50 sessions, so the --sessions argument stays under the OS limit', async () => {
+    history = SHARING;
+    const many = join(root, 'transcripts-many');
+    await mkdir(many, { recursive: true });
+    for (let i = 0; i < 51; i++) {
+      const path = join(many, `m${i}.jsonl`);
+      await writeFile(
+        path,
+        [
+          { type: 'user', uuid: `u${i}`, parentUuid: null, cwd: root, message: { role: 'user', content: 'hi' } },
+          { type: 'assistant', uuid: `a${i}`, parentUuid: `u${i}`, message: { role: 'assistant', content: 'ok' } },
+        ]
+          .map((r) => JSON.stringify(r))
+          .join('\n') + '\n',
+      );
+      await utimes(path, OLD, OLD);
+    }
+    await writeFile(statePaths(getStateDir(root)).transcriptsDirs, many + '\n');
+
+    await printed(hiveSessionStart);
+    const upload = spawned.find((args) => args[0] === 'upload');
+    expect(upload?.[upload.indexOf('--sessions') + 1]?.split(',')).toHaveLength(50);
+  });
+
   test('an expired login gets a row and schedules nothing', async () => {
     history = SHARING;
     isLoginExpired = true;
@@ -138,7 +162,9 @@ describe('session start', () => {
     process.chdir(root);
     try {
       const known = JSON.parse(await printed(() => hiveNotices(['s1']))) as { isSessionKnown: boolean };
-      const unknown = JSON.parse(await printed(() => hiveNotices(['not-yet-discovered']))) as { isSessionKnown: boolean };
+      const unknown = JSON.parse(await printed(() => hiveNotices(['not-yet-discovered']))) as {
+        isSessionKnown: boolean;
+      };
       expect([known.isSessionKnown, unknown.isSessionKnown]).toEqual([true, false]);
     } finally {
       process.chdir(cwd);

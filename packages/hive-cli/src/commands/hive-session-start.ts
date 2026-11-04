@@ -5,6 +5,10 @@ import { isRegistryBackfillDone } from '../lib/registry-backfill';
 import { UPLOAD_DELAY_MINUTES, isUploadScheduled, loadSharingSnapshot, summarizeUploads } from '../lib/sharing';
 import { spawnBackgroundCommand } from '../lib/spawn';
 
+// Keeps the --sessions argument far below Linux's 128 KiB per-argument limit; a longer one fails
+// the spawn every session start. The rest go at later session starts.
+const MAX_SCHEDULED_SESSIONS = 50;
+
 /**
  * The SessionStart hook's work: background pings, scans and uploads. It prints nothing; the hive
  * plugin's band shows what the person should know, through `hive notices`.
@@ -32,8 +36,9 @@ export async function hiveSessionStart(): Promise<number> {
 
   const { eligibleIds } = summarizeUploads(snapshot);
   if (eligibleIds.length > 0 && !snapshot.snoozeUntil && !(await isUploadScheduled(stateDir))) {
+    const sessionIds = eligibleIds.slice(0, MAX_SCHEDULED_SESSIONS).join(',');
     const spawned = spawnBackgroundCommand(
-      ['upload', 'send', '--delay', String(UPLOAD_DELAY_MINUTES * 60), '--sessions', eligibleIds.join(',')],
+      ['upload', 'send', '--delay', String(UPLOAD_DELAY_MINUTES * 60), '--sessions', sessionIds],
       statePaths(stateDir).errorLog,
     );
     // Written only after a successful spawn: the child sleeps --delay first, so this cannot race it.
