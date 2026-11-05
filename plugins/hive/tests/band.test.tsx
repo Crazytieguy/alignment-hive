@@ -1,5 +1,6 @@
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
 const BAND = {
   plugin: 'hive',
@@ -29,7 +30,7 @@ function fakeHive(on: On, knownFrom = 1) {
   let isExcluded = false
   let isSnoozed = false
   let release: (() => void) | null = null
-  const state = { hold: false, isReviewRunning: true }
+  const state = { hold: false, isReviewRunning: true, align: null as string | null }
   const clock = mock.clock(on)
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('session.id', async () => ({ value: 'abc' }))
@@ -52,6 +53,9 @@ function fakeHive(on: On, knownFrom = 1) {
     if (args[1] === 'snooze') isSnoozed = true
     const isSessionKnown = noticesCalls() >= knownFrom
     const rows = [
+      ...(state.align === null
+        ? []
+        : [{ id: 'align', severity: 'action', text: 'setup recommendations available', version: state.align, actions: [{ id: 'align', label: 'Run /hive:align', kind: 'command', command: '/hive:align' }, plugin('dismiss-forever', 'Dismiss forever')] }]),
       isSnoozed
         ? { id: 'snoozed', severity: 'info', text: '4 sessions ready to upload to alignment-hive · uploads snoozed', actions: [plugin('review', 'Review sessions')], when: 'start' }
         : { id: 'uploading', severity: 'info', text: 'uploading 4 sessions to alignment-hive in 9m', actions: [plugin('snooze', 'Snooze 24h')], when: 'start' },
@@ -235,6 +239,54 @@ describe('hive band', () => {
     // At the start the whole project, after the first message this session alone.
     expect(calls.filter(call => call[0] === 'notices').map(call => call.includes('--session-only'))).toEqual([false, true])
     await ui.unmount()
+  })
+
+  describe('the /hive:align row', () => {
+    const FOREVER = { key: 'hive:align:dismiss-forever' }
+
+    /** A session whose CLI offers the row for release 0.7; the store as an earlier session left it. */
+    async function start($: Engine, on: On, surface: 'terminal' | 'desktop', stored: Record<string, unknown> = {}) {
+      const { state } = fakeHive(on)
+      state.align = '0.7'
+      const writes: Array<[string, unknown]> = []
+      on('store.get', async (_$, e) => ({ value: stored[e.key] }))
+      on('store.set', async (_$, e) => {
+        writes.push([e.key, e.value])
+        return { value: undefined }
+      })
+      await $.session.start({ cwd: '/tmp/project', surface, isInteractive: true })
+      await settle()
+      return writes
+    }
+
+    for (const surface of ['terminal', 'desktop'] as const) {
+      test(`Dismiss is stored for this release, on ${surface}`, async ($, on) => {
+        const writes = await start($, on, surface)
+        const ui = await $.ui.mount({ ...BAND, surface })
+        await ui.press({ key: 'hive:align:dismiss' })
+        expect(await ui.find(FOREVER)).toBeUndefined()
+        expect(writes).toEqual([['dismissed:align', '0.7']])
+        await ui.unmount()
+      })
+
+      test(`Dismiss forever is stored for good, on ${surface}`, async ($, on) => {
+        const writes = await start($, on, surface)
+        const ui = await $.ui.mount({ ...BAND, surface })
+        await ui.press(FOREVER)
+        expect(await ui.find(FOREVER)).toBeUndefined()
+        expect(writes).toEqual([['dismissed:align', 'forever']])
+        await ui.unmount()
+      })
+    }
+
+    for (const [stored, isShown] of [['0.7', false], ['0.6', true], ['forever', false]] as const) {
+      test(`a later session with ${stored} stored ${isShown ? 'shows' : 'hides'} the row`, async ($, on) => {
+        await start($, on, 'terminal', { 'dismissed:align': stored })
+        const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+        expect((await ui.find(FOREVER)) !== undefined).toBe(isShown)
+        await ui.unmount()
+      })
+    }
   })
 
   test('a turn refreshes until the CLI knows the session, then only every 15 minutes', async ($, on) => {

@@ -15,7 +15,10 @@ type HiveNotice = Notice & { when?: 'start' | 'working' }
 
 const PLUGIN = 'hive'
 const notices = atom({ plugin: 'hive', key: 'notices' } as const, null as HiveNotices | null)
+// Rows dismissed this session; a versioned row stays dismissed in the store until its version
+// changes, or for good once its value is FOREVER.
 const dismissed = atom({ plugin: 'hive', key: 'dismissed' } as const, [] as string[])
+const FOREVER = 'forever'
 // The session the person has sent a message in; a /clear starts a new one, back at its start.
 const promptedSession = atom({ plugin: 'hive', key: 'promptedSession' } as const, null as string | null)
 // A row whose button's command is running: its buttons give way to the label until it settles.
@@ -152,8 +155,14 @@ async function visibleRows(
 
   const isWorking = prompted === sessionId
   const phase = isWorking ? 'working' : 'start'
-  const rows = (current.rows as HiveNotice[])
-    .filter(notice => !hidden.includes(notice.id) && (notice.when === undefined || notice.when === phase))
+  const candidates = (current.rows as HiveNotice[]).filter(
+    notice => !hidden.includes(notice.id) && (notice.when === undefined || notice.when === phase),
+  )
+  const stored = await Promise.all(
+    candidates.map(notice => (notice.version === undefined ? undefined : $.store.get(`dismissed:${notice.id}`))),
+  )
+  const rows = candidates
+    .filter((notice, index) => notice.version === undefined || (stored[index] !== notice.version && stored[index] !== FOREVER))
     .map(notice => {
       if (busyRow?.row === notice.id) return { ...notice, busy: busyRow.label }
       if (reviewing && notice.actions?.some(action => action.id === 'review')) {
@@ -264,6 +273,11 @@ export const register: Register = (on, options) => {
         await $.command.run({ command: action.command.slice(1) }).catch(() => $.ui.toast(`Could not run ${action.command}`))
         return
       }
+      if (action.id === 'dismiss-forever') {
+        await $.store.set(`dismissed:${notice.id}`, FOREVER)
+        await update($, dismissed, list => [...list, notice.id])
+        return
+      }
       if (action.id === 'keep-private') {
         // Done, the row folds back on the desktop: its label then says the new state.
         const isKept = await runForRow($, notice.id, 'keeping private…', ['upload', 'exclude', sessionId])
@@ -291,7 +305,10 @@ export const register: Register = (on, options) => {
         else $.ui.toast('Could not start the review page')
       }
     }
-    const onDismiss = (notice: Notice) => update($, dismissed, list => [...list, notice.id])
+    const onDismiss = async (notice: Notice) => {
+      await update($, dismissed, list => [...list, notice.id])
+      if (notice.version !== undefined) await $.store.set(`dismissed:${notice.id}`, notice.version)
+    }
 
     const ui = $.ui.resolve(e)
     const onHide = visible.canFold ? () => fold($, sessionId, false) : undefined

@@ -75,7 +75,7 @@ async function printed(command: () => Promise<number>): Promise<string> {
   }
 }
 
-type Notice = { id: string; text: string; when?: string; actions?: Array<{ id: string }> };
+type Notice = { id: string; text: string; when?: string; version?: string; actions?: Array<{ id: string }> };
 
 async function notices(sessionId = 's1'): Promise<Array<Notice>> {
   const cwd = process.cwd();
@@ -166,5 +166,13 @@ describe('session start', () => {
     history = SHARING;
     process.env.HIVE_PLUGIN_VERSION = '0.6.5';
     expect((await notices()).map((n) => n.id)).toContain('align');
+  });
+
+  test('the /hive:align row can be dismissed for good, and for the release: its major.minor', async () => {
+    history = SHARING;
+    process.env.HIVE_PLUGIN_VERSION = '0.6.5';
+    const row = (await notices()).find((n) => n.id === 'align');
+    expect(row?.version).toBe('0.6');
+    expect(row?.actions?.map((a) => a.id)).toEqual(['align', 'dismiss-forever']);
   });
 });

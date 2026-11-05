@@ -14,9 +14,10 @@ import type { SharingSnapshot } from '../lib/sharing';
 
 /**
  * A row of the hive plugin's band above the prompt; the plugin's `hooks/notice-band.tsx`
- * declares the same shape. `plugin` actions are the band's own: `snooze`, `review` and
- * `keep-private`. `when`: `start` rows show until the person's first message (the upload
- * decisions), `working` rows after it (this session's own state); without it, throughout.
+ * declares the same shape. `plugin` actions are the band's own: `snooze`, `review`,
+ * `keep-private` and `dismiss-forever`. `when`: `start` rows show until the person's first message
+ * (the upload decisions), `working` rows after it (this session's own state); without it,
+ * throughout. `version`: a dismissal holds until it changes.
  */
 export type Notice = {
   id: string;
@@ -25,6 +26,7 @@ export type Notice = {
   short?: string;
   actions?: Array<{ id: string; label: string; kind: 'command' | 'copy' | 'plugin'; command?: string }>;
   when?: 'start' | 'working';
+  version?: string;
 };
 
 const copy = hive.notices;
@@ -55,8 +57,12 @@ async function notices(
     rows.push({
       id: 'align',
       severity: 'action',
-      text: align === 'new' ? copy.alignNew : copy.alignUpdate,
-      actions: [{ id: 'align', label: copy.alignAction, kind: 'command', command: '/hive:align' }],
+      text: align.kind === 'new' ? copy.alignNew : copy.alignUpdate,
+      version: align.release,
+      actions: [
+        { id: 'align', label: copy.alignAction, kind: 'command', command: '/hive:align' },
+        { id: 'dismiss-forever', label: copy.alignDismissForever, kind: 'plugin' },
+      ],
     });
   }
 

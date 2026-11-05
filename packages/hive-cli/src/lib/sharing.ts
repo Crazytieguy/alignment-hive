@@ -26,12 +26,16 @@ export async function isUploadScheduled(stateDir: string): Promise<boolean> {
 }
 
 /** /hive:align is due on first run (`new`) and whenever the plugin's minor version changes (`update`). */
-export async function alignDue(stateDir: string, pluginVersion: string | undefined): Promise<'new' | 'update' | null> {
+export async function alignDue(
+  stateDir: string,
+  pluginVersion: string | undefined,
+): Promise<{ kind: 'new' | 'update'; release: string } | null> {
   if (!pluginVersion) return null;
-  const currentVersion = await readStateFile(statePaths(stateDir).alignVersion);
-  if (currentVersion === null) return 'new';
   const minor = (v: string) => v.trim().split('.').slice(0, 2).join('.');
-  return minor(currentVersion) === minor(pluginVersion) ? null : 'update';
+  const release = minor(pluginVersion);
+  const currentVersion = await readStateFile(statePaths(stateDir).alignVersion);
+  if (currentVersion === null) return { kind: 'new', release };
+  return minor(currentVersion) === release ? null : { kind: 'update', release };
 }
 
 type SessionState = Awaited<ReturnType<typeof loadSessionStateWithMigrations>>;

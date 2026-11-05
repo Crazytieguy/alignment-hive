@@ -518,6 +518,7 @@ export const hive = {
     alignNew: 'setup recommendations available',
     alignUpdate: 'new setup recommendations available',
     alignAction: 'Run /hive:align',
+    alignDismissForever: 'Dismiss forever',
     loginExpired: 'login expired, so uploads have stopped',
     loginAction: 'Copy login command',
     uploading: (count: number, minutes: number): string =>
