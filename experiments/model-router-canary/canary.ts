@@ -200,12 +200,15 @@ function compareLatency(rec: Recorder): void {
   });
 }
 
+const MUSE_HEADER_REASON = "its source names Muse's Contributor-mode header, which Meta trains on and Standard mode promises never to send. Not a re-pin until that's checked by hand";
+const MUSE_HEADER_REPEAT_HOURS = 30 * 24;
+
 /** Audits the candidate's source; a changed Codex refresh path or the Muse Contributor header stops it before any login is copied. */
 async function auditGate(pinned: string, version: string, rec: Recorder): Promise<string | undefined> {
   auditSource(await downloadSource(pinned), await downloadSource(version), rec);
   const failed = (name: string) => rec.checks.some((c) => c.name === name && c.status === 'fail');
   if (failed('refresh-lead')) return 'refresh behaviour changed; a sandbox copy of the Codex login could rotate the live one. Review it by hand, and list it in upstream.ts REVIEWED_REFRESH if it is safe';
-  if (failed('muse-contributor')) return "its source names Muse's Contributor-mode header, which Meta trains on and Standard mode promises never to send. Not a re-pin until that's checked by hand";
+  if (failed('muse-contributor')) return MUSE_HEADER_REASON;
   return undefined;
 }
 
@@ -534,7 +537,9 @@ function findingsOf(report: RunReport, rec: Recorder): Array<Finding> {
     const entry = state[cand.version];
     const signal = hoistSignal(rec.checks);
     const text = `candidate CLIProxyAPI ${cand.version}: ${cand.verdict} (${cand.reason})${signal ? `; also, ${signal}` : ''}`;
-    if (cand.verdict === 'pass' || cand.verdict === 'fail') out.push({ key: `candidate:${cand.version}:${cand.verdict}`, text });
+    // Every release fails this audit until upstream drops the header, so they share a finding that only reminds.
+    if (cand.verdict === 'fail' && cand.reason === MUSE_HEADER_REASON) out.push({ key: 'muse-contributor', text: `${text}; the pin stays below the header until upstream removes it (router-for-me/CLIProxyAPI#7272) or the user decides otherwise`, repeatAfterHours: MUSE_HEADER_REPEAT_HOURS });
+    else if (cand.verdict === 'pass' || cand.verdict === 'fail') out.push({ key: `candidate:${cand.version}:${cand.verdict}`, text });
     // A superseded candidate needs nothing while the release that fixes it ages, unless the waits keep coming.
     if (cand.verdict === 'superseded') {
       const streak = supersededStreak(state, report.versions.pinnedCpa ?? '');

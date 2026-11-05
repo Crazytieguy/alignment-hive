@@ -103,3 +103,9 @@ test('a finding starts a session once a day', () => {
   expect(newFindings(f, { 'live:reach/gpt-6-luna': ago(3) }, NOW)).toEqual([f[1]!]);
   expect(newFindings(f, { 'live:reach/gpt-6-luna': ago(25), 'candidate:8.0.45:pass': ago(1) }, NOW)).toEqual([f[0]!]);
 });
+
+test('a finding can wait longer before it repeats', () => {
+  const f = [{ key: 'muse-contributor', text: 'held', repeatAfterHours: 720 }];
+  expect(newFindings(f, { 'muse-contributor': ago(719) }, NOW)).toEqual([]);
+  expect(newFindings(f, { 'muse-contributor': ago(720) }, NOW)).toEqual(f);
+});

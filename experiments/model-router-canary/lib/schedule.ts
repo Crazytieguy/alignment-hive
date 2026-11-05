@@ -114,11 +114,11 @@ export function isPatch(pinned: string, candidate: string): boolean {
 }
 
 /** A finding for the hand-off session, with a key that stays the same while the finding does. */
-export type Finding = { key: string; text: string };
+export type Finding = { key: string; text: string; repeatAfterHours?: number };
 /** When each finding key last started a session. */
 export type SessionLog = Record<string, string>;
 
-/** The findings no session has seen within REPEAT_AFTER_HOURS; an empty result means the run stays quiet. */
+/** The findings no session has seen within their repeat window (REPEAT_AFTER_HOURS by default); an empty result means the run stays quiet. */
 export function newFindings(findings: Array<Finding>, log: SessionLog, now: number): Array<Finding> {
-  return findings.filter((f) => !log[f.key] || now - Date.parse(log[f.key]!) >= REPEAT_AFTER_HOURS * HOUR);
+  return findings.filter((f) => !log[f.key] || now - Date.parse(log[f.key]!) >= (f.repeatAfterHours ?? REPEAT_AFTER_HOURS) * HOUR);
 }
