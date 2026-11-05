@@ -1,5 +1,5 @@
 // `bun run --filter @alignment-hive/plugins typecheck [plugin...]`: type-checks plugins' hooks modules and tests, and
-// the retrieval bench, which imports hive's recall code. Bare `tsc` is denied in this project, so this is the way in.
+// with no plugin named, the experiments, which have no package.json of their own.
 // Claude Code writes its declarations (the module 'claude-code') only beside a mod it loads, or when the
 // plugin-authoring skill loads, so this borrows the newest copy on the machine instead of tracking one.
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -66,7 +66,9 @@ for (const plugin of process.argv.length > 2 ? process.argv.slice(2) : pluginsWi
 }
 rmSync(dir, { recursive: true })
 if (process.argv.length <= 2) {
-  console.log('\nexperiments/auto-retrieval/bench')
-  if (tsc(join(here, '../experiments/auto-retrieval/bench')) !== 0) failed++
+  for (const experiment of ['auto-retrieval/bench', 'auto-mode-classifier', 'model-router-canary']) {
+    console.log(`\nexperiments/${experiment}`)
+    if (tsc(join(here, '../experiments', experiment)) !== 0) failed++
+  }
 }
 process.exit(failed === 0 ? 0 : 1)

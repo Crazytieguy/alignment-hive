@@ -9,17 +9,6 @@
       "Bash(cargo fmt *)",
       "mcp__convex__*",
       "mcp__remote-kernels__*"
-    ],
-    "deny": [
-      "Bash(eslint *)",
-      "Bash(prettier *)",
-      "Bash(tsc *)",
-      "Bash(jest *)",
-      "Bash(vitest *)",
-      "Bash(npx *)",
-      "Bash(npm *)",
-      "Bash(pnpm *)",
-      "Bash(yarn *)"
     ]
   },
   "hooks": {
