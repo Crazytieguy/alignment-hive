@@ -436,7 +436,11 @@ export function judgeToolTurn1(r: Reply): { result?: Result; toolUse?: Block; si
 export function judgeToolTurn2(r: Reply, signed: boolean, metrics: Record<string, number>): Result {
   if (r.error) return { status: 'fail', detail: `turn 2: ${r.error}`, metrics };
   const text = textOf(r.message);
-  if (!text.includes('7319')) return { status: 'fail', detail: `turn 2 did not use the tool result: "${excerpt(text, 80)}"`, metrics };
+  if (!text.includes('7319')) {
+    const m = r.message;
+    const thinking = m?.content.filter((b) => b.type === 'thinking').map((b) => excerpt(b.thinking ?? '', 80)).join(' | ');
+    return { status: 'fail', detail: `turn 2 did not use the tool result: "${excerpt(text, 80)}" (stop_reason ${m?.stop_reason ?? '?'}, blocks ${m?.content.map((b) => b.type).join(',') || 'none'}${thinking ? `, thinking: ${thinking}` : ''})`, metrics };
+  }
   if (!signed) return { status: 'warn', detail: 'round trip ok, but turn 1 had no thinking block with a signature (reasoning replay untested)', metrics };
   return { status: 'pass', detail: `round trip ok, ${metrics.thinking_blocks ?? 1} signed thinking block(s), ${metrics.signature_chars} signature chars replayed`, metrics };
 }
@@ -598,8 +602,8 @@ async function probeToolReplay(t: RouterTarget, model: string): Promise<Result> 
 
 /**
  * Claude Code declares a tool that joins mid-conversation (SubagentHandback on a resume, a late MCP server) in a
- * `role: "system"` message's `tool_addition` block. CLIProxyAPI's translators keep only that message's text; the
- * router declares the tool in tools[] (tool_changes.rs). The decoy and CC's deferred placeholder stand in for the
+ * `role: "system"` message's `tool_addition` block. Before 8.0.48 CLIProxyAPI's translators kept only that message's
+ * text; the router declares the tool in tools[] (tool_changes.rs). The decoy and CC's deferred placeholder stand in for the
  * tools the model could call instead.
  */
 async function probeToolAddition(t: RouterTarget, model: string): Promise<Result> {

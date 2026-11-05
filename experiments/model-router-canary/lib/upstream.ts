@@ -384,6 +384,15 @@ export function excludedModelsLines(files: Array<GoFile>): Array<string> {
   return linesAround(files, /Attributes\["excluded_models"\]/, 3, 3);
 }
 
+/**
+ * The source files naming Muse's Contributor-mode header. Meta trains on that traffic, and Standard mode promises the
+ * header never goes out (muse.rs); the router's opt-in relay lives in the login files, so the child's source has no
+ * reason to name it. From 8.0.50 it sets the header to 1 on every Meta request, and no per-login setting can remove it.
+ */
+export function museContributorFiles(files: Array<GoFile>): Array<string> {
+  return files.filter((f) => /X-Tbh-Contributor-Mode/i.test(f.text)).map((f) => basename(f.path));
+}
+
 /** Every YAML key model-router writes into the child's config, read from supervisor.rs `upstream_config_yaml`. */
 export function routerYamlKeys(supervisorRs: string): Array<string> {
   // The function and the helpers that render its sections.
@@ -452,7 +461,7 @@ const clip = (s: string, n = 200): string => (s.length > n ? s.slice(0, n - 1) +
  * Compare the candidate's source with the pin's where a change would hurt model-router: Codex refresh timing (a
  * sandbox copy of the login could rotate the live refresh token), the config keys the router writes, the Codex
  * identity (load-shedding history), the priority tier the `-fast` routes ask for, how Claude-format effort is read,
- * and per-login exclusions. Returns the checks it recorded.
+ * per-login exclusions, and Muse's Contributor-mode header. Returns the checks it recorded.
  */
 export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, repo = REPO, reviewedRefresh = REVIEWED_REFRESH): Array<Check> {
   const base = { tier: 'candidate' as const, target: 'candidate' };
@@ -523,6 +532,11 @@ export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, r
       const { added, removed } = lineDiff(a, b);
       if (!added.length && !removed.length) return { status: 'pass', detail: `unchanged (${a.length} read sites)` };
       return { status: 'warn', detail: clip(`per-login excluded_models handling changed (+${added.length} −${removed.length} sites); recheck exclusions.rs's override guard`) };
+    }),
+    timed('muse-contributor', () => {
+      const named = museContributorFiles(cand);
+      if (!named.length) return { status: 'pass', detail: 'the source never names X-Tbh-Contributor-Mode' };
+      return { status: 'fail', detail: clip(`the source names X-Tbh-Contributor-Mode (${named.join(', ')}); check by hand that Muse Standard mode still never sends it`) };
     }),
   ];
   return checks;

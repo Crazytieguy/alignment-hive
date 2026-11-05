@@ -194,12 +194,13 @@ function compareLatency(rec: Recorder): void {
   });
 }
 
-/** Audits the candidate's source; a changed Codex refresh path stops it before any login is copied. */
-async function refreshGate(pinned: string, version: string, rec: Recorder): Promise<string | undefined> {
+/** Audits the candidate's source; a changed Codex refresh path or the Muse Contributor header stops it before any login is copied. */
+async function auditGate(pinned: string, version: string, rec: Recorder): Promise<string | undefined> {
   auditSource(await downloadSource(pinned), await downloadSource(version), rec);
-  return rec.checks.some((c) => c.name === 'refresh-lead' && c.status === 'fail')
-    ? 'refresh behaviour changed; a sandbox copy of the Codex login could rotate the live one. Review it by hand, and list it in upstream.ts REVIEWED_REFRESH if it is safe'
-    : undefined;
+  const failed = (name: string) => rec.checks.some((c) => c.name === name && c.status === 'fail');
+  if (failed('refresh-lead')) return 'refresh behaviour changed; a sandbox copy of the Codex login could rotate the live one. Review it by hand, and list it in upstream.ts REVIEWED_REFRESH if it is safe';
+  if (failed('muse-contributor')) return "its source names Muse's Contributor-mode header, which Meta trains on and Standard mode promises never to send. Not a re-pin until that's checked by hand";
+  return undefined;
 }
 
 /** The precheck, recorded; a stale login it leaves out is a warning, since it otherwise lingers unnoticed. */
@@ -299,7 +300,7 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
   let pre: ReturnType<typeof precheck>;
   try {
     cpaBinary = await downloadCpa(version);
-    const blocked = await refreshGate(pinned, version, rec);
+    const blocked = await auditGate(pinned, version, rec);
     if (blocked) return settle('fail', blocked);
     pre = precheck(rec);
     if (!pre.ok) return settle('skipped', pre.detail, { transientSkip: pre.transient });

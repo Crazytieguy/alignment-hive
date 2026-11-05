@@ -107,7 +107,7 @@ test('goFunc takes a gofmt func through its closing brace; normalizeGo drops com
 });
 
 // A minimal source tree holding every refresh anchor, the identity lines, exclusion reads and all router YAML keys.
-function fakeSource(dir: string, edits: { lead?: string; siwcGuard?: string; siwcTail?: string; ua?: string; dropKey?: string; speed?: string; effort?: string; finalize?: string } = {}): string {
+function fakeSource(dir: string, edits: { lead?: string; siwcGuard?: string; siwcTail?: string; ua?: string; dropKey?: string; speed?: string; effort?: string; finalize?: string; contributor?: boolean } = {}): string {
   const root = join(dir, 'CLIProxyAPI-x');
   mkdirSync(join(root, 'sdk/cliproxy/auth'), { recursive: true });
   mkdirSync(join(root, 'internal/runtime/executor/helps'), { recursive: true });
@@ -161,6 +161,7 @@ func authPreferredInterval(a *Auth) time.Duration {
 `,
   );
   writeFileSync(join(root, 'sdk/cliproxy/codex.go'), 'package cliproxy\n\nfunc (a *CodexAuthenticator) RefreshLead() *time.Duration {\n\treturn new(coreauth.CodexOuterRefreshLead)\n}\n');
+  if (edits.contributor) writeFileSync(join(root, 'internal/runtime/executor/meta.go'), 'package executor\n\nfunc stamp(req *http.Request) {\n\treq.Header.Set("X-Tbh-Contributor-Mode", "1")\n}\n');
   writeFileSync(
     join(root, 'sdk/cliproxy/service_lifecycle.go'),
     'package cliproxy\n\nfunc run() {\n\tinterval := 15 * time.Minute\n\ts.coreManager.StartAutoRefresh(ctx, interval)\n\tif val, ok := a.Attributes["excluded_models"]; ok {\n\t\texcluded = val\n\t}\n}\n',
@@ -233,7 +234,7 @@ function audit(edits: Parameters<typeof fakeSource>[1]): Record<string, { status
 
 test('an unchanged candidate passes every audit check', () => {
   const r = audit({});
-  expect(Object.values(r).map((c) => c.status)).toEqual(['pass', 'pass', 'pass', 'pass', 'pass', 'pass']);
+  expect(Object.values(r).map((c) => c.status)).toEqual(['pass', 'pass', 'pass', 'pass', 'pass', 'pass', 'pass']);
   expect(r['refresh-lead']!.detail).toBe('unchanged (12 anchors)');
   expect(r['service-tier']!.detail).toBe('unchanged (5 anchors)');
   expect(r['claude-effort']!.detail).toBe('unchanged (3 anchors)');
@@ -310,6 +311,13 @@ test('a refresh change reviewed by hand passes, and only for the reviewed body',
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('a candidate that names the Muse Contributor-mode header fails', () => {
+  expect(audit({})['muse-contributor']!.status).toBe('pass');
+  const r = audit({ contributor: true })['muse-contributor']!;
+  expect(r.status).toBe('fail');
+  expect(r.detail).toContain('meta.go');
 });
 
 test('REVIEWED_REFRESH names real anchors by short hashes', () => {
