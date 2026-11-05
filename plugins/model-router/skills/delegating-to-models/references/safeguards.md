@@ -30,7 +30,9 @@ Kimi and GLM publish no vendor safety framework.
   a narrow frontier-LLM-development classifier (e.g. kernel work on some
   ML accelerators) falls back to Opus 5; weapons and distillation
   requests are blocked with no fallback. In Claude Code the session
-  continues on the fallback model. Rated CB-1, below CB-2.
+  continues on the fallback model when `switchModelsOnFlag` is on (the
+  default); when it is off ("Ask each time"), the main session pauses and
+  a subagent stops. Rated CB-1, below CB-2.
   [Anthropic, 2026-09-22](https://www.anthropic.com/claude-opus-5-5);
   [system card, 2026-09-22](https://www.anthropic.com/claude-opus-5-5-system-card).
 - **Opus 5** — defensive security work allowed (source-code vulnerability
