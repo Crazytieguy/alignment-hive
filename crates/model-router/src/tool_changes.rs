@@ -11,9 +11,12 @@
 //! or a `tool_reference` naming a `defer_loading` entry of `tools[]`, and
 //! `{"type":"tool_removal","tool":{"type":"tool_reference","name":…}}` to
 //! withdraw one. Every translator of the child (`CLIProxyAPI` 8.0.34 through
-//! 8.0.47) keeps only a system message's text, so the model read "the tool is
+//! 8.0.47) kept only a system message's text, so the model read "the tool is
 //! now available" and had no function to call: a GPT-6.1 Sol subagent looped
-//! on the handback enforcement until it was stopped (2026-10-29).
+//! on the handback enforcement until it was stopped (2026-10-29). Since 8.0.48
+//! the Codex and `OpenAI` ones read `tool_addition`, but still ignore
+//! `tool_removal`, so the router keeps the fold: it removes both before the
+//! child sees them.
 //!
 //! The fold here is a pure function of the request: the system messages stay
 //! in the history, so every later request rebuilds the same `tools[]`, and
@@ -27,8 +30,9 @@
 //! backend, where the position of the tool makes no difference (11 of 11 live
 //! requests read 0 cached tokens, 2026-10-29); the requests after it read the
 //! cache again. The backend's own mid-conversation item, an `additional_tools`
-//! input item, kept the cache in the same measurement, but nothing the router
-//! sends in Claude format becomes one: that belongs in the child's translator.
+//! input item, kept the cache in the same measurement. The child's Codex
+//! translator writes one for a `tool_addition` since 8.0.48, but leaving
+//! additions to it would need removals handled there too.
 //!
 //! The same pass drops CC's `DeferredToolPlaceholder`: Anthropic never
 //! exposes a `defer_loading` tool to the model, but the child strips

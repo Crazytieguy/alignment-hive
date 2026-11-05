@@ -3,7 +3,7 @@
 //!
 //! A `-fast` twin ([`crate::config::ModelRoute::tier`]) sends `service_tier:
 //! "priority"`, the field and value native Codex sends for its `/fast`.
-//! `CLIProxyAPI` (8.0.44) keeps it, and on a subscription login adds the
+//! `CLIProxyAPI` (8.0.49) keeps it, and on a subscription login adds the
 //! `X-Codex-Routing-Hint: model=…;tier=priority` header Codex sends. Every
 //! other GPT-branch request loses any `speed` or `service_tier` it carries:
 //! the child would map either to priority, xAI and Meta included, so the

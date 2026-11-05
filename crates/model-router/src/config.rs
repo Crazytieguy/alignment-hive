@@ -187,8 +187,8 @@ impl ModelFamily {
 
     /// Whether the tools Claude Code adds or withdraws mid-conversation, in
     /// a system message's `tool_addition`/`tool_removal` blocks, must be
-    /// declared in `tools[]` ([`crate::tool_changes`]): every translator of
-    /// the child keeps only such a message's text.
+    /// declared in `tools[]` ([`crate::tool_changes`]): the child's translators
+    /// ignore `tool_removal`, and before 8.0.48 `tool_addition` too.
     ///
     /// Matched exhaustively on purpose: a new family must decide.
     #[must_use]

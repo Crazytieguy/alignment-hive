@@ -319,18 +319,8 @@ export const SIWC_ONLY = new Set(['CodexSIWCRefreshLead', 'CodexSIWCNeedsRefresh
  * to it does. Entries are moot once the pin reaches their release; drop them at that re-pin.
  */
 export const REVIEWED_REFRESH: Record<string, Record<string, string>> = {
-  CodexOuterNeedsRefresh: {
-    '2ce62a56849a9516':
-      '8.0.48: returns early while the refresh token equals RejectedRefreshToken, which is runtime-only (json:"-") and set only after a refresh was rejected as terminal. It suppresses refreshes, never adds one.',
-  },
   shouldRefresh: {
     d0666c6776766507: '8.0.51: returns false for a Codex login with no refresh_token and no SIWC section (95f125ff). A login that can be copied has one, so it is not affected.',
-  },
-  isUnauthorizedError: {
-    // Accepted, not harmless: a request error whose text has "(401)" now refreshes at once, as the pin already does on
-    // a real 401 or an error saying "status 401". The live router is using the same login, so a sandbox request should
-    // see neither, and a refresh that does happen is written back to the live login by the credential postcheck.
-    f450358e69617e7e: '8.0.48: also matches "(401)" in the error text, e.g. a 500 body reporting an inner 401. The only text in the source that produces it is a failed SIWC token request ("token request failed (401)").',
   },
 };
 
