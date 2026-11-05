@@ -143,6 +143,11 @@ describe('selection', () => {
     expect(isRecall(call('Agent', { subagent_type: 'hive:retrieval' }))).toBe(true);
     expect(isRecall(call('Agent', { subagent_type: 'Explore' }))).toBe(false);
     expect(inOutline(call('Agent', { subagent_type: 'hive:retrieval' }), false)).toBe(true);
+    // The recall tool: a result that is a report counts, and one that found nothing doesn't.
+    const answered = (result: string): Entry => ({ ...call('mcp__hive__recall', { about: 'the rollout' }), result } as Entry);
+    expect(isRecall(answered(report))).toBe(true);
+    expect(inOutline(answered(report), false)).toBe(true);
+    expect(isRecall(answered('Recall found nothing new on this.'))).toBe(false);
     expect(isRecall(typed)).toBe(false);
   });
 

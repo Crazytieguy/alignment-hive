@@ -279,6 +279,7 @@ Output: JSON Lines on stdout, one entry per line. Keys that don't apply are left
            recall, note (a note the human saved with /remember, for later sessions); with --all-entries, also
            task-notification
   recall   true on a report from past sessions (origin recall) and on calls that started a hive:retrieval agent
+           or whose result is such a report (the hive plugin's recall tool)
   error    true when the tool call failed or was denied
   agents   locs of the agent transcripts a tool call started or messaged; outline prints the first 5 and
            [+N items] for the rest, show prints them all

@@ -24,6 +24,21 @@ test('history: messages, replies and answers oldest first, under their session; 
   expect(text).not.toContain('Bash')
 })
 
+test('history: a report the recall tool returned counts as an earlier recall: its entries print once, and are no news in its session', () => {
+  const reported = reportOf([{ loc: 'cccc0003:4', label: 'user', text: 'use tabs', date: '2026-09-01', context: '' }], '2026-09-01', { about: 'the rollout' })
+  const h = history(
+    [
+      { loc: 'aaaa0001', rows: [{ loc: 'aaaa0001:2', time: at(1), kind: 'tool', tool: 'mcp__hive__recall', recall: true, result: reported }] },
+      { loc: 'cccc0003', rows: [user('cccc0003:4', 2, 'use tabs')] },
+    ],
+    NOW,
+    100_000,
+    'aaaa0001',
+  )
+  expect(h.isNew('cccc0003:4')).toBe(false)
+  expect(h.closed.join('') + h.open).toContain('cccc0003:4 again')
+})
+
 test('history: whole chunks leave the window oldest first, so what stays prints the same; it fills most of the budget', () => {
   const rows = many('aaaa0001', 400, 1000)
   const h = history([{ loc: 'aaaa0001', rows }], NOW, 100_000)
@@ -328,13 +343,13 @@ test('recalledOf reads a report back as reportOf wrote it, and FAILED as failed'
     // An earlier retrieval report's quote can come without a date.
     { loc: 'cccc0003:12', label: 'assistant', text: 'Landed as abc123.', date: '', context: '' },
   ]
-  expect(recalledOf(reportOf(found, '2026-10-17'))).toEqual({ entries: found, from: '2026-10-17' })
+  expect(recalledOf(reportOf(found, '2026-10-17', { prompt: 'x' }))).toEqual({ entries: found, from: '2026-10-17' })
   expect(recalledOf(FAILED)).toBe('failed')
   expect(recalledOf('[hive recall] something else')).toBeUndefined()
 })
 
 test('recalledIn: each automatic report goes to the prompt nearest before it', () => {
-  const one = reportOf([{ loc: 'aaaa0001:3', label: 'user', text: 'Use tabs.', date: '2026-10-19', context: '' }], '2026-10-17')
+  const one = reportOf([{ loc: 'aaaa0001:3', label: 'user', text: 'Use tabs.', date: '2026-10-19', context: '' }], '2026-10-17', { prompt: 'x' })
   const rows: Array<Row> = [
     { loc: 'cccc0003:1', uuid: 'p1', kind: 'user', text: 'Format the file.' },
     { loc: 'cccc0003:2', uuid: 'r1', kind: 'user', origin: 'recall', recall: true, text: one },
@@ -350,7 +365,7 @@ test('recalledIn: each automatic report goes to the prompt nearest before it', (
     { loc: 'cccc0003:9', uuid: 'p4', kind: 'user', text: 'I left comments.' },
     { loc: 'cccc0003:10#79cff63a', uuid: 't1', kind: 'tool', tool: 'ArtifactComments', result: 'Thread 79cff63a' },
     { loc: 'cccc0003:11', uuid: 'r4', kind: 'user', origin: 'recall', recall: true, text: one },
-    { loc: 'cccc0003:12', uuid: 'r5', kind: 'user', origin: 'recall', recall: true, text: reportOf([{ loc: 'aaaa0001:3', label: 'user', text: 'Use tabs.', date: '2026-10-19', context: '' }], '2026-10-17', true) },
+    { loc: 'cccc0003:12', uuid: 'r5', kind: 'user', origin: 'recall', recall: true, text: reportOf([{ loc: 'aaaa0001:3', label: 'user', text: 'Use tabs.', date: '2026-10-19', context: '' }], '2026-10-17', { threads: ['a thread'] }) },
   ]
   expect(recalledIn(rows)).toEqual([
     ['p1', { entries: [{ loc: 'aaaa0001:3', label: 'user', text: 'Use tabs.', date: '2026-10-19', context: '' }], from: '2026-10-17' }],

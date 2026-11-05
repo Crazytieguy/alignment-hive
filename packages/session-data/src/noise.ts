@@ -89,12 +89,12 @@ export function isNoteText(text: string): boolean {
 
 /**
  * Entries that hold past-session retrieval: reports handed in as user entries (origin `recall`: automatic recall's,
- * and a background `hive:retrieval` agent's hand-back), and calls that started a `hive:retrieval` agent, whose
- * result or agent transcript holds the report.
+ * and a background `hive:retrieval` agent's hand-back), calls that started a `hive:retrieval` agent, whose result or
+ * agent transcript holds the report, and tool calls whose result is a report (the hive plugin's recall tool).
  */
 export function isRecall(e: Entry): boolean {
   if (e.kind === 'user') return e.origin === 'recall';
-  return e.kind === 'tool' && isRetrievalCall(e);
+  return e.kind === 'tool' && (isRetrievalCall(e) || (e.result !== undefined && isRecallText(e.result)));
 }
 
 /** A call that started the hive:retrieval agent. */

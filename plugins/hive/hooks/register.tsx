@@ -7,8 +7,8 @@ import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 import { cli, hive } from './cli'
 import { noticeBand, noticeLabel } from './notice-band'
 import type { Notice, NoticeAction } from './notice-band'
-import { REMEMBER_DESCRIPTION, drawRecalled, endRecallTurn, onPromptStored, readWithRecall, remember, submitWithRecall, warm } from './recall'
-import { RECALL_SECTION } from './recall-text'
+import { REMEMBER_DESCRIPTION, answerRecallTool, drawRecalled, endRecallTurn, onPromptStored, readWithRecall, remember, submitWithRecall, warm } from './recall'
+import { RECALL_SECTION, RECALL_TOOL, RECALL_TOOL_SPEC } from './recall-text'
 import type { HiveBusy, HiveFolded, HiveNotices } from '../types'
 
 // `when`: which phase of the session shows the row (packages/hive-cli/src/commands/notices.ts).
@@ -203,6 +203,7 @@ export const register: Register = (on, options) => {
   const recallModel = String(options.recallModel ?? 'auto')
 
   on('session.start', async ($, e, next) => {
+    if (options.recall === true) await $.tool.register(RECALL_TOOL_SPEC)
     const started = await next(e)
     cli.projectDir = await $.session.root()
     // A refused registration (a name taken) leaves the rest of the start as it was.
@@ -222,7 +223,8 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'remember' }, ($, e) => remember($, e.args, options.recall === true))
 
   // What recall gave a prompt shows under it (recall.tsx); the prompt's stored row names it. A comments read gets
-  // recall too. The main agent's system prompt says what recall covers, so it saves nothing recall already does.
+  // recall too, and the recall tool asks for it. The main agent's system prompt says what recall covers, so it saves
+  // nothing recall already does.
   if (options.recall === true) {
     on('prompt.compose', async ($, e, next) => {
       const { sections } = await next(e)
@@ -234,6 +236,7 @@ export const register: Register = (on, options) => {
     on('session.append', { door: ['prompt', 'delivery'] }, onPromptStored)
     on('ui.render', { component: 'UserMessage' }, drawRecalled)
     on('tool.call', { tool: 'ArtifactComments' }, ($, e, next) => readWithRecall($, e, next, recallModel))
+    on('tool.call', { tool: RECALL_TOOL }, ($, e) => answerRecallTool($, e, recallModel))
   }
 
   // The CLI discovers a session once it holds an assistant reply: the first reply row stored in

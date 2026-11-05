@@ -70,6 +70,11 @@ function world(on: On, { isSolMissing = false } = {}) {
   on('turn.complete', async () => ({ text: '' }) as never)
   on('session.id', async () => ({ value: SESSION }))
   on('session.root', async () => ({ value: '/tmp/project' }))
+  const registered: Array<{ name: string; isDeferred?: boolean }> = []
+  on('tool.register', async (_$, e) => {
+    registered.push(e as never)
+    return { value: undefined } as never
+  })
   on('tool.call', { tool: 'ArtifactComments' }, async () => ({ result: state.comments, text: state.comments }) as never)
   on('prompt.submit', async (_$, e) => {
     contexts.push(e.context ?? [])
@@ -144,7 +149,7 @@ function world(on: On, { isSolMissing = false } = {}) {
     return { value: undefined } as never
   })
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
-  return { asked, contexts, clock, dirs, logs, prompts, served, state, timeouts }
+  return { asked, contexts, clock, dirs, logs, prompts, registered, served, state, timeouts }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
@@ -396,6 +401,65 @@ describe('recall on comment reads', () => {
     await clock.advance(31_000)
     expect((await held).context).toBeUndefined()
     expect(asked).toEqual([SOL, SOL])
+  })
+})
+
+describe('the recall tool', () => {
+  const TOOL = 'mcp__hive__recall'
+  const callTool = ($: Parameters<typeof start>[0], about = 'Rolling the formatter out to every package next.') =>
+    $.tool.call({ tool: TOOL, about } as never) as unknown as Promise<{ result: string }>
+
+  test('off: not listed', async ($, on) => {
+    const { registered } = world(on)
+    await start($)
+    expect(registered).toEqual([])
+  })
+
+  test('on: listed in the prompt, not behind ToolSearch', { options: { recall: true } }, async ($, on) => {
+    const { registered } = world(on)
+    await start($)
+    expect(registered.map(s => [s.name, s.isDeferred])).toEqual([['recall', false]])
+  })
+
+  test('on: answers with the cited entries, from a recall for what it was asked', { options: { recall: true } }, async ($, on) => {
+    const { asked, prompts } = world(on)
+    await start($)
+    const { result } = await callTool($)
+    expect(asked).toEqual([SOL])
+    expect(prompts[0]).toContain('<ask>\\nRolling the formatter out to every package next.\\n</ask>')
+    expect(result).toStartWith('[hive recall] On what you asked about: entries')
+    expect(result).toContain('> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)')
+  })
+
+  test('on: what an earlier call in this session reported is not reported again', { options: { recall: true } }, async ($, on) => {
+    const { asked, state } = world(on)
+    await start($)
+    const { result } = await callTool($)
+    state.sessionRows = [{ loc: 'abcd1234:5', time: '2026-10-20T15:29:40Z', kind: 'tool', tool: TOOL, recall: true, result }]
+    expect((await callTool($)).result).toStartWith('Recall found nothing new')
+    expect(asked).toEqual([SOL])
+  })
+
+  test('on: nothing found says so, and so does running past 30 seconds', { options: { recall: true } }, async ($, on) => {
+    const { clock, state } = world(on)
+    await start($)
+    state.reply = 'none'
+    expect((await callTool($)).result).toStartWith('Recall found nothing new')
+    state.hold = true
+    const held = callTool($)
+    await clock.advance(31_000)
+    expect((await held).result).toStartWith('Recall did not finish')
+  })
+
+  test('on: a session a script ran may call it; a subagent is refused, with no recall', { options: { recall: true } }, async ($, on) => {
+    const { asked, state } = world(on)
+    await start($)
+    state.isScripted = true
+    expect((await callTool($)).result).toContain('Always use tabs')
+    expect(asked).toEqual([SOL])
+    const refused = await ($.tool.call({ tool: TOOL, about: 'Next: the rollout.', agentId: 'a1' } as never) as unknown as Promise<{ text?: string; isError?: boolean; deny?: string }>)
+    expect(refused.deny ?? refused.text).toContain('Only the main agent')
+    expect(asked).toEqual([SOL])
   })
 })
 
@@ -693,7 +757,7 @@ describe('what recall gave a prompt', () => {
     await $.prompt.submit(typed('Format the file.'))
     await stored($, 'Format the file.', 'p1')
     const found = [{ loc: 'feed0001:7', label: 'user', text: 'Always use tabs in this repo, never spaces.', date: '2026-10-19', context: '' }]
-    const report = (uuid: string) => ({ loc: 'abcd1234:9', uuid, kind: 'user', origin: 'recall', recall: true, text: reportOf(found, '2026-10-17') })
+    const report = (uuid: string) => ({ loc: 'abcd1234:9', uuid, kind: 'user', origin: 'recall', recall: true, text: reportOf(found, '2026-10-17', { prompt: 'x' }) })
     state.transcript = [
       { loc: 'abcd1234:1', uuid: 'old1', kind: 'user', text: 'Format the file.' },
       report('r1'),

@@ -972,12 +972,15 @@ describe('recall', () => {
             isMeta: true,
             origin: { kind: 'peer' },
           }),
+          ...call('c', 'mcp__hive__recall', { about: 'the rollout' }, report),
+          ...call('d', 'mcp__hive__recall', { about: 'the rest' }, 'Recall found nothing new on this.'),
         ]),
       ),
     );
     const s = S.slice(0, 8);
     await hl('outline', s);
-    // A foreground retrieval agent's result is its report; a background one's report is its hand-back message.
+    // A foreground retrieval agent's result is its report, as the recall tool's is when it found entries; a background
+    // one's report is its hand-back message.
     expect(rows().map((x) => [x.loc, x.origin, x.tool, x.recall, x.result])).toEqual([
       [`${s}:1`, undefined, undefined, undefined, undefined],
       [`${s}:2`, 'recall', undefined, true, undefined],
@@ -985,6 +988,7 @@ describe('recall', () => {
       [`${s}:4`, undefined, 'Agent', true, '## Findings [+16 chars]'],
       [`${s}:6`, undefined, 'Agent', true, 'Async agent launched'],
       [`${s}:8`, 'recall', undefined, true, undefined],
+      [`${s}:10`, undefined, 'mcp__hive__recall', true, '[hive recall] Entries from past sessions picked automatically. [+40 chars]'],
     ]);
     // --no-agents keeps them all: retrieval is found in the transcript itself, not in agent files.
     const all = rows();
@@ -1013,7 +1017,7 @@ describe('recall', () => {
       process.env.CLAUDE_CODE_SESSION_ID = S;
       out.length = 0;
       await hl('outline', 'current');
-      expect(rows().filter((x) => x.recall).map((x) => x.loc)).toEqual([`${s}:2`, `${s}:3`, `${s}:4`, `${s}:6`, `${s}:8`]);
+      expect(rows().filter((x) => x.recall).map((x) => x.loc)).toEqual([`${s}:2`, `${s}:3`, `${s}:4`, `${s}:6`, `${s}:8`, `${s}:10`]);
       out.length = 0;
       await hl('show', 'current:2');
       expect(rows().map((x) => x.loc)).toEqual([`${s}:2`]);

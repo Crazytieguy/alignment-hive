@@ -3,13 +3,14 @@ import type { EngineInterface, Hook, MatchedHook, RenderElement, RenderInput } f
 
 import { CliFailed, localReads } from './cli'
 import type { Read } from './cli'
-import { FAILED, INSTRUCTIONS, budgetFor, entries, history, newThreads, noteText, promptBlocks, recalledIn, reportOf, sessionsFor } from './recall-text'
-import type { Ask, Listed, Row, Session } from './recall-text'
+import { FAILED, INSTRUCTIONS, TOOL_FAILED, TOOL_FOUND_NOTHING, TOOL_REFUSED, budgetFor, entries, history, newThreads, noteText, promptBlocks, recalledIn, reportOf, sessionsFor } from './recall-text'
+import type { Ask, Listed, RECALL_TOOL, Row, Session } from './recall-text'
 import type { HiveRecalled } from '../types'
 
 // Automatic recall (beta, opt-in through the `recall` option): before the main agent starts on a prompt the user
 // typed, one model call over the project's recent sessions picks the entries that bear on it, and their text comes
-// with the prompt; and likewise for comment threads new to the main agent, with the read that brought them.
+// with the prompt; likewise for comment threads new to the main agent, with the read that brought them; and for what
+// the main agent describes through the recall tool, as the tool's result.
 
 const SOL = 'gpt-6.1-sol'
 const FALLBACK = 'sonnet'
@@ -89,10 +90,10 @@ export async function warm($: EngineInterface, choice: string) {
   }
 }
 
-/** What recall gave a prompt: the report the main agent reads with it (none when nothing was found), and what the person sees. */
-type Outcome = { context?: string; shown: Shown }
+/** What a recall came to: its report, when it found entries, and what the person sees under a prompt. */
+type Outcome = { report?: string; shown: Shown }
 const NOTHING: Outcome = { shown: 'none' }
-const FAILURE: Outcome = { context: FAILED, shown: 'failed' }
+const FAILURE: Outcome = { shown: 'failed' }
 
 type Completed = Awaited<ReturnType<EngineInterface['model']['complete']>> | undefined
 
@@ -137,7 +138,7 @@ async function recall($: EngineInterface, choice: string, askOf: AskOf, deadline
     $.ui.log(`hive recall: ${model} ${endOf(r)} in ${(await $.clock.now()) - asked} ms, after ${asked - now} ms of history`, { to: 'debug' })
     if (r?.isAnswered) {
       const found = entries(r.text, h)
-      return found.length ? { context: reportOf(found, h.from, 'threads' in ask), shown: { entries: found, from: h.from } } : NOTHING
+      return found.length ? { report: reportOf(found, h.from, ask), shown: { entries: found, from: h.from } } : NOTHING
     }
     // Not there to ask (the request was refused, or a 4xx other than a rate limit): the next model, if any. Any other
     // failure (a rate limit, a server error, no answer in time) fails this recall: FALLBACK is only for a process
@@ -173,7 +174,9 @@ export async function submitWithRecall($: EngineInterface, e: Submit[1], next: S
   // Only what the user typed, at the terminal or through Remote Control; never a slash command.
   if ((e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') || e.command) return next(e)
   // Past the limit the prompt goes on.
-  const { context, shown } = await recallInTime($, choice, () => ({ prompt: e.text }))
+  const { report, shown } = await recallInTime($, choice, () => ({ prompt: e.text }))
+  // Only a prompt says when recall did not finish: it is where the main agent would have had the entries.
+  const context = report ?? (shown === 'failed' ? FAILED : undefined)
   const waiting = { prompt: e.text, shown }
   unstored.push(waiting)
   // One a prompt never claimed is not kept for long.
@@ -212,12 +215,25 @@ export async function readWithRecall($: EngineInterface, e: Call[1], next: Call[
   const unrecalled = (rows: ReadonlyArray<Row>) => newThreads(text, rows).filter(t => !recalledThisTurn.has(t.id))
   // No thread, or none this turn has not had: no history to read.
   if (!unrecalled([]).length) return read
-  const { context, shown } = await recallInTime($, choice, rows => {
+  const { report } = await recallInTime($, choice, rows => {
     const threads = rows ? unrecalled(rows) : []
     for (const t of threads) if (t.id) recalledThisTurn.add(t.id)
     return threads.length ? { threads: threads.map(t => t.text) } : undefined
   })
-  return context && typeof shown === 'object' ? { ...read, context: [...(read.context ?? []), context] } : read
+  return report ? { ...read, context: [...(read.context ?? []), report] } : read
+}
+
+type Asked = Parameters<MatchedHook<'tool.call', { tool: typeof RECALL_TOOL }>>[1]
+
+/**
+ * While recall is on, register.tsx's hook on the recall tool ends here: recall for what the main agent describes.
+ * Unlike a prompt or a comments read, a session a script ran gets one too, since its agent asked. A subagent is refused:
+ * a registered tool can't be hidden from it, and its context may be limited on purpose.
+ */
+export async function answerRecallTool($: EngineInterface, e: Asked, choice: string) {
+  if (e.agentId !== undefined) return { deny: TOOL_REFUSED }
+  const { report, shown } = await recallInTime($, choice, () => ({ about: e.about as string }))
+  return { result: report ?? (shown === 'failed' ? TOOL_FAILED : TOOL_FOUND_NOTHING) }
 }
 
 /** What the typeahead says of `/remember <note>`, which register.tsx's session.start registers. */
