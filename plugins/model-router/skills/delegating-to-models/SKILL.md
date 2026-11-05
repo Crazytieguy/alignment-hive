@@ -251,6 +251,9 @@ On plans that have OpenAI's Ultrafast tier, the user may have added
 8x the usage. Use one only when the user asks for Ultrafast.
 
 Consider setting the Agent tool's `effort` parameter when delegating,
-Claude models included. Without it, the GPT, Grok, Muse and open-weights
-agents run at this session's effort level, or at `CLAUDE_CODE_SUBAGENT_EFFORT`
-when that is set.
+Claude models included. Without it, an agent runs at
+`CLAUDE_CODE_SUBAGENT_EFFORT` when that is set. Otherwise an agent on this
+session's model runs at this session's effort level. An agent on another
+model doesn't: it runs at the level saved in settings for its model, or else
+at that model's default, which is high for GPT, Grok, Muse and open-weights
+agents.
