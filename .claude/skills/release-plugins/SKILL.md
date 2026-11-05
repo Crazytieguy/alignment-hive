@@ -99,7 +99,7 @@ rather than failing, so check the run's log rather than only its status.
 
 **A binary release's builds are slow again.** They restore cargo caches that
 *Release build cache* saves from `main`, because a cache saved at one tag can't
-be read at another. Look for `Cache restored from key` in a build job's log. A
+be read at another. Look for `Restored from cache key` in a build job's log. A
 new Rust stable on the runners is a miss until that workflow next runs (every 6
 days); run it against `main` to refill sooner.
 
