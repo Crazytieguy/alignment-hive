@@ -31,6 +31,11 @@ export default defineSchema({
     workflowRunId: v.optional(v.string()),
     summary: v.optional(v.string()),
     sessionStartGitCommitHash: v.optional(v.string()),
+    // Parent sessions only, kept by refreshChildCounts so the list needn't read children: how many
+    // agent sessions it has (capped at MAX_COUNTED_CHILDREN), and how many distinct workflow runs
+    // they belong to. Unset means not counted yet, until backfillChildCounts reaches the row.
+    agentSessionCount: v.optional(v.number()),
+    workflowRunCount: v.optional(v.number()),
     upload: v.optional(
       v.object({
         storageId: v.id("_storage"),
@@ -40,9 +45,11 @@ export default defineSchema({
   })
     .index("by_session_id", ["sessionId"])
     .index("by_user_doc_id", ["userDocId"])
+    // A user's parent sessions without scanning past their agents (parentSessionId: undefined).
+    .index("by_user_and_parent", ["userDocId", "parentSessionId"])
     .index("by_parent_session_id", ["parentSessionId"])
     // First-claim enforcement: a storage blob may only ever be linked to one row (see
-    // assertStorageIdUnclaimed in sessions.ts).
+    // assertStorageIdUnclaimed in lib/blobs.ts).
     .index("by_storage_id", ["upload.storageId"]),
 
   // Run-level metadata for a Workflow-tool run (wf_<id>). The full sanitized run JSON
@@ -72,7 +79,7 @@ export default defineSchema({
     .index("by_parent_session_id", ["parentSessionId"])
     .index("by_user_doc_id", ["userDocId"])
     // First-claim enforcement: a storage blob may only ever be linked to one row (see
-    // assertStorageIdUnclaimed in sessions.ts).
+    // assertStorageIdUnclaimed in lib/blobs.ts).
     .index("by_storage_id", ["upload.storageId"]),
 
   checkouts: defineTable({

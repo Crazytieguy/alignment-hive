@@ -52,6 +52,7 @@ function formatSessionBase(
   };
 }
 
+/** Reads every child and mints a URL for each, so it's for the single-session path only. */
 async function formatAgentSessions(ctx: QueryCtx, parentSessionId: string) {
   const children = await ctx.db
     .query("sessions")
@@ -168,14 +169,11 @@ export async function listSessionsImpl(
       paginatedSessions.page.map(async (session: Doc<"sessions">) => {
         const upload = await formatUpload(ctx, session.upload);
         const user = ownerOf(session);
-        const agentSessions = await formatAgentSessions(
-          ctx,
-          session.sessionId,
-        );
         return {
           ...formatSessionBase(session, upload),
           user: user ? formatUser(user) : null,
-          agentSessions,
+          agentSessionCount: session.agentSessionCount,
+          workflowRunCount: session.workflowRunCount,
         };
       }),
     ),
@@ -193,10 +191,11 @@ export async function listSessionsImpl(
 
     const paginatedSessions = await stream(ctx.db, schema)
       .query("sessions")
-      .withIndex("by_user_doc_id", (q) => q.eq("userDocId", scope.userId))
+      .withIndex("by_user_and_parent", (q) =>
+        q.eq("userDocId", scope.userId).eq("parentSessionId", undefined),
+      )
       .order("desc")
       .filterWith(async (session) => {
-        if (session.parentSessionId) return false;
         if (!uploadFilter(session)) return false;
         if (projectDir && session.directory !== projectDir) return false;
         if (projectRemote && session.gitRemote !== projectRemote) return false;
@@ -322,14 +321,14 @@ export async function getUserImpl(
 
   const consentFilter = await buildConsentFilter(ctx);
 
-  const userSessions = await ctx.db
+  const parents = await ctx.db
     .query("sessions")
-    .withIndex("by_user_doc_id", (q) => q.eq("userDocId", args.userId))
+    .withIndex("by_user_and_parent", (q) =>
+      q.eq("userDocId", args.userId).eq("parentSessionId", undefined),
+    )
     .collect();
 
-  const visibleParents = userSessions.filter(
-    (s) => !s.parentSessionId && consentFilter(s),
-  );
+  const visibleParents = parents.filter((s) => consentFilter(s));
 
   // Fetch latest consent to expose preferences
   const latestConsent = await ctx.db

@@ -44,6 +44,10 @@ This covers both regular Task subagents and **Workflow-tool subagents** (`<sessi
 
 A workflow run's **run metadata** (`<session>/workflows/wf_<id>.json` — orchestration script, result, totals) is uploaded as a sanitized blob into the `workflowRuns` table via `saveWorkflowRuns`, keyed to the parent and grouped with its subagents by `workflowRunId`. Runs inherit the parent's consent the same way agents do, so `saveWorkflowRuns` requires the parent session to exist and be owned by the caller, and `formatWorkflowRuns` only returns runs belonging to the parent's owner (never expose a run pinned to a parentSessionId by a different user).
 
+### Storage blobs
+
+`convex/lib/blobs.ts` owns the blob lifecycle. A save that replaces a row's blob deletes the old one in the same transaction, after checking that no row in `BLOB_LINK_TABLES` still links it. A replaced id is then refused by `assertStorageIdUnclaimed`, because the blob no longer exists. An unlinked blob isn't always garbage: it's what an upload looks like between sending and saving, so `cleanupOrphanedBlobs` (`convex/maintenance.ts`) leaves young ones alone. Add any new table that links blobs to `BLOB_LINK_TABLES`.
+
 ### Rules for modifying this code
 
 - **Never add a new public query/mutation in `convex/` that returns cross-user session data without calling `requireAuthorized()` and applying `buildConsentFilter()`.** Internal queries/mutations/actions are exempt (not externally callable).
@@ -51,3 +55,4 @@ A workflow run's **run metadata** (`<session>/workflows/wf_<id>.json` — orches
 - **Never filter sessions after Convex pagination** — this breaks page sizes. Use `stream().filterWith()` from `convex-helpers/server/stream` for pre-pagination filtering.
 - If adding a new way to access session content (API endpoint, download, etc.), it must go through the same authorization and consent checks.
 - **Never return a raw `storageId` from any query** — storage access is only ever through short-lived signed URLs. Save mutations take storageIds from the client, so a leaked id could otherwise be linked to an attacker's own row and read through their signed-URL path. `assertStorageIdUnclaimed` (first-claim: a blob may only ever be linked to one row) backstops this in `saveUploads`/`saveWorkflowRuns`; don't weaken it, and apply it in any new mutation that links a client-provided storageId.
+- **Keep `formatAgentSessions` off the list path.** It reads every child and mints a URL per child, which at workflow scale approaches Convex's read limit. The list shows `agentSessionCount`/`workflowRunCount` from the parent row; any write that changes a parent's child set must call `refreshChildCounts`.

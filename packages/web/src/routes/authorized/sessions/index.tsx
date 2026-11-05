@@ -165,25 +165,23 @@ function SessionsList() {
     if (selectedIds.size === 0) return;
     setDownloading(true);
     try {
-      // Collect all content URLs from the inline data (parent + agents)
-      const urlEntries: Array<{ sessionId: string; contentUrl: string }> = [];
-      for (const session of results) {
-        if (!selectedIds.has(session.sessionId)) continue;
-        if (session.upload) {
-          urlEntries.push({
-            sessionId: session.sessionId,
-            contentUrl: session.upload.contentUrl,
-          });
-        }
-        for (const agent of session.agentSessions) {
-          if (agent.upload) {
-            urlEntries.push({
-              sessionId: agent.sessionId,
-              contentUrl: agent.upload.contentUrl,
-            });
-          }
-        }
-      }
+      // List rows only count their agents, so get each selected session with its agents' URLs
+      const details = await Promise.all(
+        results
+          .filter((session) => selectedIds.has(session.sessionId))
+          .map((session) =>
+            convex
+              .query(api.authorized.getSession, {
+                sessionId: session.sessionId,
+              })
+              .catch(() => null),
+          ),
+      );
+      const urlEntries = details
+        .flatMap((detail) => (detail ? [detail, ...detail.agentSessions] : []))
+        .flatMap(({ sessionId, upload }) =>
+          upload ? [{ sessionId, contentUrl: upload.contentUrl }] : [],
+        );
 
       // Fetch content from each URL in parallel, retrying with fresh URLs on failure
       const contents = (

@@ -47,6 +47,7 @@ Non-secret defaults (`WORKOS_CLIENT_ID`, `WORKOS_REDIRECT_URI`) live in the chec
 From repo root:
 
 - `bun run --filter '@alignment-hive/web' lint` - Type check
+- `bun run --filter '@alignment-hive/web' test` - Unit tests, plus backend rules on `convex-test` (`tests/`)
 - `bun run --filter '@alignment-hive/web' build` - Build for production
 
 From `web/` directory:

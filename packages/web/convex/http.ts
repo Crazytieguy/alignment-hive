@@ -49,7 +49,7 @@ app.get(
   "/api/sessions",
   describeRoute({
     tags: ["Sessions"],
-    description: "List Claude Code sessions shared by alignment researchers. Returns parent sessions only — each includes its agent (child) sessions inline. Only sessions within the contributor's active consent windows are visible. When userId is provided, results are scoped to that user and the directory and gitRemote filters take effect. The hasUpload filter applies independently of userId.",
+    description: "List Claude Code sessions shared by alignment researchers. Returns parent sessions only — each includes a count of its agent (child) sessions; get the agent sessions themselves from GET /api/sessions/{sessionId}. Only sessions within the contributor's active consent windows are visible. When userId is provided, results are scoped to that user and the directory and gitRemote filters take effect. The hasUpload filter applies independently of userId.",
     responses: {
       200: {
         description: "Paginated sessions",

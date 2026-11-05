@@ -70,7 +70,7 @@ export const workflowRunResponseSchema = z.object({
   uploadedAt: z.number().describe("When the run metadata was uploaded, in ms since epoch"),
 });
 
-export const sessionResponseSchema = z.object({
+const sessionBaseSchema = z.object({
   sessionId: z.string().describe("Claude Code session UUID"),
   directory: z.string().describe("Local working directory").optional(),
   gitRemote: z.string().describe("Git remote identifier (e.g. github.com/org/repo)").optional(),
@@ -84,16 +84,21 @@ export const sessionResponseSchema = z.object({
   workflowRunId: z.string().describe("If this is a workflow subagent, the wf_<id> run it belongs to").optional(),
   upload: uploadResponseSchema.optional(),
   user: userResponseSchema.nullable().describe("The user who created this session, or null if not yet migrated"),
-  agentSessions: z.array(agentSessionResponseSchema).describe("Agent (child) sessions spawned during this session. Agents inherit the parent's consent visibility."),
+});
+
+export const sessionListItemResponseSchema = sessionBaseSchema.extend({
+  agentSessionCount: z.int().describe("Number of agent (child) sessions spawned during this session, counted up to 3000. Absent if not counted yet, which doesn't mean none. Get them from GET /api/sessions/{sessionId}.").optional(),
+  workflowRunCount: z.int().describe("Number of distinct workflow runs those agent sessions belong to. Absent if not counted yet.").optional(),
 });
 
 export const paginatedSessionsResponseSchema = z.object({
-  page: z.array(sessionResponseSchema),
+  page: z.array(sessionListItemResponseSchema),
   continueCursor: z.string().describe("Pass this as the cursor param to fetch the next page"),
   isDone: z.boolean().describe("True if there are no more results"),
 });
 
-export const sessionDetailResponseSchema = sessionResponseSchema.extend({
+export const sessionDetailResponseSchema = sessionBaseSchema.extend({
+  agentSessions: z.array(agentSessionResponseSchema).describe("Agent (child) sessions spawned during this session. Agents inherit the parent's consent visibility."),
   parentSession: parentSessionSchema.describe("The parent session, if this is an agent session").optional(),
   workflowRuns: z.array(workflowRunResponseSchema).describe("Workflow-tool runs for this session, each grouping its workflow subagents. Inherit the parent's consent visibility.").optional(),
 });

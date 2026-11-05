@@ -11,6 +11,8 @@ import {
   extractIdentifiers,
   type ProjectIdentifiers,
 } from "@alignment-hive/session-data";
+import { assertStorageIdUnclaimed, deleteReplacedBlob } from "./lib/blobs";
+import { refreshChildCounts } from "./lib/childCounts";
 import { upsertUser } from "./lib/users";
 import { getMatchingConsentGroup } from "./lib/projectConsent";
 
@@ -94,36 +96,10 @@ function isSessionOwner(
 }
 
 /**
- * First-claim enforcement for storage blobs: a storageId may only ever be linked to a single
- * row. The save mutations take storageIds from the client without any way to verify who
- * uploaded the blob — accepting an already-claimed id would let a caller who somehow learned
- * another user's storageId link it to their own consented row and read the victim's blob
- * through their own signed-URL read path. Every legitimate upload mints a fresh blob
- * (re-uploads included), so a claimed id can never come from this caller's upload. The self
- * params exempt the row being upserted, keeping retries of the same save idempotent.
- * Defense-in-depth companion rule: no query may ever return a raw storageId (see CLAUDE.md).
+ * Upsert session record — creates if new, updates lineCount/lastHeartbeat if existing. Returns the
+ * document ID. Adds any parent whose child counts this changes to staleParents, for the caller to
+ * recount once all its upserts are done (a batch of agents shares one parent).
  */
-async function assertStorageIdUnclaimed(
-  ctx: MutationCtx,
-  storageId: Id<"_storage">,
-  self: { sessionDocId?: Id<"sessions">; runDocId?: Id<"workflowRuns"> },
-): Promise<void> {
-  const tables = [
-    { table: "sessions", selfId: self.sessionDocId },
-    { table: "workflowRuns", selfId: self.runDocId },
-  ] as const;
-  for (const { table, selfId } of tables) {
-    const claim = await ctx.db
-      .query(table)
-      .withIndex("by_storage_id", (q) => q.eq("upload.storageId", storageId))
-      .first();
-    if (claim && claim._id !== selfId) {
-      throw new ConvexError("Storage blob is already linked to another record");
-    }
-  }
-}
-
-/** Upsert session record — creates if new, updates lineCount/lastHeartbeat if existing. Returns the document ID. */
 async function upsertSession(
   ctx: MutationCtx,
   userDocId: Id<"users">,
@@ -140,6 +116,7 @@ async function upsertSession(
     workflowRunId?: string;
     sessionStartGitCommitHash?: string;
   },
+  staleParents: Set<string>,
 ): Promise<Id<"sessions">> {
   const now = Date.now();
   const existing = await ctx.db
@@ -150,6 +127,12 @@ async function upsertSession(
   if (existing) {
     if (!isSessionOwner(existing, userDocId)) {
       throw new ConvexError("Session belongs to different user");
+    }
+    const parent = args.parentSessionId ?? existing.parentSessionId;
+    const moved = parent !== existing.parentSessionId;
+    if (moved && existing.parentSessionId) staleParents.add(existing.parentSessionId);
+    if (parent && (moved || (args.workflowRunId && args.workflowRunId !== existing.workflowRunId))) {
+      staleParents.add(parent);
     }
     await ctx.db.patch(existing._id, {
       userDocId,
@@ -170,6 +153,8 @@ async function upsertSession(
     });
     return existing._id;
   } else {
+    // A new parent counts too: its agents may have been saved first.
+    staleParents.add(args.parentSessionId ?? args.sessionId);
     return await ctx.db.insert("sessions", {
       sessionId: args.sessionId,
       userDocId,
@@ -210,7 +195,9 @@ export const heartbeatSession = mutation({
     const identifiers = extractIdentifiers(args);
     await verifyConsent(ctx, userDocId, identifiers, args.lastModified);
 
-    await upsertSession(ctx, userDocId, args);
+    const staleParents = new Set<string>();
+    await upsertSession(ctx, userDocId, args, staleParents);
+    for (const parent of staleParents) await refreshChildCounts(ctx, parent);
   },
 });
 
@@ -297,6 +284,7 @@ export const saveUploads = mutation({
     }
 
     const now = Date.now();
+    const staleParents = new Set<string>();
 
     for (const upload of args.uploads) {
       // Each upload must be either the parent itself or an agent of this parent
@@ -318,9 +306,10 @@ export const saveUploads = mutation({
         agentType: upload.agentType,
         workflowRunId: upload.workflowRunId,
         sessionStartGitCommitHash: upload.parentSessionId ? undefined : args.sessionStartGitCommitHash,
-      });
+      }, staleParents);
 
       await assertStorageIdUnclaimed(ctx, upload.storageId, { sessionDocId });
+      const previousBlob = (await ctx.db.get(sessionDocId))?.upload?.storageId;
       await ctx.db.patch(sessionDocId, {
         ...(upload.summary !== undefined && { summary: upload.summary }),
         upload: {
@@ -328,7 +317,10 @@ export const saveUploads = mutation({
           uploadedAt: now,
         },
       });
+      await deleteReplacedBlob(ctx, previousBlob, upload.storageId);
     }
+
+    for (const parent of staleParents) await refreshChildCounts(ctx, parent);
   },
 });
 
@@ -412,6 +404,7 @@ export const saveWorkflowRuns = mutation({
 
       if (existing) {
         await ctx.db.patch(existing._id, doc);
+        await deleteReplacedBlob(ctx, existing.upload.storageId, run.storageId);
       } else {
         await ctx.db.insert("workflowRuns", doc);
       }

@@ -20,10 +20,13 @@ import type * as lib_agreement from "../lib/agreement.js";
 import type * as lib_apiKeyAuth from "../lib/apiKeyAuth.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_authorizedQueries from "../lib/authorizedQueries.js";
+import type * as lib_blobs from "../lib/blobs.js";
+import type * as lib_childCounts from "../lib/childCounts.js";
 import type * as lib_consentVisibility from "../lib/consentVisibility.js";
 import type * as lib_projectConsent from "../lib/projectConsent.js";
 import type * as lib_schemas from "../lib/schemas.js";
 import type * as lib_users from "../lib/users.js";
+import type * as maintenance from "../maintenance.js";
 import type * as sessions from "../sessions.js";
 
 import type {
@@ -45,10 +48,13 @@ declare const fullApi: ApiFromModules<{
   "lib/apiKeyAuth": typeof lib_apiKeyAuth;
   "lib/auth": typeof lib_auth;
   "lib/authorizedQueries": typeof lib_authorizedQueries;
+  "lib/blobs": typeof lib_blobs;
+  "lib/childCounts": typeof lib_childCounts;
   "lib/consentVisibility": typeof lib_consentVisibility;
   "lib/projectConsent": typeof lib_projectConsent;
   "lib/schemas": typeof lib_schemas;
   "lib/users": typeof lib_users;
+  maintenance: typeof maintenance;
   sessions: typeof sessions;
 }>;
 

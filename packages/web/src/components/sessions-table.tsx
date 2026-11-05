@@ -1,17 +1,12 @@
 import { Link } from "@tanstack/react-router";
 import { formatProject, formatRelativeTime } from "@alignment-hive/ui";
+import { MAX_COUNTED_CHILDREN } from "../../convex/lib/childCounts";
 
 interface SessionUser {
   userId: string;
   firstName?: string;
   lastName?: string;
   email: string;
-}
-
-interface AgentSession {
-  sessionId: string;
-  workflowRunId?: string;
-  upload?: { contentUrl: string; uploadedAt: number };
 }
 
 interface Session {
@@ -23,7 +18,8 @@ interface Session {
   summary?: string;
   upload?: { contentUrl: string; uploadedAt: number };
   user?: SessionUser | null;
-  agentSessions: AgentSession[];
+  agentSessionCount?: number;
+  workflowRunCount?: number;
 }
 
 interface SelectableConfig {
@@ -142,14 +138,17 @@ export function SessionsTable({
                 <td className="px-4 py-3 text-sm tabular-nums">
                   {session.lineCount}
                 </td>
-                <td className="px-4 py-3 text-sm tabular-nums text-muted-foreground">
+                <td
+                  className="px-4 py-3 text-sm tabular-nums text-muted-foreground"
+                  title={session.agentSessionCount === undefined ? "Not counted yet" : undefined}
+                >
                   {(() => {
-                    const n = session.agentSessions.length;
+                    const n = session.agentSessionCount;
+                    if (n === undefined) return "?";
                     if (n === 0) return "\u2014";
-                    const runs = new Set(
-                      session.agentSessions.map((a) => a.workflowRunId).filter(Boolean),
-                    ).size;
-                    return runs > 0 ? `${n} \u00b7 ${runs}wf` : `${n}`;
+                    const count = n >= MAX_COUNTED_CHILDREN ? `${n}+` : `${n}`;
+                    const runs = session.workflowRunCount ?? 0;
+                    return runs > 0 ? `${count} \u00b7 ${runs}wf` : count;
                   })()}
                 </td>
                 <td className="px-4 py-3 text-sm text-muted-foreground">
