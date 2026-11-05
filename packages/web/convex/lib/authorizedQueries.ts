@@ -52,12 +52,20 @@ function formatSessionBase(
   };
 }
 
-/** Reads every child and mints a URL for each, so it's for the single-session path only. */
-async function formatAgentSessions(ctx: QueryCtx, parentSessionId: string) {
+/**
+ * Reads every child and mints a URL for each, so it's for the single-session path only. Children
+ * inherit the parent's visibility, so only the parent's owner's count: a row pinned to this
+ * parentSessionId by a different user is never exposed, or even read.
+ */
+async function formatAgentSessions(
+  ctx: QueryCtx,
+  parentSessionId: string,
+  ownerDocId: Id<"users">,
+) {
   const children = await ctx.db
     .query("sessions")
-    .withIndex("by_parent_session_id", (q) =>
-      q.eq("parentSessionId", parentSessionId),
+    .withIndex("by_user_and_parent", (q) =>
+      q.eq("userDocId", ownerDocId).eq("parentSessionId", parentSessionId),
     )
     .collect();
 
@@ -281,16 +289,27 @@ export async function getSessionImpl(
         .first()
     : null;
 
-  // Child sessions inherit parent visibility
+  // Child sessions inherit parent visibility, but only from a parent with the same owner: another
+  // user's row with that session id says nothing about this owner's consent.
   if (session.parentSessionId) {
-    if (!parentSession || !consentFilter(parentSession)) return null;
+    if (
+      !parentSession ||
+      parentSession.userDocId !== session.userDocId ||
+      !consentFilter(parentSession)
+    ) {
+      return null;
+    }
   } else {
     if (!consentFilter(session)) return null;
   }
 
   const upload = await formatUpload(ctx, session.upload);
   const user = await resolveSessionUser(ctx, session);
-  const agentSessions = await formatAgentSessions(ctx, session.sessionId);
+  const agentSessions = await formatAgentSessions(
+    ctx,
+    session.sessionId,
+    session.userDocId,
+  );
   // Workflow runs are keyed to the top-level parent; agent-session views never have any.
   const workflowRuns = session.parentSessionId
     ? []

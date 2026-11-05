@@ -8,9 +8,9 @@ export const MAX_COUNTED_CHILDREN = 3000;
 /**
  * Recount a parent's denormalized child counts, which is what the session list shows instead of
  * reading every child per row. Called by any write that changes a parent's child set, and by
- * backfillChildCounts (maintenance.ts). Only the owner's children count, so a row pinned to
- * someone else's parentSessionId can't write to their row. Writes 0 too, because an unset count
- * means "not counted yet". Returns whether the parent changed.
+ * backfillChildCounts (maintenance.ts). Only the owner's children are read, so rows pinned to
+ * someone else's parentSessionId can't change their counts or use up the cap. Writes 0 too, because
+ * an unset count means "not counted yet". Returns whether the parent changed.
  */
 export async function refreshChildCounts(
   ctx: MutationCtx,
@@ -24,14 +24,14 @@ export async function refreshChildCounts(
 
   const children = await ctx.db
     .query("sessions")
-    .withIndex("by_parent_session_id", (q) =>
-      q.eq("parentSessionId", parentSessionId),
+    .withIndex("by_user_and_parent", (q) =>
+      q.eq("userDocId", parent.userDocId).eq("parentSessionId", parentSessionId),
     )
     .take(MAX_COUNTED_CHILDREN);
-  const owned = children.filter((c) => c.userDocId === parent.userDocId);
-  const agentSessionCount = owned.length;
-  const workflowRunCount = new Set(owned.flatMap((c) => c.workflowRunId ?? []))
-    .size;
+  const agentSessionCount = children.length;
+  const workflowRunCount = new Set(
+    children.flatMap((c) => c.workflowRunId ?? []),
+  ).size;
 
   if (
     parent.agentSessionCount === agentSessionCount &&

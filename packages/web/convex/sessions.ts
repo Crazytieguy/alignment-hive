@@ -99,6 +99,10 @@ function isSessionOwner(
  * Upsert session record — creates if new, updates lineCount/lastHeartbeat if existing. Returns the
  * document ID. Adds any parent whose child counts this changes to staleParents, for the caller to
  * recount once all its upserts are done (a batch of agents shares one parent).
+ *
+ * Refuses a parent that exists under another user. A parent that doesn't exist yet is allowed, since
+ * agents can be saved first, so a pin can still end up on someone else's row if they create that id
+ * later: the reads and refreshChildCounts only join rows with the same owner.
  */
 async function upsertSession(
   ctx: MutationCtx,
@@ -124,10 +128,20 @@ async function upsertSession(
     .withIndex("by_session_id", (q) => q.eq("sessionId", args.sessionId))
     .first();
 
-  if (existing) {
-    if (!isSessionOwner(existing, userDocId)) {
-      throw new ConvexError("Session belongs to different user");
+  if (existing && !isSessionOwner(existing, userDocId)) {
+    throw new ConvexError("Session belongs to different user");
+  }
+  if (args.parentSessionId) {
+    const named = await ctx.db
+      .query("sessions")
+      .withIndex("by_session_id", (q) => q.eq("sessionId", args.parentSessionId!))
+      .first();
+    if (named && !isSessionOwner(named, userDocId)) {
+      throw new ConvexError("Parent session belongs to different user");
     }
+  }
+
+  if (existing) {
     const parent = args.parentSessionId ?? existing.parentSessionId;
     const moved = parent !== existing.parentSessionId;
     if (moved && existing.parentSessionId) staleParents.add(existing.parentSessionId);
@@ -274,14 +288,6 @@ export const saveUploads = mutation({
     const userDocId = await upsertUser(ctx, identity);
     const identifiers = extractIdentifiers(args);
     await verifyConsent(ctx, userDocId, identifiers, args.lastModified);
-
-    const existingParent = await ctx.db
-      .query("sessions")
-      .withIndex("by_session_id", (q) => q.eq("sessionId", args.parentSessionId))
-      .first();
-    if (existingParent && !isSessionOwner(existingParent, userDocId)) {
-      throw new ConvexError("Parent session belongs to different user");
-    }
 
     const now = Date.now();
     const staleParents = new Set<string>();

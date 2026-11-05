@@ -45,7 +45,8 @@ export default defineSchema({
   })
     .index("by_session_id", ["sessionId"])
     .index("by_user_doc_id", ["userDocId"])
-    // A user's parent sessions without scanning past their agents (parentSessionId: undefined).
+    // A user's parent sessions without scanning past their agents (parentSessionId: undefined), and
+    // one parent's children without reading rows other users pinned to its id.
     .index("by_user_and_parent", ["userDocId", "parentSessionId"])
     .index("by_parent_session_id", ["parentSessionId"])
     // First-claim enforcement: a storage blob may only ever be linked to one row (see

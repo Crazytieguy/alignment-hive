@@ -176,16 +176,23 @@ describe("child counts", () => {
     expect(await row("p")).toMatchObject({ agentSessionCount: 4, workflowRunCount: 2 });
   });
 
-  test("a row pinned to someone else's parent doesn't count", async () => {
-    const { owner, other, store, row } = await setup();
+  test("rows pinned to someone else's parent don't count or crowd out the owner's children", async () => {
+    const { t, owner, store, row } = await setup();
     await saveOne(owner, "p", await store("p"));
-    await saveOne(owner, "mine", await store("mine"), { parentSessionId: "p" });
-    await other.mutation(api.sessions.heartbeatSession, {
-      ...meta,
-      sessionId: "theirs",
-      lineCount: 1,
-      parentSessionId: "p",
+    await t.run(async (ctx) => {
+      const userDocId = await ctx.db.insert("users", { workosId: "flood", email: "f@example.com" });
+      for (let c = 0; c < MAX_COUNTED_CHILDREN; c++) {
+        await ctx.db.insert("sessions", {
+          userDocId,
+          checkoutId: "c",
+          lineCount: 1,
+          lastHeartbeat: 1,
+          sessionId: `flood${c}`,
+          parentSessionId: "p",
+        });
+      }
     });
+    await saveOne(owner, "mine", await store("mine"), { parentSessionId: "p" });
     expect((await row("p"))?.agentSessionCount).toBe(1);
   });
 
@@ -267,6 +274,125 @@ describe("child counts", () => {
     const byId = new Map(page.map((s) => [s.sessionId, s]));
     expect(byId.get("none")?.agentSessionCount).toBe(0);
     expect(byId.get("legacy")?.agentSessionCount).toBeUndefined();
+  });
+});
+
+describe("parents owned by someone else", () => {
+  const heartbeat = (
+    user: Awaited<ReturnType<typeof setup>>["owner"],
+    sessionId: string,
+    parentSessionId?: string,
+  ) =>
+    user.mutation(api.sessions.heartbeatSession, { ...meta, sessionId, lineCount: 1, parentSessionId });
+  const detail = (t: Awaited<ReturnType<typeof setup>>["t"], sessionId: string) =>
+    t.query(internal.authorized.getSessionInternal, { sessionId });
+  // A pin that can't be written any more but may already exist: an attacker's row, with an upload.
+  const seedPinned = async (
+    { t, other, store, row }: Awaited<ReturnType<typeof setup>>,
+    sessionId: string,
+    parentSessionId: string,
+  ) => {
+    await saveOne(other, sessionId, await store(sessionId));
+    const { _id } = (await row(sessionId))!;
+    await t.run((ctx) => ctx.db.patch(_id, { parentSessionId }));
+  };
+
+  test("a heartbeat can't attach a new row to another user's session", async () => {
+    const { owner, other, store, row } = await setup();
+    await saveOne(owner, "p", await store("p"));
+    await expect(heartbeat(other, "theirs", "p")).rejects.toThrow("Parent session belongs to different user");
+    expect(await row("theirs")).toBeNull();
+  });
+
+  test("a heartbeat can't move an existing row onto another user's session", async () => {
+    const { owner, other, store, row } = await setup();
+    await saveOne(owner, "p", await store("p"));
+    await heartbeat(other, "theirs");
+    await expect(heartbeat(other, "theirs", "p")).rejects.toThrow("Parent session belongs to different user");
+    expect((await row("theirs"))?.parentSessionId).toBeUndefined();
+  });
+
+  test("saveUploads can't attach to another user's session", async () => {
+    const { owner, other, store, row } = await setup();
+    await saveOne(owner, "p", await store("p"));
+    const blob = await store("theirs");
+    await expect(saveOne(other, "theirs", blob, { parentSessionId: "p" })).rejects.toThrow(
+      "Parent session belongs to different user",
+    );
+    expect(await row("theirs")).toBeNull();
+  });
+
+  test("a save can't take over or overwrite another user's row", async () => {
+    const { owner, other, store, row } = await setup();
+    const blob = await store("agent");
+    await saveOne(owner, "p", await store("p"));
+    await saveOne(owner, "agent", blob, { parentSessionId: "p" });
+    const before = await row("agent");
+
+    await expect(heartbeat(other, "agent")).rejects.toThrow("Session belongs to different user");
+    await expect(heartbeat(other, "agent", "mine")).rejects.toThrow("Session belongs to different user");
+    await expect(saveOne(other, "agent", await store("x"))).rejects.toThrow("Session belongs to different user");
+    await expect(saveOne(other, "agent", await store("x"), { parentSessionId: "mine" })).rejects.toThrow(
+      "Session belongs to different user",
+    );
+    expect(await row("agent")).toEqual(before);
+  });
+
+  test("workflow runs can't attach to another user's session, or to one that doesn't exist yet", async () => {
+    const { owner, other, store } = await setup();
+    await saveOne(owner, "p", await store("p"));
+    const saveRun = async (parentSessionId: string) =>
+      other.mutation(api.sessions.saveWorkflowRuns, {
+        parentSessionId,
+        directory,
+        lastModified: meta.lastModified,
+        runs: [{ workflowRunId: "wf_1", runId: "1", storageId: await store(parentSessionId) }],
+      });
+    await expect(saveRun("p")).rejects.toThrow("Parent session not found or belongs to a different user");
+    await expect(saveRun("absent")).rejects.toThrow("Parent session not found or belongs to a different user");
+  });
+
+  test("a row already pinned to another user's session doesn't reach its detail or downloads", async () => {
+    const setupResult = await setup();
+    const { t, owner, store } = setupResult;
+    await saveOne(owner, "p", await store("p"));
+    await saveOne(owner, "mine", await store("mine"), { parentSessionId: "p" });
+    await seedPinned(setupResult, "theirs", "p");
+
+    const parent = await detail(t, "p");
+    expect(parent?.agentSessions.map((a) => a.sessionId)).toEqual(["mine"]);
+    expect(await detail(t, "theirs")).toBeNull();
+  });
+
+  test("a row pinned to a session id before its owner creates it stays out of that session", async () => {
+    const { t, owner, other, store } = await setup();
+    await heartbeat(other, "theirs", "p");
+    await saveOne(other, "theirs", await store("theirs"), { parentSessionId: "p" });
+    await saveOne(owner, "p", await store("p"));
+
+    expect((await detail(t, "p"))?.agentSessions).toEqual([]);
+    expect(await detail(t, "theirs")).toBeNull();
+  });
+
+  test("an agent saved before its parent doesn't inherit visibility from another user's row of that id", async () => {
+    const { t, owner, other, store } = await setup();
+    await saveOne(owner, "agent", await store("agent"), { parentSessionId: "p" });
+    await saveOne(other, "p", await store("p"));
+
+    expect(await detail(t, "agent")).toBeNull();
+    expect((await detail(t, "p"))?.agentSessions).toEqual([]);
+  });
+
+  test("a heartbeat for an agent can come before its parent, which then lists and counts it", async () => {
+    const { t, owner, store, row } = await setup();
+    await heartbeat(owner, "agent", "p");
+    await saveOne(owner, "agent", await store("agent"), { parentSessionId: "p" });
+    await saveOne(owner, "p", await store("p"));
+    await heartbeat(owner, "agent", "p");
+
+    expect((await detail(t, "p"))?.agentSessions.map((a) => a.sessionId)).toEqual(["agent"]);
+    expect((await detail(t, "agent"))?.sessionId).toBe("agent");
+    expect((await row("p"))?.agentSessionCount).toBe(1);
   });
 });
 
