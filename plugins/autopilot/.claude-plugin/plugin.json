@@ -1,5 +1,5 @@
 {
   "name": "autopilot",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "Deprecated: superseded by Claude Code's built-in auto mode. Autonomous operation with permission management."
 }
