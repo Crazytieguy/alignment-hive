@@ -148,6 +148,31 @@ Claude Code deletes local session transcripts after `cleanupPeriodDays` (default
 
 Check `cleanupPeriodDays` in the four settings files. If it's unset or below 365 everywhere, recommend setting it to `99999` in `~/.claude/settings.json` (transcript cleanup is per-machine, not per-project). Explain the tradeoff briefly: transcripts are plain text on disk and accumulate over time, but keeping them makes session retrieval useful long-term. If declined, record it in the rejected file.
 
+### Claude Code's memory
+
+Skip unless all of these hold: `recall` is `true` in the hive plugin's options, `cleanupPeriodDays` is at least 365 (recall and `/remember` notes live in transcripts, which otherwise expire while memory files don't), memory is on for this project (`autoMemoryEnabled` isn't `false` in the settings that apply here, `.claude/settings.local.json` over `.claude/settings.json` over `~/.claude/settings.json`, and `CLAUDE_CODE_DISABLE_AUTO_MEMORY` isn't `1`), and no decline is recorded.
+
+This project's memory folder is `autoMemoryDirectory` if that is set, else `~/.claude/projects/<main worktree path with every non-alphanumeric character replaced by ->/memory/`. Count its `.md` files other than `MEMORY.md`, and the other projects under `~/.claude/projects/*/memory/` that have any, leaving out temp-dir projects. Ask:
+
+> **Claude Code's own memory** is still on. It's separate from recall: Claude saves notes to files and loads their index into every session, and old notes keep loading after they go stale. Turning it off leaves the files where they are and stops loading them; recall covers what you tell Claude from here. If you turn recall off later, turn this back on.
+
+Add what applies: that this project has N memories, and that this step suggests which to keep; that N other projects have memories, which "All projects" would stop loading without this review; that memory is pointed at the `autoMemoryDirectory` folder and the same applies there; that an agent in `.claude/agents` or `~/.claude/agents` with a `memory` field loses it.
+
+Options: **This project** (Recommended if other projects have memories), **All projects** (Recommended otherwise), **Keep it on**.
+
+This project: set `autoMemoryEnabled` to `false` in `.claude/settings.local.json`. All projects: the same in `~/.claude/settings.json`. Never in `.claude/settings.json`: it is usually checked in, and teammates may not have recall. To undo, remove that line. Keep it on: record that in the rejected file and stop here.
+
+Then read this project's memories, if any. Never edit or delete a memory file. Most need nothing: status notes, what is stale, what the repo or recent sessions already hold, what only mattered once. Say nothing about those, not even a summary; the closing line below covers them. For the few that would cost someone to lose:
+
+- A rule that must hold whatever the prompt mentions, or a procedure with steps: offer to make it a skill, whose description loads in every session and whose body loads when needed, as memory's index and files do. Ask with multiSelect, one option per memory, giving the skill's name and description. Write the ones picked to `~/.claude/skills/<name>/SKILL.md`, its description naming this project if it only applies here; use `.claude/skills/<name>/SKILL.md` only if they want it shared with the repo. Give the paths of what you wrote and recommend reviewing them: Claude trusts a skill more than a memory, and a migrated one could be inaccurate or go stale.
+- Anything else: suggest a note, one per memory so recall brings each up separately, standing alone in the person's own voice, and saying when it dates from if it could have changed since.
+
+List the notes in your closing message, before the restart line, each as its own code line:
+
+> To keep these for recall, type each one you want, editing it however you like. A note that stops coming up eventually ages out. Your other memories stay in `<memory folder>` but won't load.
+>
+> `/remember <note>`
+
 ### Tooling (varies by project)
 
 Recommend modern, well-maintained tooling for the project (dependency management, build, lint, typecheck, format, anything else that would improve the workflow). Ask before installing anything.
