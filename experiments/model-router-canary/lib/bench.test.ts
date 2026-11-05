@@ -267,6 +267,18 @@ describe('logErrors', () => {
       routerFailures: 1,
     });
   });
+  test("counts the 503s of the child's cooldown as part of the failure that started it, but not any later 503", () => {
+    const line = (at: string, id: string, rest: string) => `[2026-11-04 ${at}] [${id}] ${rest}`;
+    const access = (status: number) => `[error] [gin_logger.go:109] ${status} |   13ms |  127.0.0.1 | POST    "/v1/messages?beta=true"`;
+    const lines = [
+      line('22:37:47', 'd1f5b4e0', '[warn ] [conductor_execution.go:2035] 520 | 393ms | upstream execution failed: provider=codex err=<html>'),
+      line('22:37:47', 'd1f5b4e0', access(520)),
+      line('22:37:47', '106d5b96', access(503)),
+      line('22:37:48', 'b67355af', access(503)),
+      line('22:38:48', 'cccc0001', access(503)),
+    ];
+    expect(logErrors(lines, [])).toEqual({ requests: 4, failed: 2, account: 0, routerFailures: 0 });
+  });
 });
 
 const target: RouterTarget = {

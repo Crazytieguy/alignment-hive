@@ -329,22 +329,36 @@ function ccOutput(file: string): TrialStats['cc'] {
 const CPA_ID = /^\[[^\]]+\] \[([0-9a-f]{6,})\]/;
 const CPA_ACCESS = /\] (\d{3}) \|\s+\S+\s+\|\s+\S+\s+\|\s+POST\s+"\/v1\/messages/;
 const ACCOUNT = /Rate limit exceeded|in cooldown|reason=quota|server_is_overloaded|usage_limit/i;
+/** How long CLIProxyAPI cools a model down after a transient upstream failure, unless upstream gave a retry hint. */
+const TRANSIENT_COOLDOWN_MS = 60_000;
 
-/** Count request errors in an arm's CLIProxyAPI and router log lines (gin's access line number varies by version). */
+/**
+ * Count request errors in an arm's CLIProxyAPI and router log lines (gin's access line number varies by version). A 503
+ * with no upstream failure of its own, within the cooldown after one that had, is CLIProxyAPI answering a retry while
+ * it cools the login down: part of that one failure, which would otherwise count up to three times.
+ */
 export function logErrors(cpaLines: Array<string>, routerLines: Array<string>): LogErrors {
-  const ids = new Map<string, { status?: number; upstreamFailed: boolean; account: boolean }>();
+  const ids = new Map<string, { status?: number; upstreamFailed: boolean; account: boolean; cooldownEcho?: boolean }>();
+  let lastFailure = Number.NEGATIVE_INFINITY;
   for (const line of cpaLines) {
     const id = CPA_ID.exec(line)?.[1];
     if (!id) continue;
     const e = ids.get(id) ?? { upstreamFailed: false, account: false };
+    const at = Date.parse(line.slice(1, line.indexOf(']')));
+    if (line.includes('upstream execution failed')) {
+      e.upstreamFailed = true;
+      lastFailure = at;
+    }
     const status = CPA_ACCESS.exec(line)?.[1];
-    if (status) e.status = Number(status);
-    if (line.includes('upstream execution failed')) e.upstreamFailed = true;
+    if (status) {
+      e.status = Number(status);
+      e.cooldownEcho = e.status === 503 && !e.upstreamFailed && at - lastFailure <= TRANSIENT_COOLDOWN_MS;
+    }
     if (ACCOUNT.test(line) || e.status === 429) e.account = true;
     ids.set(id, e);
   }
   const all = [...ids.values()];
-  const bad = all.filter((e) => (e.status !== undefined && e.status !== 200) || e.upstreamFailed);
+  const bad = all.filter((e) => !e.cooldownEcho && ((e.status !== undefined && e.status !== 200) || e.upstreamFailed));
   return {
     requests: all.filter((e) => e.status !== undefined).length,
     failed: bad.filter((e) => !e.account).length,
