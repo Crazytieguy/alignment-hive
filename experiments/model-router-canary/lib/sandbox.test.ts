@@ -6,8 +6,10 @@ import { join } from 'node:path';
 import { Recorder } from './report';
 import {
   copyCredentials,
+  copyFamilyLogins,
   credentialPostcheck,
   credentialPrecheck,
+  familyPrecheck,
   MIN_LOGIN_HOURS,
   ownsCommand,
   postcheckCopies,
@@ -359,4 +361,39 @@ test('sweep stops the root\'s own router and child but never a process that is n
 
 test('config.toml sets the two ports and nothing else', () => {
   expect(Bun.TOML.parse(renderConfigToml(18797, 18397))).toEqual({ port: 18797, upstreams: { cliproxy: { port: 18397 } } });
+  expect(Bun.TOML.parse(renderConfigToml(18797, 18397, { grok: true, muse: true }))).toEqual({
+    port: 18797,
+    upstreams: { cliproxy: { port: 18397 } },
+    grok: { enabled: true },
+    muse: { enabled: true },
+  });
+});
+
+test('Grok and Muse logins are copied without what renews them, and only while they can answer', () => {
+  withDir((dir) => {
+    const live = join(dir, 'live');
+    mkdirSync(live);
+    const xai = { type: 'xai', access_token: 'fake-xai-access', refresh_token: 'fake-xai-refresh', expired: hoursFromNow(1) };
+    const meta = { type: 'meta', api_key: 'fake-meta-key', access_token: 'dca:fake', dca_token: 'dca:fake', subs_tier_name: 'Muse Code High Usage' };
+    writeFileSync(join(live, 'xai-someone@example.com.json'), JSON.stringify(xai));
+    writeFileSync(join(live, 'meta-someone-0000.json'), JSON.stringify(meta));
+    writeFileSync(join(live, NAME), login());
+
+    const r = familyPrecheck(NOW, live);
+    expect(r).toMatchObject({ grok: true, muse: true });
+    expect(r.files.map((f) => f.split('/').pop())).toEqual(['meta-someone-0000.json', 'xai-someone@example.com.json']);
+
+    const dest = join(dir, 'copy');
+    copyFamilyLogins(r.files, dest);
+    const copied = (name: string) => JSON.parse(readFileSync(join(dest, name), 'utf8'));
+    expect(copied('xai-someone@example.com.json')).toEqual({ type: 'xai', access_token: 'fake-xai-access', expired: xai.expired });
+    expect(copied('meta-someone-0000.json')).toEqual({ type: 'meta', api_key: 'fake-meta-key', subs_tier_name: 'Muse Code High Usage' });
+    expect(statSync(join(dest, 'meta-someone-0000.json')).mode & 0o777).toBe(0o600);
+
+    writeFileSync(join(live, 'xai-someone@example.com.json'), JSON.stringify({ ...xai, expired: hoursFromNow(0.25) }));
+    writeFileSync(join(live, 'meta-someone-0000.json'), JSON.stringify({ ...meta, api_key: 'dca:fake' }));
+    const none = familyPrecheck(NOW, live);
+    expect(none).toMatchObject({ files: [], grok: false, muse: false });
+    expect(none.detail).toContain('left out: Muse (no API key), Grok (under 30 minutes');
+  });
 });

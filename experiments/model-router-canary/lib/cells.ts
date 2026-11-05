@@ -210,6 +210,25 @@ async function runClaude(
   return { r, parsed: parseResult(r.stdout) };
 }
 
+/** A Claude Code session on `model` that reads one file and edits another, with its real tool set, recorded as `name`. */
+export async function runEditCell(t: RouterTarget, wiring: Wiring, model: string, name: string, opts: { tier: Tier; rec: Recorder; workRoot: string }): Promise<void> {
+  const { workRoot } = opts;
+  await opts.rec.time({ tier: opts.tier, target: t.label, name }, async () => {
+    // Claude Code guards `.claude` directories: acceptEdits does not cover an edit under one (seen on 2.1.312).
+    if (resolve(workRoot).split(sep).includes('.claude')) return { status: 'fail', detail: `workRoot ${workRoot} is inside a .claude directory, where Claude Code denies edits` };
+    const { settings, login } = cellSettings(wiring, { claude: false });
+    const cell = makeCell(workRoot, `${t.label}-${name.replace(/\W+/g, '-')}`, settings, {
+      'notes.txt': `The magic number is ${MAGIC}.\n`,
+      'calc.py': 'def magic():\n    return 0\n',
+    });
+    const prompt = 'Read notes.txt, then edit calc.py so that magic() returns the magic number from notes.txt. When done, reply DONE.';
+    const mark = logMark(t.logFile);
+    const { r, parsed } = await runClaude(cell, [prompt, '--model', model, '--permission-mode', 'acceptEdits'], login, EDIT_TIMEOUT_MS);
+    const calc = readFileSync(join(cell.work, 'calc.py'), 'utf8');
+    return judgeEdit(r, parsed, calc, model, routedSince(t.logFile, mark, model));
+  });
+}
+
 /**
  * The cells against one router: Claude Code's version, the harness self-check (base-url only), `gpt-edit`, and
  * `claude-smoke` when `models.claude` is set. Router-log growth is counted for every cell; on the live router other
@@ -245,20 +264,7 @@ export async function runCells(
     }
   }
 
-  await rec.time(base('gpt-edit'), async () => {
-    // Claude Code guards `.claude` directories: acceptEdits does not cover an edit under one (seen on 2.1.312).
-    if (resolve(workRoot).split(sep).includes('.claude')) return { status: 'fail', detail: `workRoot ${workRoot} is inside a .claude directory, where Claude Code denies edits` };
-    const { settings, login } = cellSettings(wiring, { claude: false });
-    const cell = makeCell(workRoot, `${t.label}-gpt-edit`, settings, {
-      'notes.txt': `The magic number is ${MAGIC}.\n`,
-      'calc.py': 'def magic():\n    return 0\n',
-    });
-    const prompt = 'Read notes.txt, then edit calc.py so that magic() returns the magic number from notes.txt. When done, reply DONE.';
-    const mark = logMark(t.logFile);
-    const { r, parsed } = await runClaude(cell, [prompt, '--model', models.gpt, '--permission-mode', 'acceptEdits'], login, EDIT_TIMEOUT_MS);
-    const calc = readFileSync(join(cell.work, 'calc.py'), 'utf8');
-    return judgeEdit(r, parsed, calc, models.gpt, routedSince(t.logFile, mark, models.gpt));
-  });
+  await runEditCell(t, wiring, models.gpt, 'gpt-edit', opts);
 
   if (models.claude) {
     const claude = models.claude;

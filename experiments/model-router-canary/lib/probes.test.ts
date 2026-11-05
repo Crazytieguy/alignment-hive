@@ -15,6 +15,7 @@ import {
   judgeImage,
   judgeLatency,
   judgeOverflow,
+  isFamilyCheck,
   judgeReach,
   judgeToolAddition,
   judgeToolAdditionDirect,
@@ -407,4 +408,9 @@ describe('validators', () => {
     expect(judgeOverflow(ok(pong)).ok).toBe(false);
     expect(judgeOverflow(bad('timeout after 300s', 0)).ok).toBe(false);
   });
+});
+
+test('only Grok and Muse checks count as family checks', () => {
+  for (const name of ['reach/grok-4.7', 'reach/muse-wonder-1.0', 'tool-replay/grok-4.7', 'edit/muse-wonder-1.0']) expect(isFamilyCheck(name)).toBe(true);
+  for (const name of ['reach/gpt-6-luna', 'tool-replay', 'gpt-edit', 'models']) expect(isFamilyCheck(name)).toBe(false);
 });

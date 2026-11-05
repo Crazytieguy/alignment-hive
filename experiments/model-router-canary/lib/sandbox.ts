@@ -34,7 +34,11 @@ export type SandboxSpec = {
   copyCredentials?: boolean;
   /** The logins to copy: `credentialPrecheck().files`. Required, and non-empty, unless copyCredentials is false. */
   files?: Array<string>;
+  /** The Grok and Muse logins to copy, without what renews them, and the families to turn on with them. */
+  family?: FamilyLogins;
 };
+
+export type FamilyLogins = { files: Array<string>; grok: boolean; muse: boolean; detail: string };
 
 /** One copied login: where it came from, where the copy lives, and hashes taken at copy time (never the values). */
 export type CredentialCopy = { file: string; livePath: string; copyPath: string; liveSha256: string; refreshSha256: string };
@@ -168,6 +172,65 @@ export function copyCredentials(files: Array<string>, destDir: string): Array<Cr
   return copies;
 }
 
+/** An xAI access token lasts 6 hours and the probes that use it run in a run's first minutes. */
+const MIN_XAI_ACCESS_MINUTES = 30;
+const isXaiLogin = (name: string): boolean => /^xai-.*\.json$/.test(name);
+const isMetaLogin = (name: string): boolean => /^meta-.*\.json$/.test(name);
+
+/**
+ * Which live Grok and Muse logins a sandbox can use. Unlike a Codex copy, these go in without what renews them
+ * (`copyFamilyLogins`), so a copy needs only a credential that works now, and no candidate's code can rotate the live
+ * login. Reads only `expired`, `disabled` and the presence of the key.
+ */
+export function familyPrecheck(now = Date.now(), authDir = LIVE_AUTH_DIR): FamilyLogins {
+  const names = existsSync(authDir) ? readdirSync(authDir).filter((n) => (isXaiLogin(n) || isMetaLogin(n)) && lstatSync(join(authDir, n)).isFile()).sort() : [];
+  const files: Array<string> = [];
+  const excluded: Array<string> = [];
+  for (const f of names) {
+    let login: Record<string, unknown>;
+    try {
+      login = JSON.parse(readFileSync(join(authDir, f), 'utf8')) as Record<string, unknown>;
+    } catch {
+      excluded.push(`${f.split('-')[0]} (not valid JSON)`);
+      continue;
+    }
+    const family = isXaiLogin(f) ? 'Grok' : 'Muse';
+    if (truthy(login.disabled)) {
+      excluded.push(`${family} (disabled)`);
+    } else if (isMetaLogin(f)) {
+      if (typeof login.api_key === 'string' && login.api_key && !login.api_key.startsWith('dca:')) files.push(resolve(authDir, f));
+      else excluded.push(`${family} (no API key)`);
+    } else {
+      const expires = typeof login.expired === 'string' ? Date.parse(login.expired) : NaN;
+      if ((expires - now) / 60_000 > MIN_XAI_ACCESS_MINUTES && typeof login.access_token === 'string' && login.access_token) files.push(resolve(authDir, f));
+      else excluded.push(`${family} (under ${MIN_XAI_ACCESS_MINUTES} minutes left on its access token)`);
+    }
+  }
+  const grok = files.some((f) => isXaiLogin(basename(f)));
+  const muse = files.some((f) => isMetaLogin(basename(f)));
+  const on = [grok && 'Grok', muse && 'Muse'].filter(Boolean).join(' and ');
+  const left = excluded.length ? `left out: ${excluded.join(', ')}` : '';
+  return { files, grok, muse, detail: [on ? `${on} copied without what renews them` : 'no Grok or Muse login', left].filter(Boolean).join('; ') };
+}
+
+/** Copy logins from `familyPrecheck` into `destDir`, leaving out what could renew them: nothing here can rotate. */
+export function copyFamilyLogins(files: Array<string>, destDir: string): void {
+  mkdirSync(destDir, { recursive: true, mode: 0o700 });
+  for (const livePath of files) {
+    const file = basename(livePath);
+    const login = JSON.parse(readFileSync(livePath, 'utf8')) as Record<string, unknown>;
+    if (isXaiLogin(file)) delete login.refresh_token;
+    else if (isMetaLogin(file)) {
+      // A Meta access token starting "dca:" stands in for dca_token (meta_executor.go extractDCAToken). The API key does the work.
+      delete login.dca_token;
+      delete login.access_token;
+    } else throw new Error(`${shortName(file)} is not a Grok or Muse login file`);
+    const copyPath = join(destDir, file);
+    writeFileSync(copyPath, `${JSON.stringify(login, null, 2)}\n`, { mode: 0o600 });
+    chmodSync(copyPath, 0o600);
+  }
+}
+
 /** Replace `path` through a temp file in the same directory (0600), so the live child never reads half a login. */
 function replaceAtomically(path: string, bytes: Uint8Array): void {
   const tmp = join(dirname(path), `.${basename(path)}.canary-${process.pid}`);
@@ -239,9 +302,10 @@ export async function credentialPostcheck(sb: Sandbox, rec: Recorder): Promise<v
   });
 }
 
-/** The sandbox's config.toml: its two ports and nothing else, so grok and muse stay off (config.rs defaults). */
-export function renderConfigToml(routerPort: number, childPort: number): string {
-  return `# model-router canary sandbox; deleted when the sandbox stops.\nport = ${routerPort}\n\n[upstreams.cliproxy]\nport = ${childPort}\n`;
+/** The sandbox's config.toml: its two ports, and grok and muse only when it has their logins (off in config.rs defaults). */
+export function renderConfigToml(routerPort: number, childPort: number, family: { grok?: boolean; muse?: boolean } = {}): string {
+  const on = (name: string, enabled?: boolean): string => (enabled ? `\n[${name}]\nenabled = true\n` : '');
+  return `# model-router canary sandbox; deleted when the sandbox stops.\nport = ${routerPort}\n\n[upstreams.cliproxy]\nport = ${childPort}\n${on('grok', family.grok)}${on('muse', family.muse)}`;
 }
 
 /** Ports a sandbox must never take, even while free: the live router's and its child's, so a live restart can't collide. */
@@ -423,7 +487,7 @@ export async function startSandbox(spec: SandboxSpec, rec: Recorder): Promise<Sa
   const cache = join(xdg.XDG_CACHE_HOME, 'model-router');
   for (const d of [config, state, cache]) mkdirSync(d, { recursive: true, mode: 0o700 });
   const configFile = join(config, 'config.toml');
-  writeFileSync(configFile, renderConfigToml(spec.routerPort, spec.childPort));
+  writeFileSync(configFile, renderConfigToml(spec.routerPort, spec.childPort, spec.family));
   const logFile = join(root, 'router.log');
   const cpaLogFile = join(state, 'logs/cliproxyapi.log');
   const childRecordFile = join(state, 'cliproxyapi-child.json');
@@ -540,6 +604,7 @@ export async function startSandbox(spec: SandboxSpec, rec: Recorder): Promise<Sa
       sb.credentials = copyCredentials(spec.files ?? [], join(state, 'codex-auth'));
       // What sweepSandboxes needs to write a rotated copy back if this run dies without stopping (no secrets).
       writeJsonAtomic(join(root, COPIES_FILE), sb.credentials, 0o600);
+      copyFamilyLogins(spec.family?.files ?? [], join(state, 'codex-auth'));
     } catch (e) {
       return abort(`copying credentials: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -617,7 +682,7 @@ export async function startSandbox(spec: SandboxSpec, rec: Recorder): Promise<Sa
     ...base,
     name: 'sandbox-start',
     status: 'pass',
-    detail: `ready in ${readyS.toFixed(1)}s; router ${spec.routerVersion} running ${basename(dirname(spec.cpaBinary))}/${basename(spec.cpaBinary)} in the v${pin} slot; child lists ${models} models; ${sb.credentials.length} login(s) copied`,
+    detail: `ready in ${readyS.toFixed(1)}s; router ${spec.routerVersion} running ${basename(dirname(spec.cpaBinary))}/${basename(spec.cpaBinary)} in the v${pin} slot; child lists ${models} models; ${sb.credentials.length + (spec.family?.files.length ?? 0)} login(s) copied`,
     metrics: { ready_s: readyS, models, logins: sb.credentials.length },
     ms: performance.now() - t0,
   };

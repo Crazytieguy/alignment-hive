@@ -798,6 +798,12 @@ async function probeOverflow(t: RouterTarget, model: string): Promise<Result> {
   return { status: ok ? 'pass' : 'fail', detail: out.join('; '), metrics };
 }
 
+/**
+ * A candidate tier check of the Grok or Muse family. One failing on both routers is about that family's account or
+ * provider, so unlike a GPT check it doesn't hold a candidate up; one failing on the candidate alone is a regression.
+ */
+export const isFamilyCheck = (name: string): boolean => /^(reach\/(grok|muse)-|tool-replay\/|edit\/)/.test(name);
+
 /** The target's `[web-search] mode` (config.rs: "alpha" by default). */
 export function webSearchMode(t: RouterTarget): string {
   const file = configFileFor(t);
@@ -855,6 +861,9 @@ export async function runProbes(targets: Array<RouterTarget>, models: ModelSet, 
     if (ids) await rec.time({ tier, target: t.label, name: 'fast-tier-catalog' }, () => probeFastTiers(t, ids));
   }
   for (const model of [...models.gpt, ...models.grok, ...models.muse]) await each(`reach/${model}`, model, (t) => probeReach(t, model));
+  if (tier === 'candidate') {
+    for (const model of [models.grok[0], models.muse[0]]) if (model) await each(`tool-replay/${model}`, model, (t) => probeToolReplay(t, model));
+  }
   const p = models.primary;
   await each('tool-replay', p, (t) => probeToolReplay(t, p));
   await each('tool-addition', p, (t) => probeToolAddition(t, p));

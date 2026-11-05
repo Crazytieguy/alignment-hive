@@ -13,16 +13,16 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TASKS, compareArms, ensureDocker, runBench } from './lib/bench';
-import { claudeVersion, runCells } from './lib/cells';
+import { claudeVersion, runCells, runEditCell } from './lib/cells';
 import { DATA, DOWNLOADS, LIVE, LIVE_AUTH_DIR, REPO, RUNS, SANDBOXES, cachedCpaBinary, portFree, readJson, routerBinary, run, sleep, stamp, writeJsonAtomic } from './lib/env';
 import { changedGoFiles, judgePrompt, judgeRelease } from './lib/judge';
 import type { JudgeDecision } from './lib/judge';
-import { discoverModels, liveTarget, parseMiniToml, routerHealth, runProbes } from './lib/probes';
+import { discoverModels, isFamilyCheck, liveTarget, parseMiniToml, routerHealth, runProbes } from './lib/probes';
 import type { ModelSet } from './lib/probes';
 import { Recorder, appendHistory, gates, hoistSignal, readHistory, renderMarkdown } from './lib/report';
-import type { CandidateVerdict, Check, RunReport } from './lib/report';
-import { credentialPostcheck, credentialPrecheck, livePorts, startSandbox, sweepSandboxes } from './lib/sandbox';
-import type { Sandbox } from './lib/sandbox';
+import type { CandidateVerdict, Check, RunReport, Tier } from './lib/report';
+import { credentialPostcheck, credentialPrecheck, familyPrecheck, livePorts, startSandbox, sweepSandboxes } from './lib/sandbox';
+import type { FamilyLogins, Sandbox } from './lib/sandbox';
 import { MAX_TRIES, MIN_AGE_DAYS, SUPERSEDED_LIMIT, isPatch, liveDue, newFindings, nextCandidate, supersededStreak } from './lib/schedule';
 import type { CandidateEntry, CandidateState, Finding, SessionLog } from './lib/schedule';
 import { auditSource, compareVersions, downloadCpa, downloadSource, listReleases, pickCandidate, pinnedVersion } from './lib/upstream';
@@ -114,17 +114,21 @@ async function liveTier(report: RunReport, rec: Recorder, full: boolean): Promis
     recordDoctor(await doctorChecks(routerVersion), rec);
     return;
   }
-  const plan = (await doctorChecks(routerVersion)).checks?.find((c) => c.name === 'muse-plan');
-  if (plan?.warn && models.muse.includes(MUSE_WONDER_FULL)) {
-    models = { ...models, muse: models.muse.filter((m) => m !== MUSE_WONDER_FULL) };
-    rec.add({ tier: 'live', target: 'live', name: `reach/${MUSE_WONDER_FULL}`, status: 'skip', detail: `not on this Muse plan: ${plan.detail.slice(0, 160)}` });
-  }
+  models = await withoutUnservedMuse(models, routerVersion, 'live', 'live', rec);
   await runProbes([target], models, { tier: 'live', rec, full });
   report.live.full = full;
   await runCells(target, { kind: 'user-proxy' }, { gpt: models.primary, claude: CLAUDE_MODEL }, { tier: 'live', rec, workRoot: join(report.dir, 'cells-live') });
   // Doctor last: CLIProxyAPI refreshes a login within a minute of waking from sleep, and the probes above drive it to,
   // so an expired codex-auth here means refreshing really stopped.
   recordDoctor(await doctorChecks(routerVersion), rec);
+}
+
+/** Leaves out Muse Wonder Full when the live doctor says this login's plan doesn't serve it. */
+async function withoutUnservedMuse(models: ModelSet, routerVersion: string, tier: Tier, target: string, rec: Recorder): Promise<ModelSet> {
+  const plan = (await doctorChecks(routerVersion)).checks?.find((c) => c.name === 'muse-plan');
+  if (!plan?.warn || !models.muse.includes(MUSE_WONDER_FULL)) return models;
+  rec.add({ tier, target, name: `reach/${MUSE_WONDER_FULL}`, status: 'skip', detail: `not on this Muse plan: ${plan.detail.slice(0, 160)}` });
+  return { ...models, muse: models.muse.filter((m) => m !== MUSE_WONDER_FULL) };
 }
 
 /**
@@ -163,7 +167,8 @@ function verdictOf(rec: Recorder, previous: Array<string>): { verdict: Candidate
   const pinned = failed('pinned');
   const candidate = failed('candidate');
   const regressions = [...candidate].filter((n) => !pinned.has(n));
-  const shared = [...candidate].filter((n) => pinned.has(n));
+  const allShared = [...candidate].filter((n) => pinned.has(n));
+  const shared = allShared.filter((n) => !isFamilyCheck(n));
   const ran = rec.checks.some((c) => c.target === 'candidate' && c.name === 'sandbox-start' && c.status === 'pass');
   if (regressions.length) {
     const confirmed = regressions.filter((n) => STRUCTURAL.test(n) || previous.includes(n));
@@ -175,7 +180,8 @@ function verdictOf(rec: Recorder, previous: Array<string>): { verdict: Candidate
   const broke = rec.checks.find((c) => c.target === 'canary' && c.name === 'run' && c.status === 'fail');
   if (broke) return { verdict: 'inconclusive', reason: `the run broke off: ${broke.detail.slice(0, 160)}`, regressions };
   const warns = rec.checks.filter((c) => gates(c) && c.target === 'candidate' && c.status === 'warn').map((c) => c.name);
-  return { verdict: 'pass', reason: warns.length ? `passed with warnings: ${warns.join(', ')}` : 'every check passed', regressions };
+  const down = allShared.length ? `; failing on the pin too: ${allShared.join(', ')}` : '';
+  return { verdict: 'pass', reason: (warns.length ? `passed with warnings: ${warns.join(', ')}` : 'every check passed') + down, regressions };
 }
 
 /** Compare the two sandboxes' latency probes (same time window, interleaved by the probes). */
@@ -223,11 +229,11 @@ async function sandboxPorts(): Promise<Record<'pinned' | 'candidate', { router: 
   return { pinned: { router: free[0]!, child: free[1]! }, candidate: { router: free[2]!, child: free[3]! } };
 }
 
-async function startBoth(rec: Recorder, routerVersion: string, binaries: Record<'pinned' | 'candidate', string>, files: Array<string>): Promise<Array<Sandbox>> {
+async function startBoth(rec: Recorder, routerVersion: string, binaries: Record<'pinned' | 'candidate', string>, files: Array<string>, family?: FamilyLogins): Promise<Array<Sandbox>> {
   const ports = await sandboxPorts();
   const sandboxes: Array<Sandbox> = [];
   for (const label of ['pinned', 'candidate'] as const) {
-    sandboxes.push(await startSandbox({ label, cpaBinary: binaries[label], routerVersion, routerPort: ports[label].router, childPort: ports[label].child, files }, rec));
+    sandboxes.push(await startSandbox({ label, cpaBinary: binaries[label], routerVersion, routerPort: ports[label].router, childPort: ports[label].child, files, family }, rec));
   }
   return sandboxes;
 }
@@ -318,7 +324,9 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
   // Set when Claude found a later release that fixes something this one broke.
   let waitFor: JudgeDecision | undefined;
   try {
-    sandboxes.push(...(await startBoth(rec, routerVersion, { pinned: pinnedBinary, candidate: cpaBinary }, pre.files)));
+    const family = familyPrecheck();
+    rec.add({ tier: 'candidate', target: 'canary', name: 'family-logins', status: family.files.length ? 'pass' : 'skip', detail: family.detail });
+    sandboxes.push(...(await startBoth(rec, routerVersion, { pinned: pinnedBinary, candidate: cpaBinary }, pre.files, family)));
     const targets = sandboxes.map((s) => s.target);
     const found = await Promise.allSettled(targets.map((t) => discoverModels(t)));
     found.forEach((r, i) => {
@@ -326,10 +334,15 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
     });
     const [pm, cm] = found.map((r) => (r.status === 'fulfilled' ? r.value : undefined));
     if (pm && cm) {
-      await runProbes(targets, pinnedModels(pm, cm, rec), { tier: 'candidate', rec, full: opts.full });
+      const models = await withoutUnservedMuse(pinnedModels(pm, cm, rec), routerVersion, 'candidate', 'canary', rec);
+      await runProbes(targets, models, { tier: 'candidate', rec, full: opts.full });
       compareLatency(rec);
       for (const t of targets) {
-        await runCells(t, { kind: 'base-url', baseUrl: t.baseUrl }, { gpt: pm.primary }, { tier: 'candidate', rec, workRoot: join(report.dir, `cells-${t.label}`) });
+        const wiring = { kind: 'base-url', baseUrl: t.baseUrl } as const;
+        const cells = { tier: 'candidate' as const, rec, workRoot: join(report.dir, `cells-${t.label}`) };
+        await runCells(t, wiring, { gpt: pm.primary }, cells);
+        // The real tool set: a request with one tool doesn't show what Meta's tool attestation rejects.
+        for (const model of [models.grok[0], models.muse[0]]) if (model) await runEditCell(t, wiring, model, `edit/${model}`, cells);
       }
       // The bench only adds to a candidate that passed everything else.
       if (opts.bench !== 'never' && verdictOf(rec, seen?.regressions ?? []).verdict === 'pass') {
@@ -398,7 +411,7 @@ async function benchOnly(report: RunReport, rec: Recorder): Promise<void> {
   if (blocker) throw new Error(blocker);
   report.versions.pinnedCpa = pinned;
   report.versions.candidateCpa = version;
-  const blocked = await refreshGate(pinned, version, rec);
+  const blocked = await auditGate(pinned, version, rec);
   if (blocked) throw new Error(blocked);
   const pre = precheck(rec);
   if (!pre.ok) throw new Error(pre.detail);
