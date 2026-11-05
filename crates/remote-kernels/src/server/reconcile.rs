@@ -1,54 +1,47 @@
 //! Reconciliation: compare each durable machine record with what its provider
 //! reports and repair the local bookkeeping (gone machines, resumes done
 //! outside this tool, self-cleanups that finished or stalled). Each finding
-//! comes back as a message for the caller to surface.
+//! comes back as a message for the caller to surface. It only ever asks the
+//! provider: it never connects to a stopped machine, which has no SSH, and
+//! never resumes one, which would restart its billing.
 
 use std::sync::Arc;
 
 use crate::config::Cleanup;
-use crate::runtime::{AnyRuntime, ConnectionContext, InstanceStatus, Runtime};
-use crate::state::{InstanceRecord, Phase};
+use crate::runtime::{AnyRuntime, InstanceStatus, Runtime};
+use crate::state::{InstanceRecord, LifecycleRecord, Phase};
 
 use super::attach::{ResumeAccounting, resume_accounting};
 use super::budget::ledger_write_blocked;
+use super::cleanup::take_live_record;
 use super::{RemoteKernelsServer, now_epoch};
 
 /// How long a machine may keep running with its self-cleanup stuck in
 /// `Finalizing` before reconciliation stops waiting for the outcome.
 const FINALIZE_OP_TIMEOUT_SECS: u64 = 15 * 60;
 
-/// The context for opening a machine that already exists — reconciliation
-/// and supervision, never a fresh `start()`.
-fn connection_context_for_record(
-    project_dir: &std::path::Path,
-    machine_id: &str,
-    record: &InstanceRecord,
-) -> anyhow::Result<ConnectionContext> {
-    let jupyter_token = record
-        .jupyter_token
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("missing Jupyter token"))?;
-    let ssh_key_path = record
-        .ssh_key_path
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("missing SSH key"))?;
-    // Fail closed on a key OpenSSH would silently refuse (see
-    // validate_private_key_file) — connecting would otherwise degrade into
-    // auth failures with no pointer at the key file.
-    crate::ssh::validate_private_key_file(&ssh_key_path)?;
-    Ok(ConnectionContext {
-        machine_id: machine_id.to_string(),
-        fresh: false,
-        ssh_key_path,
-        known_hosts_path: crate::state::state_dir(project_dir)
-            .join("instances")
-            .join(machine_id)
-            .join("known_hosts"),
-        jupyter_token,
-        proxy_port_mapped: record.proxy_port_mapped,
-        remote_dirs: record.remote_dirs.clone(),
-    })
+/// How long after `attach()` issued a provider resume a machine that still
+/// reports stopped is taken to be coming up rather than stopped.
+const RESUME_SETTLE_SECS: u64 = 2 * 60;
+
+/// Whether the record of a machine the provider reports stopped already agrees
+/// with that. A start that never got past provisioning has nothing to settle.
+fn stop_is_recorded(record: &InstanceRecord, lifecycle: &LifecycleRecord) -> bool {
+    use crate::state::FinalizePhase::{CompletedStop, RetrievalUnavailable};
+    match record.phase {
+        Phase::Stopped => matches!(
+            lifecycle.finalize_phase,
+            None | Some(CompletedStop | RetrievalUnavailable)
+        ),
+        Phase::Provisioning => lifecycle.finalize_phase.is_none(),
+        Phase::Running => false,
+    }
+}
+
+fn unreadable_lifecycle(machine_id: &str, error: &dyn std::fmt::Display) -> String {
+    format!(
+        "Machine {machine_id}: {error}. Reconciliation left it untouched — it may still be billing."
+    )
 }
 
 impl RemoteKernelsServer {
@@ -112,17 +105,13 @@ impl RemoteKernelsServer {
         let record = crate::state::load_instance_record(&project_dir, machine_id)?;
         // Read-only decision snapshot: never saved back (saves go through
         // `update_lifecycle` so they can't clobber concurrent writers).
-        let mut lifecycle_snapshot = match crate::state::load_lifecycle_record_checked(
-            &project_dir,
-            machine_id,
-        ) {
-            Ok(lifecycle) => lifecycle,
-            Err(error) => {
-                return Some(format!(
-                    "Machine {machine_id}: {error}. Reconciliation left it untouched — it may still be billing."
-                ));
-            }
-        };
+        let lifecycle_snapshot =
+            match crate::state::load_lifecycle_record_checked(&project_dir, machine_id) {
+                Ok(lifecycle) => lifecycle,
+                Err(error) => {
+                    return Some(unreadable_lifecycle(machine_id, &error));
+                }
+            };
         let runtime = match self.runtime_for(&record.runtime).await {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -151,10 +140,7 @@ impl RemoteKernelsServer {
         // the ledger a reopened interval. What differs is the OWNER —
         // reconciliation observes a machine, it does not claim one, so the
         // event carries no ownership change (see below).
-        if resume_accounting(&provider_state, record.phase) == ResumeAccounting::OpenOnly
-            && lifecycle_snapshot.finalize_phase
-                != Some(crate::state::FinalizePhase::RetrievingOutcome)
-        {
+        if resume_accounting(&provider_state, record.phase) == ResumeAccounting::OpenOnly {
             // Resumed outside this tool, or still coming up from such a
             // resume — RunPod v2 reports PROVISIONING/STARTING for the first
             // minutes of a restart and the meter runs the whole time: GPU
@@ -206,67 +192,6 @@ impl RemoteKernelsServer {
                     &error,
                 ));
             }
-        }
-
-        if provider_state == InstanceStatus::Running
-            && lifecycle_snapshot.finalize_phase
-                == Some(crate::state::FinalizePhase::RetrievingOutcome)
-        {
-            let _operation_lock = match Self::acquire_operation_lock(&project_dir, machine_id).await
-            {
-                Ok(lock) => lock,
-                Err(error) => {
-                    return Some(Self::lifecycle_check_incomplete(
-                        machine_id,
-                        &format!("another operation holds this machine's lock: {error}"),
-                        "untouched",
-                        "be billing",
-                    ));
-                }
-            };
-            if !matches!(
-                runtime.describe(&record.external_id).await,
-                Ok(InstanceStatus::Running)
-            ) {
-                return Some(Self::lifecycle_check_incomplete(
-                    machine_id,
-                    "its provider state changed mid-check",
-                    "untouched",
-                    "be billing",
-                ));
-            }
-            return match runtime.stop(&record.external_id).await {
-                Ok(()) => {
-                    if let Err(error) = self.record_stopped(machine_id, None).await {
-                        return Some(ledger_write_blocked(
-                            machine_id,
-                            "it was stopped again after an interrupted self-cleanup check",
-                            &error,
-                        ));
-                    }
-                    let mut stopped = record.clone();
-                    stopped.phase = Phase::Stopped;
-                    let _ = self.state.lock().await.save_record(machine_id, &stopped);
-                    let _ = self
-                        .update_lifecycle(machine_id, |lifecycle| {
-                            lifecycle.finalize_phase =
-                                Some(crate::state::FinalizePhase::RetrievalUnavailable);
-                            lifecycle.outcome_unknown = true;
-                        })
-                        .await;
-                    Some(format!(
-                        "Machine {machine_id}: it was stopped again after an interrupted attempt to read its self-cleanup result; its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
-                    ))
-                }
-                Err(error) => Some(Self::action_needed(
-                    machine_id,
-                    &record.external_id,
-                    &format!(
-                        "an earlier attempt to read its self-cleanup result left it running, and stopping it again failed ({error})"
-                    ),
-                    "retry terminate",
-                )),
-            };
         }
 
         if provider_state == InstanceStatus::Running
@@ -351,325 +276,121 @@ impl RemoteKernelsServer {
             ));
         }
 
-        let server_death_candidate =
-            record.phase == Phase::Running && lifecycle_snapshot.finalize_phase.is_none();
-        if lifecycle_snapshot.finalize_phase.is_none() && !server_death_candidate {
+        if stop_is_recorded(&record, &lifecycle_snapshot) {
             return None;
         }
-        if server_death_candidate {
-            // Snapshot-only: persisted by the first `update_lifecycle` below
-            // (the RetrievingOutcome write), which every later save follows.
-            lifecycle_snapshot.action = Some(record.cleanup);
-        }
-        if lifecycle_snapshot.finalize_phase
-            == Some(crate::state::FinalizePhase::RetrievalUnavailable)
-        {
-            return Some(Self::lifecycle_check_incomplete(
-                machine_id,
-                "an earlier attempt to read its self-cleanup result failed",
-                "stopped and untouched",
-                "bill for storage",
-            ));
-        }
         if lifecycle_snapshot.wants_terminate {
-            return Some(Self::lifecycle_check_incomplete(
-                machine_id,
-                "it committed to terminating itself, but the provider outcome was ambiguous, so the terminate is still pending",
-                "untouched",
-                "be billing",
+            return Some(format!(
+                "Machine {machine_id}: it committed to terminating itself, but it is still stopped at the provider. terminate(instance=\"{machine_id}\") finishes that; attach(\"{machine_id}\", force=true) revives it if its data is still needed."
             ));
         }
-
-        let context = match connection_context_for_record(&project_dir, machine_id, &record) {
-            Ok(context) => context,
-            Err(error) => {
-                return Some(Self::lifecycle_check_incomplete(
-                    machine_id,
-                    &format!("could not connect to read its self-cleanup result: {error}"),
-                    "stopped and untouched",
-                    "bill for storage",
-                ));
-            }
-        };
-        if let Ok(connection) = runtime.open(&record.external_id, &context).await
-            && let Ok(marker) = crate::machine_scripts::read_outcome(&connection).await
-        {
-            return Some(
-                self.apply_stopped_marker(machine_id, &record, &runtime, marker)
-                    .await,
-            );
-        }
-
-        if record.runtime != "runpod" || lifecycle_snapshot.action != Some(Cleanup::Terminate) {
-            return Some(Self::lifecycle_check_incomplete(
-                machine_id,
-                "could not connect to read its self-cleanup result",
-                "stopped and untouched",
-                "bill for storage",
-            ));
-        }
-
-        let _operation_lock = match Self::acquire_operation_lock(&project_dir, machine_id).await {
-            Ok(lock) => lock,
-            Err(error) => {
-                return Some(Self::lifecycle_check_incomplete(
-                    machine_id,
-                    &format!("another operation holds this machine's lock: {error}"),
-                    "untouched",
-                    "bill for storage",
-                ));
-            }
-        };
-        if !matches!(
-            runtime.describe(&record.external_id).await,
-            Ok(InstanceStatus::Stopped)
-        ) {
-            return Some(Self::lifecycle_check_incomplete(
-                machine_id,
-                "its provider state changed before its self-cleanup result could be read",
-                "untouched",
-                "be billing",
-            ));
-        }
-        if let Err(error) = self
-            .update_lifecycle(machine_id, |lifecycle| {
-                if server_death_candidate {
-                    lifecycle.action = Some(record.cleanup);
-                }
-                lifecycle.finalize_phase = Some(crate::state::FinalizePhase::RetrievingOutcome);
-            })
-            .await
-        {
-            return Some(Self::lifecycle_check_incomplete(
-                machine_id,
-                &format!("could not save local progress state: {error}"),
-                "untouched",
-                "bill for storage",
-            ));
-        }
-        if let Err(error) = self
-            .accounted_resume(
-                machine_id,
-                "temporary resume to retrieve outcome marker",
-                runtime.resume(&record.external_id),
-            )
-            .await
-        {
-            let _ = self
-                .update_lifecycle(machine_id, |lifecycle| {
-                    lifecycle.finalize_phase =
-                        Some(crate::state::FinalizePhase::RetrievalUnavailable);
-                    lifecycle.outcome_unknown = true;
-                })
-                .await;
-            return Some(Self::lifecycle_check_incomplete(
-                machine_id,
-                &format!("briefly resuming it to read its self-cleanup result failed: {error}"),
-                "stopped and untouched",
-                "bill for storage",
-            ));
-        }
-        self.state.lock().await.reset_known_hosts(machine_id);
-        let marker = async {
-            runtime.wait_running(&record.external_id).await?;
-            let connection = runtime.open(&record.external_id, &context).await?;
-            crate::machine_scripts::read_outcome(&connection)
-                .await
-                .map_err(anyhow::Error::from)
-        }
-        .await;
-        match marker {
-            Ok(marker) if marker.action == Cleanup::Terminate && marker.finalize_exit == 0 => {
-                let _ = self
-                    .update_lifecycle(machine_id, |lifecycle| {
-                        lifecycle.wants_terminate = true;
-                        lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
-                    })
-                    .await;
-                if let Err(error) =
-                    crate::state::import_pending_transition(&project_dir, machine_id, &marker)
-                {
-                    if runtime.stop(&record.external_id).await.is_ok() {
-                        let _ = self.record_stopped(machine_id, None).await;
-                    }
-                    let _ = self
-                        .update_lifecycle(machine_id, |lifecycle| {
-                            lifecycle.finalize_phase =
-                                Some(crate::state::FinalizePhase::RetrievalUnavailable);
-                            lifecycle.wants_terminate = false;
-                            lifecycle.outcome_unknown = true;
-                        })
-                        .await;
-                    return Some(format!(
-                        "Machine {machine_id}: its self-cleanup result could not be recorded locally ({error}); it was stopped again to preserve its data and may still bill for storage; this retries automatically on the next status() or attach()"
-                    ));
-                }
-                if let Err(error) = runtime.terminate(&record.external_id).await {
-                    let restop = runtime.stop(&record.external_id).await;
-                    if restop.is_ok() {
-                        let _ = self.record_stopped(machine_id, None).await;
-                    }
-                    let _ = self
-                        .update_lifecycle(machine_id, |lifecycle| {
-                            lifecycle.finalize_phase =
-                                Some(crate::state::FinalizePhase::Finalizing);
-                            lifecycle.wants_terminate = true;
-                            lifecycle.outcome_unknown = true;
-                        })
-                        .await;
-                    return Some(Self::action_needed(
-                        machine_id,
-                        &record.external_id,
-                        &format!(
-                            "terminating it failed ({error}); {}",
-                            if restop.is_ok() {
-                                "it was stopped again as a fallback, so its data is preserved, but storage may still bill"
-                            } else {
-                                "stopping it as a fallback also failed"
-                            }
-                        ),
-                        "retry terminate",
-                    ));
-                }
-                let _ = self.record_terminated_and_clear(machine_id).await;
-                Some(format!(
-                    "Machine {machine_id}: its pending self-cleanup finished — it is now terminated (data deleted) and the cost is recorded"
-                ))
-            }
-            Ok(marker) => {
-                let _ = crate::state::import_pending_transition(&project_dir, machine_id, &marker);
-                let restop = runtime.stop(&record.external_id).await;
-                if restop.is_ok() {
-                    let _ = self.record_stopped(machine_id, None).await;
-                }
-                let _ = self
-                    .update_lifecycle(machine_id, |lifecycle| {
-                        lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
-                        lifecycle.action = Some(Cleanup::Stop);
-                        lifecycle.wants_terminate = false;
-                        lifecycle.outcome_unknown = false;
-                    })
-                    .await;
-                Some(if restop.is_ok() {
-                    format!(
-                        "Machine {machine_id}: its self-cleanup chose to stop (preserve data) rather than terminate; it is stopped — its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
-                    )
-                } else {
-                    Self::action_needed(
-                        machine_id,
-                        &record.external_id,
-                        "its self-cleanup chose to stop rather than terminate, but stopping it again failed",
-                        "call stop",
-                    )
-                })
-            }
-            Err(error) => {
-                let restop = runtime.stop(&record.external_id).await;
-                if restop.is_ok() {
-                    let _ = self.record_stopped(machine_id, None).await;
-                }
-                let _ = self
-                    .update_lifecycle(machine_id, |lifecycle| {
-                        lifecycle.finalize_phase =
-                            Some(crate::state::FinalizePhase::RetrievalUnavailable);
-                        lifecycle.outcome_unknown = true;
-                    })
-                    .await;
-                Some(Self::action_needed(
-                    machine_id,
-                    &record.external_id,
-                    &format!(
-                        "its self-cleanup result could not be read ({error}); {}",
-                        if restop.is_ok() {
-                            "it was stopped again as a fallback, so its data is preserved, but storage may still bill"
-                        } else {
-                            "stopping it as a fallback also failed"
-                        }
-                    ),
-                    "retry terminate",
-                ))
-            }
-        }
+        self.settle_found_stopped(machine_id, &runtime).await
     }
 
-    async fn apply_stopped_marker(
+    /// The provider reports this machine stopped and its record doesn't say
+    /// so: it stopped itself while no server was connected, or something
+    /// outside this tool stopped it. Record what the provider says, once.
+    ///
+    /// What its self-cleanup decided stays unknown here. The outcome marker is
+    /// on the machine, and a stopped machine has no SSH; restarting it to look
+    /// would restart its billing, which a status check must never do. So the
+    /// machine is kept, which only costs storage, and the agent is told. The
+    /// billing interval closes now rather than when the machine really stopped,
+    /// so spend can only be over-reported.
+    async fn settle_found_stopped(
         &self,
         machine_id: &str,
-        record: &InstanceRecord,
         runtime: &Arc<AnyRuntime>,
-        marker: crate::state::OutcomeMarker,
-    ) -> String {
+    ) -> Option<String> {
         let project_dir = self.state.lock().await.project_dir.clone();
         let _operation_lock = match Self::acquire_operation_lock(&project_dir, machine_id).await {
             Ok(lock) => lock,
             Err(error) => {
-                return Self::lifecycle_check_incomplete(
+                return Some(Self::lifecycle_check_incomplete(
                     machine_id,
                     &format!("another operation holds this machine's lock: {error}"),
                     "untouched",
                     "bill for storage",
-                );
+                ));
             }
         };
-        if !matches!(
-            runtime.describe(&record.external_id).await,
-            Ok(InstanceStatus::Stopped)
-        ) {
-            return Self::lifecycle_check_incomplete(
-                machine_id,
-                "its provider state changed after its self-cleanup result was read",
-                "untouched",
-                "be billing",
-            );
-        }
-        if let Err(error) =
-            crate::state::import_pending_transition(&project_dir, machine_id, &marker)
+        // Everything may have changed while waiting for the lock.
+        let mut record = crate::state::load_instance_record(&project_dir, machine_id)?;
+        let lifecycle = match crate::state::load_lifecycle_record_checked(&project_dir, machine_id)
         {
-            return Self::lifecycle_check_incomplete(
+            Ok(lifecycle) => lifecycle,
+            Err(error) => {
+                return Some(unreadable_lifecycle(machine_id, &error));
+            }
+        };
+        // Setup no longer holds the lock while it waits for a resumed machine,
+        // and the provider may not report the resume yet: settling on that
+        // would close the billing interval of a machine that is coming up.
+        let resuming = lifecycle
+            .resume_issued_at_epoch
+            .is_some_and(|issued| now_epoch().saturating_sub(issued) < RESUME_SETTLE_SECS);
+        if stop_is_recorded(&record, &lifecycle)
+            || resuming
+            || !matches!(
+                runtime.describe(&record.external_id).await,
+                Ok(InstanceStatus::Stopped)
+            )
+        {
+            return None;
+        }
+        // Setup in this process owns the outcome of the machine it is bringing
+        // up, and another session may be driving a fenced one. (A `Finalizing`
+        // fence is this session watching the machine's own cleanup, now done.)
+        if self
+            .state
+            .lock()
+            .await
+            .instances
+            .get(machine_id)
+            .is_some_and(|instance| {
+                instance.phase == Phase::Provisioning
+                    || instance
+                        .fenced
+                        .is_some_and(|reason| reason != crate::state::FenceReason::Finalizing)
+            })
+        {
+            return None;
+        }
+        if record.phase != Phase::Stopped
+            && let Err(error) = self.record_stopped(machine_id, None).await
+        {
+            return Some(ledger_write_blocked(
                 machine_id,
-                &format!("its self-cleanup result could not be recorded locally: {error}"),
-                "untouched",
-                "bill for storage",
-            );
+                "the provider shows it stopped",
+                &error,
+            ));
         }
-        if marker.action == Cleanup::Terminate && marker.finalize_exit == 0 {
-            let _ = self
-                .update_lifecycle(machine_id, |lifecycle| {
-                    lifecycle.finalize_phase = Some(crate::state::FinalizePhase::Finalizing);
-                    lifecycle.action = Some(Cleanup::Terminate);
-                    lifecycle.wants_terminate = true;
-                    lifecycle.op_id = Some(marker.uuid.clone());
-                })
-                .await;
-            return match runtime.terminate(&record.external_id).await {
-                Ok(()) => {
-                    let _ = self.record_terminated_and_clear(machine_id).await;
-                    format!(
-                        "Machine {machine_id}: its pending self-cleanup finished — it is now terminated (data deleted) and the cost is recorded"
-                    )
-                }
-                Err(error) => Self::action_needed(
-                    machine_id,
-                    &record.external_id,
-                    &format!("terminating it failed ({error})"),
-                    "retry terminate",
-                ),
-            };
+        {
+            let mut state = self.state.lock().await;
+            // A machine stopped under a live session: its transport is gone.
+            if let Some(live) = take_live_record(&mut state, machine_id, &record.external_id) {
+                record = live;
+            }
+            record.phase = Phase::Stopped;
+            let _ = state.save_record(machine_id, &record);
         }
-        let mut stopped = record.clone();
-        stopped.phase = Phase::Stopped;
-        let _ = self.state.lock().await.save_record(machine_id, &stopped);
+        let wanted_terminate = lifecycle.action.unwrap_or(record.cleanup) == Cleanup::Terminate;
         let _ = self
             .update_lifecycle(machine_id, |lifecycle| {
                 lifecycle.finalize_phase = Some(crate::state::FinalizePhase::CompletedStop);
-                lifecycle.op_id = Some(marker.uuid);
                 lifecycle.action = Some(Cleanup::Stop);
-                lifecycle.wants_terminate = false;
+                lifecycle.op_id = None;
                 lifecycle.outcome_unknown = false;
             })
             .await;
-        format!(
-            "Machine {machine_id}: it was stopped while disconnected; its disk is preserved and attach(\"{machine_id}\") resumes it (storage may bill until terminate())"
-        )
+        Some(if wanted_terminate {
+            format!(
+                "Machine {machine_id}: it is stopped at the provider although its cleanup was set to terminate it (its self-cleanup chose to keep its data or could not delete it, a terminate did not go through, or it was stopped outside this tool). Its disk is preserved and storage may bill: terminate(instance=\"{machine_id}\") deletes it if its data isn't needed; attach(\"{machine_id}\") resumes it (billing restarts)."
+            )
+        } else {
+            format!(
+                "Machine {machine_id}: it is stopped at the provider, but not by this session (its own self-cleanup, or a stop outside this tool). Its disk is preserved and storage may bill until terminate(); attach(\"{machine_id}\") resumes it (billing restarts)."
+            )
+        })
     }
 }

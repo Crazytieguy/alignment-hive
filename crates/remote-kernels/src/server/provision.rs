@@ -30,6 +30,16 @@ pub(super) struct BudgetUnenforceable(String);
 )]
 pub(super) struct EndedDuringSetup(pub(super) String);
 
+/// How long supervision setup has to report, from when it starts. Under a
+/// budget a miss terminates the machine, so this has to absorb a slow link:
+/// setup is four SSH connections, measured at up to 2.7 s each on an ordinary
+/// pod, plus retries for failed ones. Waiting costs the machine's rate for at
+/// most this long, with this server still watching.
+const SUPERVISION_GATE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How often a setup wait checks whether the machine was stopped under it.
+const SETUP_ENDED_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Backstop for waiting on startup commands: their exec timeout is 5
 /// minutes, plus room for keepalives that queued behind the machine oplock.
 const STARTUP_COMMANDS_WAIT: std::time::Duration = std::time::Duration::from_mins(6);
@@ -77,6 +87,20 @@ impl FailedStartCleanup {
             }
         }
     }
+}
+
+/// The live instance this setup is bringing up, or [`EndedDuringSetup`] if
+/// something removed or replaced it.
+fn same_generation<'a>(
+    state: &'a mut AppState,
+    machine_id: &str,
+    external_id: &str,
+) -> anyhow::Result<&'a mut InstanceState> {
+    state
+        .instances
+        .get_mut(machine_id)
+        .filter(|i| i.external_id == external_id)
+        .ok_or_else(|| EndedDuringSetup(machine_id.to_string()).into())
 }
 
 pub(super) fn generate_token() -> String {
@@ -209,20 +233,7 @@ impl RemoteKernelsServer {
         machine_id: &str,
         external_id: &str,
         mode: ConnectMode,
-        operation_lock: Option<std::fs::File>,
     ) -> anyhow::Result<String> {
-        fn same_generation<'a>(
-            state: &'a mut AppState,
-            machine_id: &str,
-            external_id: &str,
-        ) -> anyhow::Result<&'a mut InstanceState> {
-            state
-                .instances
-                .get_mut(machine_id)
-                .filter(|i| i.external_id == external_id)
-                .ok_or_else(|| EndedDuringSetup(machine_id.to_string()).into())
-        }
-
         let (
             project_dir,
             runtime_name,
@@ -232,10 +243,12 @@ impl RemoteKernelsServer {
             cleanup,
             proxy_port_mapped,
             remote_dirs,
+            setup_owner,
         ) = {
             let mut state = self.state.lock().await;
             let project_dir = state.project_dir.clone();
             let known_hosts_path = state.known_hosts_path(machine_id);
+            let setup_owner = state.machine_ledger_owner(machine_id).ok().flatten();
             let inst = same_generation(&mut state, machine_id, external_id)?;
             (
                 project_dir,
@@ -246,36 +259,47 @@ impl RemoteKernelsServer {
                 inst.cleanup,
                 inst.proxy_port_mapped,
                 inst.remote_dirs.clone(),
+                setup_owner,
             )
-        };
-        let operation_lock = match operation_lock {
-            Some(lock) => lock,
-            None => Self::acquire_operation_lock(&project_dir, machine_id)
-                .await
-                .map_err(|error| anyhow::anyhow!("{error:?}"))?,
         };
         let runtime = self
             .runtime_for(&runtime_name)
             .await
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-        let handle = runtime.wait_running(external_id).await?;
-
-        let conn = runtime
-            .open(
+        // These waits can take minutes (a cold image pull) and need no lock;
+        // holding it would make an explicit stop()/terminate() queue behind
+        // them while the machine bills. (Boxed: they make very large futures.)
+        let handle = self
+            .wait_unless_ended(
+                machine_id,
                 external_id,
-                &ConnectionContext {
-                    machine_id: machine_id.to_string(),
-                    fresh: matches!(mode, ConnectMode::Fresh),
-                    ssh_key_path,
-                    known_hosts_path,
-                    jupyter_token: jupyter_token.clone(),
-                    proxy_port_mapped,
-                    remote_dirs,
-                },
+                Box::pin(runtime.wait_running(external_id)),
+            )
+            .await?;
+
+        let context = ConnectionContext {
+            machine_id: machine_id.to_string(),
+            fresh: matches!(mode, ConnectMode::Fresh),
+            ssh_key_path,
+            known_hosts_path,
+            jupyter_token: jupyter_token.clone(),
+            proxy_port_mapped,
+            remote_dirs,
+        };
+        let conn = self
+            .wait_unless_ended(
+                machine_id,
+                external_id,
+                Box::pin(runtime.open(external_id, &context)),
             )
             .await?;
         let conn = Arc::new(conn);
+        let operation_lock = Self::acquire_operation_lock(&project_dir, machine_id)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        // A stop()/terminate() may have held the lock until just now.
+        same_generation(&mut *self.state.lock().await, machine_id, external_id)?;
         let mut previous_storage_rate = 0.0;
         let lifecycle = self
             .update_lifecycle(machine_id, |lifecycle| {
@@ -288,54 +312,6 @@ impl RemoteKernelsServer {
                 }
             })
             .await?;
-        if matches!(mode, ConnectMode::Attach { resumed: true, .. })
-            && lifecycle.finalize_phase == Some(crate::state::FinalizePhase::CompletedStop)
-            && let Some(op_id) = lifecycle.op_id.as_deref()
-        {
-            match crate::machine_scripts::complete_stop(&conn, op_id).await {
-                // The consumed outcome marker must not survive the resume:
-                // it would block this machine's NEXT disconnect self-cleanup
-                // forever (the watchdog refuses new provider actions while
-                // an unresolved outcome exists).
-                Ok(()) => {
-                    if let Err(error) = crate::machine_scripts::clear_outcome(&*conn).await {
-                        tracing::warn!(
-                            target: super::LOG_TARGET,
-                            instance = machine_id,
-                            "Could not remove the consumed outcome marker: {error:#}"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: super::LOG_TARGET,
-                        instance = machine_id,
-                        "Could not clear prior stopped lease before fresh acquire: {error}"
-                    );
-                }
-            }
-        }
-        if matches!(
-            mode,
-            ConnectMode::Attach {
-                force: true,
-                resumed: true,
-                ..
-            }
-        ) && lifecycle.wants_terminate
-            && let Some(op_id) = lifecycle.op_id.as_deref()
-        {
-            crate::machine_scripts::revert_to_armed(&conn, op_id).await?;
-            // Same reasoning: the imported outcome must not block the
-            // revived machine's future finalize.
-            if let Err(error) = crate::machine_scripts::clear_outcome(&*conn).await {
-                tracing::warn!(
-                    target: super::LOG_TARGET,
-                    instance = machine_id,
-                    "Could not remove the consumed outcome marker: {error:#}"
-                );
-            }
-        }
         let endpoint = conn.jupyter().clone();
         let jupyter = JupyterClient::new(&endpoint.http_base, &jupyter_token);
 
@@ -374,7 +350,12 @@ impl RemoteKernelsServer {
         // Heartbeat + on-machine watchdog with the shared budget feed.
         let acquire_mode = match mode {
             ConnectMode::Fresh => crate::heartbeat::AcquireMode::Fresh,
-            ConnectMode::Attach { force, .. } => crate::heartbeat::AcquireMode::Attach { force },
+            // An earlier attach may have resumed the machine and never got as
+            // far as the lease: to this one it just looks running.
+            ConnectMode::Attach { force, resumed, .. } => crate::heartbeat::AcquireMode::Attach {
+                force,
+                resumed: resumed || lifecycle.resume_issued_at_epoch.is_some(),
+            },
         };
         let watchdog_policy = crate::runtime::WatchdogPolicy {
             cleanup,
@@ -405,7 +386,9 @@ impl RemoteKernelsServer {
             self.budget,
             self.config.startup_commands.clone(),
             operation_lock,
+            setup_owner,
         );
+        let supervision_deadline = tokio::time::Instant::now() + SUPERVISION_GATE;
         {
             let mut state = self.state.lock().await;
             match same_generation(&mut state, machine_id, external_id) {
@@ -424,61 +407,49 @@ impl RemoteKernelsServer {
 
         // Wait for Jupyter to be ready — without holding the state lock (this
         // can poll for minutes; other instances must stay operable meanwhile).
-        if let Err(error) = jupyter.wait_until_ready().await {
-            // A stop()/terminate() during the wait is why Jupyter never
-            // answered, and it decided the machine's fate: this is no failed
-            // start to clean up after.
-            same_generation(&mut *self.state.lock().await, machine_id, external_id)?;
-            let heartbeat = self
-                .state
-                .lock()
-                .await
-                .instances
-                .get_mut(machine_id)
-                .and_then(|instance| instance.heartbeat.take());
-            if let Some(heartbeat) = heartbeat {
-                heartbeat.stop();
+        let jupyter_ready = async {
+            let ready = self
+                .wait_unless_ended(machine_id, external_id, jupyter.wait_until_ready())
+                .await;
+            if let Err(error) = ready {
+                // A stop()/terminate() during the wait decided the machine's
+                // fate: this is no failed start to clean up after.
+                if error.is::<EndedDuringSetup>() {
+                    return Err(error);
+                }
+                if let Some(instance) = self.state.lock().await.instances.get_mut(machine_id) {
+                    instance.stop_heartbeat();
+                }
+                anyhow::bail!("Jupyter failed to start: {error}");
             }
-            anyhow::bail!("Jupyter failed to start: {error}");
-        }
-
-        if *supervision.borrow() == crate::heartbeat::SupervisionStatus::Pending {
-            // Both the user-visible caveat and the budget enforceability gate
-            // consume the same definitive heartbeat event. The timeout is only
-            // a backstop for genuinely slow or unreachable transports.
-            let resolved = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-                while *supervision.borrow() == crate::heartbeat::SupervisionStatus::Pending {
-                    if supervision.changed().await.is_err() {
-                        break;
-                    }
-                }
-            })
-            .await
-            .is_ok()
-                && *supervision.borrow() != crate::heartbeat::SupervisionStatus::Pending;
-            if !resolved && self.budget.is_some() {
-                // A stop()/terminate() aborts setup, which ends this wait
-                // too; that must not read as an unenforceable budget, whose
-                // cleanup terminates whatever the machine's policy says.
+            Ok(())
+        };
+        // Both the user-visible caveat and the budget enforceability gate
+        // consume the same definitive heartbeat event. The deadline is only a
+        // backstop for genuinely slow or unreachable transports. A failed gate
+        // also ends the Jupyter wait: the machine must not bill unsupervised
+        // for however long a sick Jupyter takes to fail.
+        let supervision_gate = async {
+            let _ = tokio::time::timeout_at(
+                supervision_deadline,
+                supervision
+                    .wait_for(|status| *status != crate::heartbeat::SupervisionStatus::Pending),
+            )
+            .await;
+            let status = supervision.borrow().clone();
+            if let Some(cause) =
+                self.budget_unenforceable_cause(&runtime_name, &status, &setup_diagnostics)
+            {
+                // A stop()/terminate() aborts setup, which ends this wait too;
+                // that must not read as an unenforceable budget, whose cleanup
+                // terminates whatever the machine's policy says.
                 same_generation(&mut *self.state.lock().await, machine_id, external_id)?;
-                // Setup may still be inside its SSH retry loop (the latest
-                // recorded attempt error names the cause, e.g. a rejected key
-                // file) or just slow on this host — the per-step timings say
-                // which step ate the window.
-                let mut cause =
-                    "the automatic-shutdown watchdog could not be confirmed within 15 seconds"
-                        .to_string();
-                if let Some(timeline) = setup_diagnostics.timeline() {
-                    let _ = write!(cause, " (setup steps: {timeline})");
-                }
-                if let Some(last) = setup_diagnostics.latest() {
-                    let _ = write!(cause, "; last error: {last}");
-                }
                 tracing::warn!(target: super::LOG_TARGET, instance = machine_id, "Budget gate missed: {cause}");
                 return Err(BudgetUnenforceable(cause).into());
             }
-        }
-        let supervision_status = supervision.borrow().clone();
+            Ok(status)
+        };
+        let ((), supervision_status) = tokio::try_join!(jupyter_ready, supervision_gate)?;
         let settled = supervision_status != crate::heartbeat::SupervisionStatus::Pending;
         match supervision_status {
             crate::heartbeat::SupervisionStatus::Refused(message) => {
@@ -498,14 +469,6 @@ impl RemoteKernelsServer {
             }
             crate::heartbeat::SupervisionStatus::Active => {}
             crate::heartbeat::SupervisionStatus::Unsupervisable(caveat) => {
-                let waiver = self.budget_source == Some(crate::config::BudgetSource::Toml)
-                    && self.config.allow_unenforced_budget_for(&runtime_name);
-                if self.budget.is_some() && !waiver {
-                    let cause = caveat
-                        .strip_suffix(crate::heartbeat::NO_AUTO_SHUTDOWN_TAIL)
-                        .unwrap_or(&caveat);
-                    return Err(BudgetUnenforceable(cause.to_string()).into());
-                }
                 let note = if self.budget.is_some() {
                     format!(
                         "{caveat}; the session budget also cannot be enforced on it after a disconnect"
@@ -633,6 +596,80 @@ impl RemoteKernelsServer {
         Ok(summary)
     }
 
+    /// Why this supervision status means a configured budget can't be enforced
+    /// on the machine, if it does. Read once the gate has passed or supervision
+    /// has settled, so a status still pending means the gate was missed.
+    fn budget_unenforceable_cause(
+        &self,
+        runtime_name: &str,
+        status: &crate::heartbeat::SupervisionStatus,
+        diagnostics: &crate::ssh_exec::SetupDiagnostics,
+    ) -> Option<String> {
+        self.budget?;
+        match status {
+            // Setup may still be inside its SSH retry loop (the latest
+            // recorded attempt error names the cause, e.g. a rejected key
+            // file) or just slow on this host — the per-step timings say
+            // which step ate the window.
+            crate::heartbeat::SupervisionStatus::Pending => {
+                let mut cause = format!(
+                    "the automatic-shutdown watchdog could not be confirmed within {} seconds",
+                    SUPERVISION_GATE.as_secs()
+                );
+                if let Some(timeline) = diagnostics.timeline() {
+                    let _ = write!(cause, " (setup steps: {timeline})");
+                }
+                if let Some(last) = diagnostics.latest() {
+                    let _ = write!(cause, "; last error: {last}");
+                }
+                Some(cause)
+            }
+            crate::heartbeat::SupervisionStatus::Unsupervisable(caveat) => {
+                let waiver = self.budget_source == Some(crate::config::BudgetSource::Toml)
+                    && self.config.allow_unenforced_budget_for(runtime_name);
+                (!waiver).then(|| {
+                    caveat
+                        .strip_suffix(crate::heartbeat::NO_AUTO_SHUTDOWN_TAIL)
+                        .unwrap_or(caveat)
+                        .to_string()
+                })
+            }
+            crate::heartbeat::SupervisionStatus::Active
+            | crate::heartbeat::SupervisionStatus::Refused(_) => None,
+        }
+    }
+
+    /// Run one of setup's long waits, ending it as soon as the machine leaves
+    /// the live set: whoever removed it (an explicit `stop()`/`terminate()`,
+    /// budget cleanup) decided its fate, and nothing here can succeed now. A
+    /// wait that fails meanwhile is reported the same way, because the machine
+    /// going away is why it failed.
+    async fn wait_unless_ended<T>(
+        &self,
+        machine_id: &str,
+        external_id: &str,
+        wait: impl Future<Output = anyhow::Result<T>>,
+    ) -> anyhow::Result<T> {
+        let ended = async {
+            loop {
+                tokio::time::sleep(SETUP_ENDED_POLL).await;
+                if let Err(ended) =
+                    same_generation(&mut *self.state.lock().await, machine_id, external_id)
+                {
+                    return ended;
+                }
+            }
+        };
+        let result = tokio::select! {
+            result = wait => result,
+            ended = ended => return Err(ended),
+        };
+        if result.is_err() {
+            same_generation(&mut *self.state.lock().await, machine_id, external_id)?;
+        }
+        result
+    }
+
     /// Finish machine setup in the background, retrying while the machine is
     /// still legitimately provisioning (Kueue queue, capacity wait). Real
     /// failures clean up the machine and surface via `status()`.
@@ -659,19 +696,14 @@ impl RemoteKernelsServer {
             let mut hard_failures = 0;
             // Local fallback bound: provisioning_overdue reads the live
             // instance map, so it can't fire if the entry was removed —
-            // this loop must terminate regardless (it re-acquires the
-            // machine oplock every iteration and would otherwise starve
-            // stop()/terminate() forever; observed live on RunPod).
+            // this loop must terminate regardless.
             let loop_started = std::time::Instant::now();
             let fallback_cap =
                 crate::runtime::AnyRuntime::static_capabilities(&runtime_name, &server.config)
                     .and_then(|caps| caps.provision_timeout)
                     .unwrap_or(std::time::Duration::from_hours(1));
             loop {
-                let error = match server
-                    .finalize_start(&machine_id, &external_id, mode, None)
-                    .await
-                {
+                let error = match server.finalize_start(&machine_id, &external_id, mode).await {
                     Ok(_) => return,
                     // Whoever removed the machine mid-setup owns its fate:
                     // no retry, no failed-start cleanup on top.
@@ -692,9 +724,6 @@ impl RemoteKernelsServer {
                             None if loop_started.elapsed() > fallback_cap => loop_started.elapsed(),
                             None => {
                                 tracing::info!(target: super::LOG_TARGET, instance = %machine_id, "Still provisioning, continuing to wait...");
-                                // Yield the machine oplock window: an explicit
-                                // stop()/terminate() waiting on it must be able
-                                // to win between our attempts.
                                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                                 continue;
                             }
@@ -879,6 +908,26 @@ impl RemoteKernelsServer {
                 "Failed-start cleanup suppressed: {error}"
             );
             return FailedStartCleanup::Unconfirmed;
+        }
+
+        // This setup held no lock or lease while it waited, so another session
+        // may have adopted the machine: it is theirs now, whatever failed here.
+        {
+            let mut state = self.state.lock().await;
+            if state
+                .machine_ledger_owner(machine_id)
+                .is_ok_and(|owner| owner.is_some_and(|owner| owner != state.session_owner))
+            {
+                tracing::warn!(
+                    target: super::LOG_TARGET,
+                    instance = machine_id,
+                    "Failed-start cleanup suppressed: another session adopted the machine"
+                );
+                if let Some(instance) = state.instances.get_mut(machine_id) {
+                    instance.fence(crate::state::FenceReason::TakenOver);
+                }
+                return FailedStartCleanup::Unconfirmed;
+            }
         }
 
         // An explicit stop() during setup already removed the instance and

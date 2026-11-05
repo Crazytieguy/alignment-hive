@@ -11,7 +11,7 @@ use crate::state::{FenceReason, InstanceState, Phase};
 
 use super::budget::ledger_reopen_refusal;
 use super::provision::{BudgetUnenforceable, ConnectMode};
-use super::{RemoteKernelsServer, err_text};
+use super::{RemoteKernelsServer, err_text, now_epoch};
 
 /// What an attach owes the cost ledger before it touches the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +186,14 @@ impl RemoteKernelsServer {
         }
         if let Some(note) = interval_note {
             self.state.lock().await.reset_known_hosts(&machine_id);
+            if let Err(error) = self
+                .update_lifecycle(&machine_id, |lifecycle| {
+                    lifecycle.resume_issued_at_epoch = Some(now_epoch());
+                })
+                .await
+            {
+                tracing::warn!(target: super::LOG_TARGET, instance = %machine_id, "Could not record the resume: {error}");
+            }
             self.accounted_resume(&machine_id, note, async {
                 if needs_provider_resume {
                     runtime.resume(&record.external_id).await
@@ -253,6 +261,7 @@ impl RemoteKernelsServer {
             }
         }
 
+        drop(operation_lock);
         match self
             .finalize_start(
                 &machine_id,
@@ -262,7 +271,6 @@ impl RemoteKernelsServer {
                     resumed,
                     auto,
                 },
-                Some(operation_lock),
             )
             .await
         {

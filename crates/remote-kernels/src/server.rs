@@ -297,7 +297,7 @@ impl RemoteKernelsServer {
 
         if wait {
             match self
-                .finalize_start(&machine_id, &handle.external_id, ConnectMode::Fresh, None)
+                .finalize_start(&machine_id, &handle.external_id, ConnectMode::Fresh)
                 .await
             {
                 Ok(summary) => {
@@ -741,8 +741,8 @@ impl RemoteKernelsServer {
     /// Report durable machines (or one, via `instance`): phase, GPU, cost, uptime,
     /// kernels, session spend, and background start/finish failures. Safe to call
     /// at any time. It also reconciles with the provider, which occasionally
-    /// completes a stop or termination that was already requested, briefly
-    /// resuming a stopped machine to read its cleanup outcome.
+    /// completes a stop or termination that was already requested. It never
+    /// resumes a stopped machine.
     #[tool(name = "status")]
     pub async fn status(
         &self,

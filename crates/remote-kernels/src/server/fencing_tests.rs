@@ -503,12 +503,16 @@ async fn adoption_appends_owner_and_installs_adopters_deadline() {
             machine_id.clone(),
             external_id.to_string(),
             policy,
-            crate::heartbeat::AcquireMode::Attach { force: true },
+            crate::heartbeat::AcquireMode::Attach {
+                force: true,
+                resumed: false,
+            },
             "adopter".to_string(),
             Arc::clone(&state),
             Some(100.0),
             Vec::new(),
             oplock,
+            None,
         );
         let active = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -735,6 +739,7 @@ async fn no_flock_supervision_degrades_without_cleanup() {
         None,
         Vec::new(),
         operation_lock,
+        None,
     );
     server
         .state

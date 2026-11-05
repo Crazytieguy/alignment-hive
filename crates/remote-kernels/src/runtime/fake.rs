@@ -207,6 +207,12 @@ pub(crate) fn capabilities(metered: bool) -> Capabilities {
     }
 }
 
+/// A simulated delay set in the environment, in milliseconds.
+fn env_pause(name: &str) -> Option<Duration> {
+    let millis = std::env::var(name).ok()?.parse().ok()?;
+    Some(Duration::from_millis(millis))
+}
+
 impl Runtime for FakeRuntime {
     type Conn = FakeConnection;
 
@@ -335,11 +341,8 @@ impl Runtime for FakeRuntime {
         if std::env::var_os("REMOTE_KERNELS_FAKE_STOP_ERROR_BEFORE_ACTION").is_some() {
             anyhow::bail!("simulated ambiguous stop failure before provider action");
         }
-        if let Some(delay_ms) = std::env::var("REMOTE_KERNELS_FAKE_STOP_PAUSE_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-        {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        if let Some(pause) = env_pause("REMOTE_KERNELS_FAKE_STOP_PAUSE_MS") {
+            tokio::time::sleep(pause).await;
         }
         let mut instances = self.instances.lock().await;
         let inst = instances
@@ -384,10 +387,25 @@ impl Runtime for FakeRuntime {
         external_id: &str,
         ctx: &ConnectionContext,
     ) -> anyhow::Result<FakeConnection> {
+        // A fresh machine's slow open (RunPod's wait while its image pulls),
+        // optionally ending the way that wait can. The instance map stays free.
+        if ctx.fresh
+            && let Some(pause) = env_pause("REMOTE_KERNELS_FAKE_FRESH_OPEN_PAUSE_MS")
+        {
+            tokio::time::sleep(pause).await;
+            if std::env::var_os("REMOTE_KERNELS_FAKE_FRESH_OPEN_STILL_PROVISIONING").is_some() {
+                return Err(super::StillProvisioning.into());
+            }
+            if std::env::var_os("REMOTE_KERNELS_FAKE_FRESH_OPEN_ERROR").is_some() {
+                anyhow::bail!("simulated open failure");
+            }
+        }
         let instances = self.instances.lock().await;
         let inst = instances
             .get(external_id)
             .ok_or_else(|| anyhow::anyhow!("unknown fake instance"))?;
+        // Like a real machine: nothing to connect to while it is stopped.
+        anyhow::ensure!(inst.child.is_some(), "fake instance is stopped");
         let workdir = inst.workdir.path().to_path_buf();
         Ok(FakeConnection {
             jupyter: JupyterEndpoint::loopback(inst.port, ctx.jupyter_token.clone()),
@@ -485,6 +503,9 @@ impl Connection for FakeConnection {
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
         if self.fail_exec.load(Ordering::Relaxed) {
             anyhow::bail!("simulated transport failure");
+        }
+        if let Some(pause) = env_pause("REMOTE_KERNELS_FAKE_EXEC_PAUSE_MS") {
+            tokio::time::sleep(pause).await;
         }
         if self.lease_no_flock && command.contains("flock is required") {
             return Ok("flock is required\n__RK_LEASE_EXIT__=11\n".to_string());

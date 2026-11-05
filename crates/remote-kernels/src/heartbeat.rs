@@ -7,7 +7,7 @@
 //! 2. Acquire fenced lease authority (or mark supervision unavailable)
 //! 3. Install the watchdog: self-cleanup on stale heartbeat
 //!    (`watchdog-stale-secs`, default 5 min) or on a passed budget deadline,
-//!    and report supervision — the server's 15 s budget gate waits on this
+//!    and report supervision — the server's budget gate waits on this
 //! 4. Run startup commands (user commands from config), without the machine
 //!    oplock, keeping the lease fresh meanwhile
 //! 5. Every 60s: signal liveness, refresh the budget deadline from the shared
@@ -52,7 +52,12 @@ pub const UNSUPPORTED_CAVEAT: &str =
 #[derive(Debug, Clone, Copy)]
 pub enum AcquireMode {
     Fresh,
-    Attach { force: bool },
+    Attach {
+        force: bool,
+        /// The machine was stopped until this attach, so whatever its lease
+        /// says about a cleanup in progress is left over from before the stop.
+        resumed: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +67,9 @@ pub enum SupervisionStatus {
     Unsupervisable(String),
     Refused(String),
 }
+
+const SETUP_STEP_ATTEMPTS: u32 = 3;
+const SETUP_STEP_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// Computes the remaining budget as seconds-until-deadline at the current
 /// aggregate burn rate. Shared across all instance heartbeats.
@@ -135,6 +143,7 @@ pub fn start(
     budget: Option<f64>,
     startup_commands: Vec<String>,
     operation_lock: std::fs::File,
+    setup_owner: Option<String>,
 ) -> Setup {
     let (status_tx, status_rx) = watch::channel(SupervisionStatus::Pending);
     let (startup_tx, startup_rx) = watch::channel(StartupCommands::Pending);
@@ -152,6 +161,7 @@ pub fn start(
             budget,
             &startup_commands,
             operation_lock,
+            setup_owner.as_deref(),
             &status_tx,
             &startup_tx,
             &task_diagnostics,
@@ -186,18 +196,48 @@ fn step_done(diagnostics: &crate::ssh_exec::SetupDiagnostics, machine_id: &str) 
     }
 }
 
+/// Run a supervision step that is safe to repeat, a few times: its failure
+/// costs the machine its supervision (under a budget, the machine itself), and
+/// one failed SSH connection on a slow link must not decide that.
+async fn retry_setup_step<Step, Attempt>(
+    delay: Duration,
+    diagnostics: &crate::ssh_exec::SetupDiagnostics,
+    mut step: Step,
+) -> anyhow::Result<()>
+where
+    Step: FnMut() -> Attempt,
+    Attempt: Future<Output = anyhow::Result<()>>,
+{
+    let mut attempts_left = SETUP_STEP_ATTEMPTS;
+    loop {
+        attempts_left -= 1;
+        match step().await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempts_left == 0 || crate::ssh_exec::is_host_key_mismatch(&error) => {
+                return Err(error);
+            }
+            Err(error) => {
+                diagnostics.record(&error);
+                tracing::debug!("Supervision setup step failed, retrying: {error:#}");
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn establish_and_run(
     conn: &AnyConnection,
     machine_id: &str,
     external_id: &str,
-    mut watchdog_policy: WatchdogPolicy,
+    watchdog_policy: WatchdogPolicy,
     acquire_mode: AcquireMode,
     lease_owner: &str,
     state: &Arc<Mutex<AppState>>,
     budget: Option<f64>,
     startup_commands: &[String],
     operation_lock: std::fs::File,
+    setup_owner: Option<&str>,
     status: &watch::Sender<SupervisionStatus>,
     startup: &watch::Sender<StartupCommands>,
     diagnostics: &crate::ssh_exec::SetupDiagnostics,
@@ -268,6 +308,20 @@ async fn establish_and_run(
                 return Ok(());
             }
         };
+        // Setup waited without the lock, so another session may have adopted
+        // the machine meanwhile. Taking the lease now would fence it, and a
+        // fresh start's acquire has no other check.
+        let owner_now = state.lock().await.machine_ledger_owner(machine_id);
+        if let (Some(expected), Ok(Some(owner))) = (setup_owner, &owner_now)
+            && expected != owner
+        {
+            mark_fenced(state, machine_id, external_id, FenceReason::TakenOver).await;
+            let _ = status.send(SupervisionStatus::Refused(
+                "another session took control of this machine while its setup here was waiting"
+                    .to_string(),
+            ));
+            return Ok(());
+        }
         diagnostics.begin_step("lease acquire");
         let acquired = acquire_lease(conn, acquire_mode, lease_owner).await;
         step_done(diagnostics, machine_id);
@@ -278,9 +332,11 @@ async fn establish_and_run(
                 drop(lock);
                 tracing::warn!(
                     instance = machine_id,
-                    "lease setup failed transiently — retrying in 60s: {error}"
+                    "lease setup failed transiently — retrying in 5s: {error}"
                 );
-                tokio::time::sleep(Duration::from_mins(1)).await;
+                // Short: the budget gate is waiting on this, and the
+                // reachability check above paces a real outage.
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Err(EstablishError::Unsupervisable(caveat)) => {
                 mark_unsupervisable(state, machine_id, external_id, &caveat).await;
@@ -338,11 +394,6 @@ async fn establish_and_run(
         state: Arc::clone(state),
         budget,
     });
-    let initial_budget_secs = match &budget {
-        Some(feed) => feed.remaining_secs().await,
-        None => None,
-    };
-    watchdog_policy.initial_budget_secs = initial_budget_secs;
     let mut watchdog_installed = false;
     // Set when the machine turns out unable to supervise itself. Setup still
     // runs the startup commands then (the machine stays usable, and they ran
@@ -357,7 +408,10 @@ async fn establish_and_run(
         );
     } else {
         diagnostics.begin_step("finish-marker check");
-        let marker = reconcile_finish_marker(conn, &project_dir, machine_id).await;
+        let marker = retry_setup_step(SETUP_STEP_RETRY_DELAY, diagnostics, || {
+            reconcile_finish_marker(conn, &project_dir, machine_id)
+        })
+        .await;
         step_done(diagnostics, machine_id);
         if let Err(e) = marker {
             // The marker is only ever consumed by the watchdog's finalizer,
@@ -374,7 +428,17 @@ async fn establish_and_run(
             ));
         } else {
             diagnostics.begin_step("watchdog install");
-            let installed = conn.install_watchdog(watchdog_policy.clone()).await;
+            // The deadline is written relative to the machine's clock, so
+            // it is worked out afresh per attempt: a retry after a lost reply
+            // must not push it later.
+            let installed = retry_setup_step(SETUP_STEP_RETRY_DELAY, diagnostics, || async {
+                let mut policy = watchdog_policy.clone();
+                if let Some(feed) = &budget {
+                    policy.initial_budget_secs = feed.remaining_secs().await;
+                }
+                conn.install_watchdog(policy).await
+            })
+            .await;
             step_done(diagnostics, machine_id);
             if let Err(e) = installed {
                 // A failed install means NO machine-side cleanup or budget
@@ -660,15 +724,18 @@ async fn acquire_lease(
     mode: AcquireMode,
     lease_owner: &str,
 ) -> Result<crate::machine_scripts::LeaseState, EstablishError> {
-    if let AcquireMode::Attach { force } = mode {
+    if let AcquireMode::Attach { force, resumed } = mode {
         let current = crate::machine_scripts::read(conn)
             .await
             .map_err(classify_lease_error)?;
         if current.state == "finalizing" {
-            return Err(EstablishError::Refused(
-                FenceReason::Finalizing,
-                "machine is running its automatic cleanup; wait and call status() to see the result before attaching".to_string(),
-            ));
+            if !resumed {
+                return Err(EstablishError::Refused(
+                    FenceReason::Finalizing,
+                    "machine is running its automatic cleanup; wait and call status() to see the result before attaching".to_string(),
+                ));
+            }
+            release_stopped_lease(conn, &current).await?;
         }
         let age = crate::machine_scripts::age_secs(&current);
         // An empty owner means the lease was cleanly released (complete-stop):
@@ -687,10 +754,31 @@ async fn acquire_lease(
                 ),
             ));
         }
+        // Left alone, it would block the machine's next self-cleanup.
+        if resumed {
+            crate::machine_scripts::clear_outcome(conn)
+                .await
+                .map_err(|error| EstablishError::Retry(format!("{error:#}")))?;
+        }
     }
     crate::machine_scripts::acquire(conn, lease_owner)
         .await
         .map_err(classify_lease_error)
+}
+
+/// A stop leaves the lease `finalizing` on the machine's persistent disk. On a
+/// machine that just came back up nothing is acting on it any more, and left
+/// alone it would refuse this attach.
+async fn release_stopped_lease(
+    conn: &AnyConnection,
+    lease: &crate::machine_scripts::LeaseState,
+) -> Result<(), EstablishError> {
+    if lease.action == "stop" {
+        crate::machine_scripts::complete_stop(conn, &lease.op_id).await
+    } else {
+        crate::machine_scripts::revert_to_armed(conn, &lease.op_id).await
+    }
+    .map_err(classify_lease_error)
 }
 
 fn classify_lease_error(error: crate::machine_scripts::LeaseError) -> EstablishError {
@@ -956,6 +1044,41 @@ impl HeartbeatState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn setup_steps_survive_transient_failures_but_not_lasting_ones() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let diagnostics = crate::ssh_exec::SetupDiagnostics::default();
+        let calls = AtomicU32::new(0);
+        let fails_twice = retry_setup_step(Duration::ZERO, &diagnostics, || async {
+            let call = calls.fetch_add(1, Ordering::Relaxed);
+            anyhow::ensure!(call >= 2, "connection timed out");
+            Ok(())
+        })
+        .await;
+        assert!(fails_twice.is_ok());
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+
+        let calls = AtomicU32::new(0);
+        let keeps_failing = retry_setup_step(Duration::ZERO, &diagnostics, || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            anyhow::bail!("connection timed out")
+        })
+        .await;
+        assert!(keeps_failing.is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+
+        // A pinned host key cannot heal by retrying.
+        let calls = AtomicU32::new(0);
+        let mismatch = retry_setup_step(Duration::ZERO, &diagnostics, || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            anyhow::bail!("{}", crate::ssh_exec::HOST_KEY_MISMATCH_PREFIX)
+        })
+        .await;
+        assert!(mismatch.is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
 
     #[tokio::test]
     async fn hard_accounting_error_skips_budget_deadline_refresh() {

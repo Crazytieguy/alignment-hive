@@ -2345,62 +2345,270 @@ async fn ambiguous_stop_refuses_attach_until_provider_state_converges() {
     runtime.terminate(&record.external_id).await.unwrap();
 }
 
-#[tokio::test]
-#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
-async fn reconciliation_completes_server_death_terminate_marker_under_oplock() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = server_in(dir.path(), None);
-    let (machine_id, _) = start_machine(&server, Some("server-death")).await;
-    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+/// What a machine's own self-cleanup leaves behind, on a machine that is then
+/// stopped: a `finalizing` lease and an outcome marker on its disk, and a record
+/// that still says running, as no server was connected to see it happen.
+async fn self_clean_and_stop(
+    server: &RemoteKernelsServer,
+    dir: &std::path::Path,
+    machine_id: &str,
+    action: remote_kernels::config::Cleanup,
+) {
+    let record = remote_kernels::state::load_instance_record(dir, machine_id).unwrap();
     let (connection, generation) = {
         let state = server.shared_state();
-        let state = state.lock().await;
-        let instance = &state.instances[&machine_id];
+        let mut state = state.lock().await;
+        let mut instance = state.instances.remove(machine_id).unwrap();
+        instance.stop_heartbeat();
         (
             instance.connection.clone().unwrap(),
             instance.lease_generation.unwrap(),
         )
     };
     let op_id = uuid::Uuid::new_v4().to_string();
-    remote_kernels::machine_scripts::enter_finalizing(
-        &connection,
-        generation,
-        &op_id,
-        remote_kernels::config::Cleanup::Terminate,
-    )
-    .await
-    .unwrap();
-    let marker = serde_json::json!({
-        "uuid": op_id,
-        "action": "terminate",
-        "finalize_exit": 0,
-        "ts": 1,
-        "generation": generation,
-        "post_action_rate": 0.0
-    });
+    remote_kernels::machine_scripts::enter_finalizing(&connection, generation, &op_id, action)
+        .await
+        .unwrap();
     connection
         .exec(
-            &format!(
-                "printf %s '{}' > .remote-kernels/outcome.json",
-                marker.to_string().replace('\'', "")
-            ),
+            &format!("printf %s '{{\"op_id\":\"{op_id}\"}}' > .remote-kernels/outcome.json"),
             std::time::Duration::from_secs(2),
         )
         .await
         .unwrap();
-    remote_kernels::state::clear_lifecycle_record(dir.path(), &machine_id).unwrap();
-    remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+    remote_kernels::state::clear_lifecycle_record(dir, machine_id).unwrap();
+    remote_kernels::runtime::fake::FakeRuntime::new(dir)
         .stop(&record.external_id)
         .await
         .unwrap();
+}
 
-    let fresh = server_in(dir.path(), None);
-    let messages = fresh.reconcile().await.join("\n");
-    assert!(
-        messages.contains("now terminated (data deleted)"),
-        "{messages}"
+/// A machine found stopped, whatever it was set to do: one message, no resume
+/// (billing must not restart for a status check), the billing interval closed,
+/// and `attach()` works, which the left-over lease would otherwise refuse.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn machine_found_stopped_is_settled_once_and_attach_revives_it() {
+    // The lease a self-cleanup leaves depends on what it decided.
+    for action in [
+        remote_kernels::config::Cleanup::Terminate,
+        remote_kernels::config::Cleanup::Stop,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let first = server_in_session(dir.path(), None, "found-stopped-first");
+        let (machine_id, _) = start_machine(&first, Some("found-stopped")).await;
+        self_clean_and_stop(&first, dir.path(), &machine_id, action).await;
+        let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+
+        let server = server_in_session(dir.path(), None, "found-stopped-second");
+        let messages = server.reconcile().await.join("\n");
+        assert!(
+            messages.contains("although its cleanup was set to terminate it"),
+            "{messages}"
+        );
+        let runtime = remote_kernels::runtime::fake::FakeRuntime::new(dir.path());
+        assert_eq!(
+            runtime.describe(&record.external_id).await.unwrap(),
+            remote_kernels::runtime::InstanceStatus::Stopped,
+            "a status check must not resume the machine"
+        );
+        let settled = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+        assert_eq!(settled.phase, remote_kernels::state::Phase::Stopped);
+        let rates = server
+            .shared_state()
+            .lock()
+            .await
+            .spend_summary()
+            .unwrap()
+            .machine_rates;
+        assert!(
+            rates.get(&machine_id).copied().unwrap_or(0.0) < f64::EPSILON,
+            "the billing interval is still open: {rates:?}"
+        );
+        assert!(
+            server.reconcile().await.is_empty(),
+            "a settled machine reports once"
+        );
+
+        let attached = server
+            .attach(Parameters(remote_kernels::server::AttachParams {
+                machine_id: machine_id.clone(),
+                force: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_error(&attached), "{}", text_of(&attached));
+        let connection = {
+            let state = server.shared_state();
+            let state = state.lock().await;
+            state.instances[&machine_id].connection.clone().unwrap()
+        };
+        let lease = remote_kernels::machine_scripts::read(&connection)
+            .await
+            .unwrap();
+        assert_eq!(lease.state, "active");
+        assert_eq!(lease.owner_uuid, "found-stopped-second");
+        let outcome = connection
+            .exec(
+                "ls .remote-kernels/outcome.json 2>/dev/null || echo gone",
+                std::time::Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.trim(),
+            "gone",
+            "the marker would block the next cleanup"
+        );
+        terminate(&server, Some(&machine_id)).await;
+    }
+}
+
+/// A machine's own cleanup can stop it under a live session (its budget deadline
+/// passed, say): the heartbeat then fences the instance, and status() is where
+/// the agent is told to look for the result.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn a_machine_that_stops_itself_under_a_live_session_is_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("under-a-session")).await;
+    let external_id = {
+        let state = server.shared_state();
+        let mut state = state.lock().await;
+        let instance = state.instances.get_mut(&machine_id).unwrap();
+        instance.fence(remote_kernels::state::FenceReason::Finalizing);
+        instance.external_id.clone()
+    };
+    remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+        .stop(&external_id)
+        .await
+        .unwrap();
+
+    let status = text_of(
+        &server
+            .status(Parameters(remote_kernels::server::StatusParams {
+                instance: None,
+            }))
+            .await
+            .unwrap(),
     );
-    assert!(remote_kernels::state::load_instance_record(dir.path(), &machine_id).is_none());
+    assert!(status.contains("is stopped at the provider"), "{status}");
+    assert!(status.contains("Phase: Stopped"), "{status}");
+    assert!(
+        !server
+            .shared_state()
+            .lock()
+            .await
+            .instances
+            .contains_key(&machine_id)
+    );
+    terminate(&server, Some(&machine_id)).await;
+}
+
+/// An attach that resumed the machine and was cut short before the lease step
+/// (a Jupyter failure, a server restart) leaves the old `finalizing` lease on a
+/// running machine with nothing acting on it. The next attach has to clear it:
+/// the machine bills, and nothing else can end that from here.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn attach_recovers_from_an_attach_cut_short_after_its_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = server_in_session(dir.path(), None, "cut-short-first");
+    let (machine_id, _) = start_machine(&first, Some("cut-short")).await;
+    self_clean_and_stop(
+        &first,
+        dir.path(),
+        &machine_id,
+        remote_kernels::config::Cleanup::Stop,
+    )
+    .await;
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+    remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+        .resume(&record.external_id)
+        .await
+        .unwrap();
+    let mut lifecycle = remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id);
+    lifecycle.resume_issued_at_epoch = Some(1);
+    remote_kernels::state::save_lifecycle_record(dir.path(), &machine_id, &lifecycle).unwrap();
+
+    let server = server_in_session(dir.path(), None, "cut-short-second");
+    let attached = server
+        .attach(Parameters(remote_kernels::server::AttachParams {
+            machine_id: machine_id.clone(),
+            force: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&attached), "{}", text_of(&attached));
+    terminate(&server, Some(&machine_id)).await;
+}
+
+/// Live test: every status() after a stop() took two minutes on an SSH wait the
+/// stopped pod could never satisfy, and raised a false alarm.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn status_after_stop_is_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    let (machine_id, _) = start_machine(&server, Some("quiet")).await;
+    let stopped = server
+        .stop(Parameters(remote_kernels::server::StopParams {
+            instance: Some(machine_id.clone()),
+            skip_pre_stop_command: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&stopped), "{}", text_of(&stopped));
+    for _ in 0..2 {
+        let status = text_of(
+            &server
+                .status(Parameters(remote_kernels::server::StatusParams {
+                    instance: None,
+                }))
+                .await
+                .unwrap(),
+        );
+        assert!(!status.contains("couldn't complete"), "{status}");
+        assert!(!status.contains("is stopped at the provider"), "{status}");
+        assert!(status.contains("Phase: Stopped"), "{status}");
+    }
+    terminate(&server, Some(&machine_id)).await;
+}
+
+/// The live record a status check could find next to a machine coming back up:
+/// `attach()` no longer holds the lock during that wait and the provider may
+/// not report the resume yet, so a recent resume must not read as a stop.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn a_just_resumed_machine_is_not_settled_as_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = server_in_session(dir.path(), None, "resume-race-first");
+    let (machine_id, _) = start_machine(&first, Some("resume-race")).await;
+    self_clean_and_stop(
+        &first,
+        dir.path(),
+        &machine_id,
+        remote_kernels::config::Cleanup::Stop,
+    )
+    .await;
+    let mut lifecycle = remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id);
+    lifecycle.resume_issued_at_epoch = Some(remote_kernels::ledger::now_ms() / 1_000);
+    remote_kernels::state::save_lifecycle_record(dir.path(), &machine_id, &lifecycle).unwrap();
+
+    let server = server_in_session(dir.path(), None, "resume-race-second");
+    assert!(server.reconcile().await.is_empty());
+    assert_eq!(
+        remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+            .unwrap()
+            .phase,
+        remote_kernels::state::Phase::Running
+    );
+
+    lifecycle.resume_issued_at_epoch = Some(1);
+    remote_kernels::state::save_lifecycle_record(dir.path(), &machine_id, &lifecycle).unwrap();
+    assert_eq!(server.reconcile().await.len(), 1);
+    terminate(&server, Some(&machine_id)).await;
 }
 
 #[tokio::test]
@@ -2740,12 +2948,13 @@ async fn startup_check_runs_after_the_handshake() {
         inst.stop_heartbeat();
     }
     drop(first);
-    // A record whose reconcile needs the machine oplock (an interrupted
-    // self-cleanup read on a running machine), and another operation
-    // holding that lock.
-    let mut lifecycle = remote_kernels::state::load_lifecycle_record(dir.path(), &machine_id);
-    lifecycle.finalize_phase = Some(remote_kernels::state::FinalizePhase::RetrievingOutcome);
-    remote_kernels::state::save_lifecycle_record(dir.path(), &machine_id, &lifecycle).unwrap();
+    // A record whose reconcile needs the machine oplock (a machine found
+    // stopped), and another operation holding that lock.
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+    remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+        .stop(&record.external_id)
+        .await
+        .unwrap();
     let held = remote_kernels::state::acquire_operation_lock(dir.path(), &machine_id)
         .await
         .unwrap();
@@ -2792,10 +3001,7 @@ async fn startup_check_runs_after_the_handshake() {
         .expect("startup check never finished")
         .unwrap();
     let later = text_of(&status(None).await.unwrap());
-    assert!(
-        later.contains("interrupted attempt to read its self-cleanup result"),
-        "{later}"
-    );
+    assert!(later.contains("is stopped at the provider"), "{later}");
     assert!(
         !later.contains("still running in the background"),
         "{later}"
@@ -2803,4 +3009,238 @@ async fn startup_check_runs_after_the_handshake() {
 
     client.cancel().await.unwrap();
     terminate(&server, Some(&machine_id)).await;
+}
+
+fn start_params(label: &str, wait: bool) -> Parameters<remote_kernels::server::StartParams> {
+    Parameters(remote_kernels::server::StartParams {
+        label: Some(label.to_string()),
+        runtime: None,
+        gpu_type: None,
+        image: None,
+        vast_offers: None,
+        priority: None,
+        wait: Some(wait),
+    })
+}
+
+/// The id of the one machine `server` knows, once it exists.
+async fn wait_for_instance(server: &RemoteKernelsServer) -> String {
+    for _ in 0..120 {
+        let state = server.shared_state();
+        if let Some(id) = state.lock().await.instances.keys().next() {
+            return id.clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    panic!("the machine never appeared");
+}
+
+/// Live test: a stop() during a cold image pull blocked for 218 s on the
+/// machine lock while the pod billed. It now returns at once, and so does the
+/// foreground start() it interrupted, leaving the machine stopped.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn stop_during_provisioning_returns_promptly() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_FRESH_OPEN_PAUSE_MS", "120000") };
+    let starting = {
+        let server = server.clone();
+        tokio::spawn(async move { server.start(start_params("pulling", true)).await })
+    };
+    let machine_id = wait_for_instance(&server).await;
+
+    let stopping = std::time::Instant::now();
+    let stopped = server
+        .stop(Parameters(remote_kernels::server::StopParams {
+            instance: Some(machine_id.clone()),
+            skip_pre_stop_command: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&stopped), "{}", text_of(&stopped));
+    assert!(
+        stopping.elapsed() < std::time::Duration::from_secs(10),
+        "stop() took {:?}",
+        stopping.elapsed()
+    );
+    let started = tokio::time::timeout(std::time::Duration::from_secs(5), starting)
+        .await
+        .expect("start() did not end after stop()")
+        .unwrap()
+        .unwrap();
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_FRESH_OPEN_PAUSE_MS") };
+    assert!(
+        text_of(&started).contains("did not complete"),
+        "{}",
+        text_of(&started)
+    );
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+        .expect("the stopped machine's record must survive the interrupted start");
+    assert_eq!(record.phase, remote_kernels::state::Phase::Stopped);
+    terminate(&server, Some(&machine_id)).await;
+}
+
+/// terminate() takes the same lock as stop(), here against the background
+/// setup that keeps retrying a machine still provisioning.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn terminate_during_background_provisioning_returns_promptly() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(dir.path(), None);
+    // SAFETY: suite is single-threaded.
+    unsafe {
+        std::env::set_var("REMOTE_KERNELS_FAKE_FRESH_OPEN_PAUSE_MS", "3000");
+        std::env::set_var("REMOTE_KERNELS_FAKE_FRESH_OPEN_STILL_PROVISIONING", "1");
+    }
+    let started = server.start(start_params("pulling", false)).await.unwrap();
+    assert!(!is_error(&started), "{}", text_of(&started));
+    let machine_id = wait_for_instance(&server).await;
+    // Past the first attempt, so the background retry is what's being raced.
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+
+    let terminating = std::time::Instant::now();
+    let reply = terminate(&server, Some(&machine_id)).await;
+    // SAFETY: suite is single-threaded.
+    unsafe {
+        std::env::remove_var("REMOTE_KERNELS_FAKE_FRESH_OPEN_PAUSE_MS");
+        std::env::remove_var("REMOTE_KERNELS_FAKE_FRESH_OPEN_STILL_PROVISIONING");
+    }
+    assert!(reply.contains("terminated"), "{reply}");
+    assert!(
+        terminating.elapsed() < std::time::Duration::from_secs(10),
+        "terminate() took {:?}",
+        terminating.elapsed()
+    );
+    assert!(remote_kernels::state::load_instance_record(dir.path(), &machine_id).is_none());
+}
+
+/// Setup waits without the machine lock, so another session can adopt the
+/// machine meanwhile. Whether the setup then fails or carries on, the machine
+/// is the adopter's: no cleanup deletes it and no lease acquire fences it.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn a_start_superseded_by_an_attach_leaves_the_machine_alone() {
+    for open_fails in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let starter = server_in_session(dir.path(), None, "superseded-starter");
+        let adopter = server_in_session(dir.path(), None, "superseded-adopter");
+        // SAFETY: suite is single-threaded.
+        unsafe {
+            std::env::set_var("REMOTE_KERNELS_FAKE_FRESH_OPEN_PAUSE_MS", "15000");
+            if open_fails {
+                std::env::set_var("REMOTE_KERNELS_FAKE_FRESH_OPEN_ERROR", "1");
+            }
+        }
+        let starting = {
+            let starter = starter.clone();
+            tokio::spawn(async move { starter.start(start_params("superseded", true)).await })
+        };
+        let machine_id = wait_for_instance(&starter).await;
+        let attached = adopter
+            .attach(Parameters(remote_kernels::server::AttachParams {
+                machine_id: machine_id.clone(),
+                force: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_error(&attached), "{}", text_of(&attached));
+        let started = starting.await.unwrap();
+        // SAFETY: suite is single-threaded.
+        unsafe {
+            std::env::remove_var("REMOTE_KERNELS_FAKE_FRESH_OPEN_PAUSE_MS");
+            std::env::remove_var("REMOTE_KERNELS_FAKE_FRESH_OPEN_ERROR");
+        }
+        assert!(started.is_err() || is_error(&started.unwrap()));
+
+        let (external_id, connection, generation) = {
+            let state = adopter.shared_state();
+            let state = state.lock().await;
+            let instance = &state.instances[&machine_id];
+            (
+                instance.external_id.clone(),
+                instance.connection.clone().unwrap(),
+                instance.lease_generation.unwrap(),
+            )
+        };
+        assert_eq!(
+            remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+                .describe(&external_id)
+                .await
+                .unwrap(),
+            remote_kernels::runtime::InstanceStatus::Running
+        );
+        let lease = remote_kernels::machine_scripts::read(&connection)
+            .await
+            .unwrap();
+        assert_eq!(lease.owner_uuid, "superseded-adopter");
+        assert_eq!(lease.generation, generation);
+        terminate(&adopter, Some(&machine_id)).await;
+    }
+}
+
+/// The live test's pods used 5-12.5 s of the old 15 s gate, and missing it
+/// terminates the machine. A link several times slower must still pass.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn slow_setup_commands_stay_within_the_budget_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with(
+        dir.path(),
+        fake_config(),
+        Some(remote_kernels::config::EffectiveBudget {
+            cap: 5.0,
+            source: remote_kernels::config::BudgetSource::Environment,
+        }),
+    );
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::set_var("REMOTE_KERNELS_FAKE_EXEC_PAUSE_MS", "12000") };
+    let (machine_id, _) = start_machine(&server, Some("slow-link")).await;
+    // SAFETY: suite is single-threaded.
+    unsafe { std::env::remove_var("REMOTE_KERNELS_FAKE_EXEC_PAUSE_MS") };
+    terminate(&server, Some(&machine_id)).await;
+}
+
+/// A budget that can't be enforced ends the start without waiting out a Jupyter
+/// that never answers: that wait can last minutes, all of them billed.
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn unenforceable_budget_does_not_wait_for_jupyter() {
+    let dir = tempfile::tempdir().unwrap();
+    let never_ready = dir.path().join("never-ready.sh");
+    std::fs::write(&never_ready, "#!/bin/sh\nexec sleep 600\n").unwrap();
+    std::fs::set_permissions(
+        &never_ready,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let server = server_with(
+        dir.path(),
+        fake_config(),
+        Some(remote_kernels::config::EffectiveBudget {
+            cap: 5.0,
+            source: remote_kernels::config::BudgetSource::Environment,
+        }),
+    );
+    // SAFETY: suite is single-threaded.
+    unsafe {
+        std::env::set_var("REMOTE_KERNELS_FAKE_NO_FLOCK", "1");
+        std::env::set_var("REMOTE_KERNELS_FAKE_JUPYTER", &never_ready);
+    }
+    let started = std::time::Instant::now();
+    let result = server.start(start_params("sick-jupyter", true)).await;
+    // SAFETY: suite is single-threaded.
+    unsafe {
+        std::env::remove_var("REMOTE_KERNELS_FAKE_NO_FLOCK");
+        std::env::set_var("REMOTE_KERNELS_FAKE_JUPYTER", JUPYTER_CMD);
+    }
+    let text = result.map_or_else(|error| error.to_string(), |reply| text_of(&reply));
+    assert!(text.contains("cannot enforce it"), "{text}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "start() took {:?}",
+        started.elapsed()
+    );
 }

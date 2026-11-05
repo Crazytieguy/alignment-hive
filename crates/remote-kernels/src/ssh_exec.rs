@@ -20,7 +20,7 @@ pub fn is_host_key_mismatch(err: &anyhow::Error) -> bool {
 /// Shared supervision-setup progress: the latest setup error and how long
 /// each setup step took. Supervision setup can sit inside a minutes-long
 /// reachability retry loop (or a slow host can make every step slow) while
-/// the server's 15-second budget-enforceability gate expires; without this,
+/// the server's budget-enforceability gate expires; without this,
 /// the gate's error is a generic "watchdog could not be confirmed" and the
 /// actual cause (e.g. `Permission denied (publickey)` from an unusable key
 /// file, or one step eating the whole window) exists only in a log the user
@@ -233,7 +233,7 @@ impl SshEndpoint {
                 Err(e) if is_host_key_mismatch(&e) => return Err(e),
                 // Auth rejections ARE retried: on a fresh boot sshd can come
                 // up before the injected public key lands in authorized_keys.
-                // But each one is published so watchers (the 15s budget gate)
+                // But each one is published so watchers (the budget gate)
                 // can name the cause while this loop is still running.
                 Err(e) => {
                     diagnostics.record(&e);
@@ -531,7 +531,7 @@ mod tests {
         assert!(!script.contains("disable_check_xsrf"));
     }
 
-    /// The 15s budget gate reads the slot while the reachability loop is
+    /// The budget gate reads the slot while the reachability loop is
     /// still retrying — each failed attempt must be visible immediately.
     #[tokio::test]
     async fn wait_reachable_publishes_each_attempt_error() {

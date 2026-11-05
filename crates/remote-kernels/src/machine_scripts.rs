@@ -133,22 +133,12 @@ pub async fn complete_stop(conn: &AnyConnection, op_id: &str) -> Result<(), Leas
     invoke(conn, &["complete-stop", op_id]).await.map(|_| ())
 }
 
-/// Remove a consumed outcome marker. Once its transition is durably imported
-/// into the local ledger, the marker's only remaining effect is to block the
-/// machine's NEXT finalize (the watchdog refuses a new provider action while
-/// an unresolved outcome exists) — so a resumed machine must shed it.
+/// Remove a self-cleanup's outcome marker. Its only remaining effect is to
+/// block the machine's NEXT finalize (the watchdog refuses a new provider
+/// action while an unresolved outcome exists) — so a resumed machine must shed
+/// it.
 pub async fn clear_outcome<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
-    remove_state_file(conn, "outcome.json").await
-}
-
-pub async fn read_outcome(conn: &AnyConnection) -> Result<crate::state::OutcomeMarker, LeaseError> {
-    let path = format!("{}/outcome.json", conn.state_dir());
-    let command = format!("cat {}", shell_quote(&path));
-    let output = conn
-        .exec(&command, Duration::from_secs(10))
-        .await
-        .map_err(LeaseError::Transport)?;
-    parse_json(&output)
+    remove_state_files(conn, &["outcome.json"]).await
 }
 
 pub async fn install_watchdog<C: Connection + ?Sized>(
@@ -179,8 +169,14 @@ pub async fn install_watchdog<C: Connection + ?Sized>(
         storage_rate,
     ]
     .join(" ");
+    // The initial budget deadline travels in the same command: each exec is a
+    // full SSH handshake, inside the budget gate's window. A deadline that
+    // can't be written fails the install, as a separate command would have.
+    let deadline = policy.initial_budget_secs.map_or_else(String::new, |secs| {
+        format!("{} || exit 1; ", budget_deadline_command(&dir, secs))
+    });
     let command = format!(
-        "umask 077; mkdir -p {dir}; printf %s {lease} > {lease_path}; chmod 700 {lease_path}; printf %s {watchdog} > {watchdog_path}; chmod 700 {watchdog_path}; bash {watchdog_path} {arguments}",
+        "{deadline}umask 077; mkdir -p {dir}; printf %s {lease} > {lease_path}; chmod 700 {lease_path}; printf %s {watchdog} > {watchdog_path}; chmod 700 {watchdog_path}; bash {watchdog_path} {arguments}",
         dir = shell_quote(&dir),
         lease = shell_quote(LEASE),
         lease_path = shell_quote(&lease_path),
@@ -280,8 +276,7 @@ pub async fn clear_intent<C: Connection + ?Sized>(
     conn: &C,
     collected: Option<&str>,
 ) -> anyhow::Result<()> {
-    remove_state_file(conn, "intent.json").await?;
-    remove_state_file(conn, "stage.sh").await?;
+    remove_state_files(conn, &["intent.json", "stage.sh"]).await?;
     if let Some(plan) = collected.filter(|plan| !plan.is_empty())
         && let Some(stage_dir) = conn.stage_dir()
     {
@@ -297,16 +292,22 @@ pub async fn clear_intent<C: Connection + ?Sized>(
 /// Remove the persisted budget deadline (a session with no budget must not
 /// run under a previous owner's window).
 pub async fn clear_budget_deadline<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
-    remove_state_file(conn, "budget_deadline").await
+    remove_state_files(conn, &["budget_deadline"]).await
 }
 
-async fn remove_state_file<C: Connection + ?Sized>(conn: &C, name: &str) -> anyhow::Result<()> {
-    let path = format!("{}/{name}", conn.state_dir());
-    conn.exec(
-        &format!("rm -f {}", shell_quote(&path)),
-        Duration::from_secs(10),
-    )
-    .await?;
+/// One command however many files: each exec is a full SSH handshake.
+async fn remove_state_files<C: Connection + ?Sized>(
+    conn: &C,
+    names: &[&str],
+) -> anyhow::Result<()> {
+    let dir = conn.state_dir();
+    let paths = names
+        .iter()
+        .map(|name| shell_quote(&format!("{dir}/{name}")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    conn.exec(&format!("rm -f {paths}"), Duration::from_secs(10))
+        .await?;
     Ok(())
 }
 
@@ -314,19 +315,25 @@ pub async fn set_budget_deadline<C: Connection + ?Sized>(
     conn: &C,
     secs_from_now: u64,
 ) -> anyhow::Result<()> {
-    let dir = conn.state_dir();
+    conn.exec(
+        &budget_deadline_command(&conn.state_dir(), secs_from_now),
+        Duration::from_secs(10),
+    )
+    .await?;
+    Ok(())
+}
+
+fn budget_deadline_command(dir: &str, secs_from_now: u64) -> String {
     let destination = format!("{dir}/budget_deadline");
     // The temp name is quoted on the machine, so "$$" would be literal —
     // use a locally unique suffix instead.
     let temporary = format!("{dir}/.budget_deadline.{}.tmp", uuid::Uuid::new_v4());
-    let command = format!(
+    format!(
         "mkdir -p {dir}; value=$(($(date +%s) + {secs_from_now})); printf '%s\\n' \"$value\" > {temporary} && mv -f {temporary} {destination}",
-        dir = shell_quote(&dir),
+        dir = shell_quote(dir),
         temporary = shell_quote(&temporary),
         destination = shell_quote(&destination),
-    );
-    conn.exec(&command, Duration::from_secs(10)).await?;
-    Ok(())
+    )
 }
 
 fn cleanup_name(cleanup: crate::config::Cleanup) -> &'static str {

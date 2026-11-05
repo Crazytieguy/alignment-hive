@@ -1076,9 +1076,6 @@ impl Connection for VastConnection {
             tracing::info!("Cleanup disabled, skipping watchdog installation");
             return Ok(());
         }
-        if let Some(secs) = policy.initial_budget_secs {
-            self.set_budget_deadline(secs).await?;
-        }
         crate::machine_scripts::install_watchdog(
             self,
             &policy,

@@ -569,9 +569,8 @@ impl RunPodRuntime {
     ///   appears only once the container starts (a cold 16 GB pull took
     ///   ~165 s, observed live 2026-09). That is
     ///   [`StillProvisioning`](super::StillProvisioning): the pod is kept
-    ///   and the background finalizer keeps waiting — releasing the machine
-    ///   oplock between attempts — until `provision-timeout-mins`, the money
-    ///   backstop that then terminates it.
+    ///   and the background finalizer keeps waiting until
+    ///   `provision-timeout-mins`, the money backstop that then terminates it.
     /// - An existing machine fails, and the reader is sent back to
     ///   `attach()`, never `start()`: a second `start()` would mint a second
     ///   billing pod and strand this one.
@@ -787,8 +786,8 @@ impl RunPodRuntime {
 }
 
 /// How long one `open()` waits for the pod to publish its direct SSH
-/// endpoint. Deliberately not the provision timeout: `open()` runs under
-/// the machine oplock, and a long wait there would block `stop()`/`terminate()`.
+/// endpoint. Deliberately not the provision timeout: a foreground `start()`
+/// should come back with "still provisioning" within minutes.
 /// A fresh pod that needs longer (a cold pull of a large image) is instead
 /// reported as [`StillProvisioning`](super::StillProvisioning) and waited on
 /// in the background, bounded by `provision-timeout-mins` (see
@@ -1622,10 +1621,6 @@ impl Connection for RunPodConnection {
         if policy.cleanup == Cleanup::Disabled {
             tracing::info!("Cleanup disabled, skipping watchdog installation");
             return Ok(());
-        }
-
-        if let Some(secs) = policy.initial_budget_secs {
-            self.set_budget_deadline(secs).await?;
         }
 
         crate::machine_scripts::install_watchdog(self, &policy, &watchdog_action_command()).await?;

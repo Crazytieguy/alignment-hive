@@ -99,7 +99,10 @@ pub enum FinalizePhase {
     Armed,
     Finalizing,
     CompletedStop,
+    /// Only in records from older versions, which resumed a stopped machine to
+    /// read its self-cleanup result. Kept so those records still load.
     RetrievingOutcome,
+    /// As [`Self::RetrievingOutcome`].
     RetrievalUnavailable,
 }
 
@@ -160,8 +163,8 @@ pub struct LifecycleRecord {
     pub started_at_epoch: Option<u64>,
     #[serde(default)]
     pub outcome_unknown: bool,
-    /// Set only after an outcome marker authorizes terminate. An armed
-    /// disconnect is intentionally takeoverable and never sets this flag.
+    /// Only records from older versions have this: their outcome marker had
+    /// authorized a terminate that the provider call then left ambiguous.
     #[serde(default)]
     pub wants_terminate: bool,
     /// The finalize was issued for a machine with NO machine-side finalizer
@@ -169,6 +172,11 @@ pub struct LifecycleRecord {
     /// handling may not wait for one.
     #[serde(default)]
     pub finalize_unsupervised: bool,
+    /// When `attach()` last found this machine stopped and brought it back,
+    /// until a lease acquire clears it. While set, nothing on the machine has
+    /// taken over since the stop, and the provider may not show the resume yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_issued_at_epoch: Option<u64>,
 }
 
 /// A create whose outcome the provider never confirmed
@@ -209,17 +217,6 @@ pub struct UnconfirmedRecord {
     /// Bounds how often a `status()` loop re-probes; zero means never asked.
     #[serde(default)]
     pub last_checked_epoch: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutcomeMarker {
-    #[serde(alias = "op_id")]
-    pub uuid: String,
-    pub action: Cleanup,
-    pub finalize_exit: i32,
-    pub ts: u64,
-    pub generation: u64,
-    pub post_action_rate: Option<f64>,
 }
 
 /// One line of a legacy `<machine_id>.pending-transitions.jsonl`, which the
@@ -1166,35 +1163,6 @@ pub fn clear_lifecycle_record(project_dir: &Path, machine_id: &str) -> anyhow::R
     }
 }
 
-pub fn import_pending_transition(
-    project_dir: &Path,
-    machine_id: &str,
-    marker: &OutcomeMarker,
-) -> anyhow::Result<bool> {
-    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
-    let state = AppState::new(project_dir.to_path_buf());
-    state
-        .spend_summary()
-        .map_err(|error| anyhow::anyhow!("accounting failed closed: {error}"))?;
-    let mut event = crate::ledger::event(
-        crate::ledger::EventKind::RateChanged,
-        0.0,
-        marker.post_action_rate.unwrap_or(0.0),
-        marker.generation,
-        Some(marker.uuid.clone()),
-        Some(format!("remote {:?} transition imported", marker.action)),
-    );
-    // Phase 4 markers carry whole seconds. Place them at the end of that
-    // wall-clock second so a provision/resume recorded earlier in the same
-    // second cannot sort after its remote stop.
-    event.ts_ms = marker.ts.saturating_mul(1_000).saturating_add(999);
-    Ok(crate::ledger::EpochGuard::acquire(project_dir)?.append(
-        machine_id,
-        &format!("remote-transition-{}", marker.uuid),
-        event,
-    )?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1671,34 +1639,6 @@ mod tests {
         state.save_record("main", &record).unwrap();
         let error = state.spend_summary().unwrap_err();
         assert!(error.contains("no current-epoch ledger events"), "{error}");
-    }
-
-    #[test]
-    fn remote_transition_import_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(dir.path().to_path_buf());
-        let record = instance("main", 2.0, std::time::Duration::ZERO).record();
-        state
-            .admit_provision(
-                "main",
-                &record,
-                &LifecycleRecord {
-                    storage_rate_per_hr: Some(0.2),
-                    ..LifecycleRecord::default()
-                },
-            )
-            .unwrap();
-        let marker = OutcomeMarker {
-            uuid: "remote-stable-op".into(),
-            action: Cleanup::Stop,
-            finalize_exit: 0,
-            ts: crate::ledger::now_ms() / 1_000 + 1,
-            generation: 3,
-            post_action_rate: Some(0.2),
-        };
-        assert!(import_pending_transition(dir.path(), "main", &marker).unwrap());
-        assert!(!import_pending_transition(dir.path(), "main", &marker).unwrap());
-        assert!((state.aggregate_cost_per_hr() - 0.2).abs() < f64::EPSILON);
     }
 
     #[test]

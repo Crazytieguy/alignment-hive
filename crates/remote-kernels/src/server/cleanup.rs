@@ -51,6 +51,21 @@ fn provider_rejection_is_authoritative(error: &anyhow::Error) -> bool {
         .is_some_and(|status| (400..500).contains(&status))
 }
 
+/// Remove the live instance of this generation, if there is one, stopping its
+/// heartbeat; what it leaves behind is the record to persist.
+pub(super) fn take_live_record(
+    state: &mut crate::state::AppState,
+    machine_id: &str,
+    external_id: &str,
+) -> Option<crate::state::InstanceRecord> {
+    if state.instances.get(machine_id)?.external_id != external_id {
+        return None;
+    }
+    let mut instance = state.instances.remove(machine_id)?;
+    instance.stop_heartbeat();
+    Some(instance.record())
+}
+
 impl RemoteKernelsServer {
     /// Snapshot a live instance's cleanup coordinates under one lock.
     pub(super) async fn live_target(&self, machine_id: &str) -> Option<CleanupTarget> {
@@ -262,10 +277,6 @@ impl RemoteKernelsServer {
         ledger_uuid: Option<String>,
     ) -> anyhow::Result<()> {
         let mut state = self.state.lock().await;
-        let is_current_generation = state
-            .instances
-            .get(&target.machine_id)
-            .is_some_and(|instance| instance.external_id == target.external_id);
         state.append_ledger_event(
             &target.machine_id,
             if action == CleanupAction::Stop {
@@ -280,13 +291,7 @@ impl RemoteKernelsServer {
         )?;
         // The in-memory instance goes either way; what it leaves behind is
         // the record to persist, when there is one.
-        let live = is_current_generation
-            .then(|| state.instances.remove(&target.machine_id))
-            .flatten()
-            .map(|mut instance| {
-                instance.stop_heartbeat();
-                instance.record()
-            });
+        let live = take_live_record(&mut state, &target.machine_id, &target.external_id);
         // One rule for persisting a stop, live or record-only: the phase
         // lands on disk whenever the record still names the machine that was
         // stopped. (The terminate below is guarded the same way.)
