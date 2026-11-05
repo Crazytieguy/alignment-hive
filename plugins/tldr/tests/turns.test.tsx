@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
-import type { MockClock } from 'claude-code/testing'
+import type { Engine, MockClock } from 'claude-code/testing'
 
 // A summary is sent from a timer once a block is drawn, and is drawn when it comes back; a test
 // moves the clock and waits it out. setTimeout is the test runner's, outside the mods' library.
@@ -83,7 +83,7 @@ test("a subagent's turn is not this load's first turn: blocks drawn before the m
 })
 
 /** A finished turn whose long block is drawn: its summary is owed. */
-async function drawFinished($: Parameters<Parameters<typeof test>[1]>[0], requestId: string) {
+async function drawFinished($: Engine, requestId: string) {
   await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true } as never)
   await $.turn.start({ text: 'hi', turnId: 't' + requestId } as never)
   await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1, isAborted: false, turnId: 't' + requestId } as never)

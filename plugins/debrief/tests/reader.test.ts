@@ -1,5 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
 const VIEW = {
   readmes: [{ path: 'README.md', text: 'The project.' }],
@@ -25,7 +26,7 @@ function fakeEngine(on: On, answer: (prompt: string, call: number) => { isAnswer
   })
   return prompts
 }
-const call = async ($: Parameters<Parameters<typeof test>[1]>[0], extra: Record<string, unknown> = {}) => {
+const call = async ($: Engine, extra: Record<string, unknown> = {}) => {
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
   return (await $.tool.call({ tool: 'mcp__debrief__read', ...INPUT, ...extra } as never)) as unknown as { result?: string; isError?: boolean }
 }
