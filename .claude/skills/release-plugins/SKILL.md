@@ -28,7 +28,7 @@ component's commits since its version last changed on `origin/main`.
 |---|---|
 | `plugins/<name>/` | its `.claude-plugin/plugin.json` (the auto-updater compares these) |
 | `crates/<name>/` | its `Cargo.toml`, `plugins/<name>/binary-version` to match, and that plugin's `plugin.json`; run `cargo check -p <name>` so `Cargo.lock` follows |
-| hive-cli | `packages/hive-cli/package.json`, `plugins/hive/cli-version` to match, and the hive `plugin.json` |
+| hive-cli | `packages/hive-cli/package.json`, `plugins/hive/cli-version` to match, and the hive `plugin.json`; run `bun install --lockfile-only` so `bun.lock` follows |
 
 ## Checks
 

@@ -7,7 +7,7 @@
     },
     "packages/hive-cli": {
       "name": "@alignment-hive/hive-cli",
-      "version": "0.2.13",
+      "version": "0.2.14",
       "dependencies": {
         "@alignment-hive/session-data": "workspace:*",
         "@inquirer/prompts": "^8.7.3",
