@@ -1,0 +1,17 @@
+# Steps dist runs in build-local-artifacts before `dist build`
+# (github-build-setup in dist-workspace.toml). Keep the copies in
+# model-router-release.yml and remote-kernels-release.yml in step.
+#
+# Restore only. A release runs at its tag, and GitHub keeps a cache saved at one
+# tag from runs at any other, so anything saved here would never be read again.
+# release-build-cache.yml saves these caches from main, which every tag can read.
+#
+# The key hashes the root Cargo.toml because rust-cache's own key ignores
+# [profile.*]: after a profile change the old cache still matches exactly, its
+# dependencies all rebuild, and the "hit" means it is never saved over.
+- name: Restore cargo cache
+  uses: Swatinem/rust-cache@v2
+  with:
+    shared-key: release-build-${{ join(matrix.targets, '-') }}-${{ hashFiles('Cargo.toml') }}
+    cache-bin: "false"
+    save-if: "false"

@@ -129,6 +129,13 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      # Copy of .github/build-setup.yml, which explains why this only restores.
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-build-${{ join(matrix.targets, '-') }}-${{ hashFiles('Cargo.toml') }}
+          cache-bin: "false"
+          save-if: "false"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

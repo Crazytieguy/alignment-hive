@@ -1,0 +1,68 @@
+# Saves the cargo caches the binary release builds restore.
+#
+# A release runs at its tag, and a run can only restore caches saved at its own
+# ref or on the default branch, so one release can never reuse what another
+# saved. This workflow saves them from main instead. It builds and throws the
+# result away: nothing here uploads or publishes, and its token is read-only.
+#
+# One cache per target holds the dependencies of both packages, because the two
+# release workflows restore the same key (.github/build-setup.yml).
+
+name: Release build cache
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/build-setup.yml'
+      - '.github/workflows/release-build-cache.yml'
+      - 'dist-workspace.toml'
+      - 'Cargo.toml'
+  schedule:
+    # GitHub evicts a cache unread for 7 days, and scheduled runs start hours
+    # late, so every 6 days. A run with nothing new to save is only the two
+    # crates' own build, and it still counts as a read.
+    - cron: '0 6 */6 * *'
+  workflow_dispatch:
+
+jobs:
+  save:
+    name: save (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same runners as the releases (dist-workspace.toml): the cache key
+        # includes the runner's OS and architecture, so a mismatch is a miss.
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-14
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Restore and save cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-build-${{ matrix.target }}-${{ hashFiles('Cargo.toml') }}
+          cache-bin: "false"
+      - name: Install dist
+        shell: bash
+        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.3/cargo-dist-installer.sh | sh"
+      - name: Build both packages the way the releases do
+        shell: bash
+        run: |
+          for pkg in model-router remote-kernels; do
+            version=$(grep -m1 '^version = ' "crates/$pkg/Cargo.toml" | cut -d'"' -f2)
+            dist build --tag="$pkg-v$version" --artifacts=local --target=${{ matrix.target }}
+          done

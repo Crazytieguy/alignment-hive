@@ -17,3 +17,12 @@ installers = []
 allow-dirty = ["ci"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# Steps for the build-local-artifacts job. The release workflows are
+# hand-maintained, so this only takes effect through their copies of the steps:
+# a change to the file needs applying to both by hand.
+github-build-setup = "../build-setup.yml"
+
+# Intel macs build on Apple Silicon: same SDK, and `dist build` adds the rustup
+# target itself. macos-15-intel took about twice as long as the arm runner.
+[dist.github-custom-runners]
+x86_64-apple-darwin = "macos-14"
