@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const hook = fileURLToPath(new URL('./register-transcript-dir.sh', import.meta.url));
@@ -45,6 +45,18 @@ describe('hive PostToolUse register-transcript-dir', () => {
     const back = transcript('-repo');
     expect(run({ transcript_path: back.path, cwd: main }, main).exitCode).toBe(0);
     expect(readFileSync(registry, 'utf8').trim().split('\n').at(-1)).toBe(back.dir);
+  });
+
+  test('uses the jq install.sh downloads when none is on the PATH', () => {
+    const home = join(root, 'home');
+    const cache = join(home, '.cache', 'alignment-hive');
+    mkdirSync(cache, { recursive: true });
+    const moved = transcript('-no-jq');
+    writeFileSync(join(cache, 'jq'), `#!/bin/bash\ncase "$2" in *transcript_path*) echo '${moved.path}' ;; *) echo '${main}' ;; esac\n`, { mode: 0o755 });
+    const path = (process.env.PATH ?? '').split(delimiter).filter((dir) => !existsSync(join(dir, 'jq')) && !existsSync(join(dir, 'jq.exe'))).join(delimiter);
+    const result = Bun.spawnSync(['bash', hook], { cwd: main, stdin: Buffer.from('{}'), env: { ...process.env, PATH: path, HOME: home, CLAUDE_PLUGIN_ROOT: pluginRoot } });
+    expect([result.exitCode, result.stderr.toString()]).toEqual([0, '']);
+    expect(readFileSync(registry, 'utf8').trim().split('\n').at(-1)).toBe(moved.dir);
   });
 
   for (const input of [{}, { transcript_path: '' }, { transcript_path: join(root, 'missing', 'x.jsonl'), cwd: main }, 'not json']) {

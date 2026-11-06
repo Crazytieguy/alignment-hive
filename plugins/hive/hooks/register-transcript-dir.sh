@@ -8,8 +8,8 @@ set -uo pipefail
 source "${CLAUDE_PLUGIN_ROOT}/scripts/common.sh" 2>/dev/null || exit 0
 
 HOOK_INPUT=$(cat)
-TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // ""' 2>/dev/null) || exit 0
-CWD=$(echo "$HOOK_INPUT" | jq -r '.cwd // ""' 2>/dev/null) || exit 0
+TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | "$JQ" -r '.transcript_path // ""' 2>/dev/null) || exit 0
+CWD=$(echo "$HOOK_INPUT" | "$JQ" -r '.cwd // ""' 2>/dev/null) || exit 0
 
 # The state dir is resolved from the session's new cwd: a worktree of this repo shares the main
 # worktree's state dir, so the dir lands in the same registry SessionStart writes.
