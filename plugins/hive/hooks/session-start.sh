@@ -16,9 +16,9 @@ trap 'echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] session-start.sh: unexpected error 
 mkdir -p "$STATE_DIR"
 [ -f "$STATE_DIR/.gitignore" ] || echo '*' > "$STATE_DIR/.gitignore"
 
-SOURCE=$(echo "$HOOK_INPUT" | jq -r '.source // "startup"')
-SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // ""')
-TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // ""')
+SOURCE=$(echo "$HOOK_INPUT" | "$JQ" -r '.source // "startup"')
+SESSION_ID=$(echo "$HOOK_INPUT" | "$JQ" -r '.session_id // ""')
+TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | "$JQ" -r '.transcript_path // ""')
 
 # --- Record git commit hash for this session id ---
 # Runs before the resume/compact/fork early-exit: a forked session has a new

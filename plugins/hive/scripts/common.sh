@@ -1,5 +1,9 @@
 # Sourced by session-start.sh, register-transcript-dir.sh, align-status.sh and hive.sh.
 
+# jq from PATH, else the copy install.sh downloads when the machine has none.
+JQ=jq
+command -v jq >/dev/null 2>&1 || JQ="$HOME/.cache/alignment-hive/jq"
+
 # The CLI's state dir: <main worktree>/.claude/hive (resolved from the cwd), or $1/.claude/hive outside a repo.
 resolve_state_dir() {
   local main_worktree
@@ -19,7 +23,7 @@ claude_config_dir() {
 
 # The plugin's version from its manifest; empty when unreadable.
 plugin_version() {
-  jq -r '.version // ""' "$1/.claude-plugin/plugin.json" 2>/dev/null || echo ""
+  "$JQ" -r '.version // ""' "$1/.claude-plugin/plugin.json" 2>/dev/null || echo ""
 }
 
 # Register the directory holding a transcript (hook input's transcript_path) in the state dir's
