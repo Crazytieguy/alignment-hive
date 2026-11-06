@@ -257,6 +257,8 @@ uv run ${CLAUDE_PLUGIN_ROOT}/scripts/lit-review/generate_catalog.py \
   --output <output_dir>/catalog.md
 ```
 
+This also writes `<output_dir>/configs.json`: each paper's experimental configuration (base model, trainer, objective, reward, data, eval, decoding, how samples were varied, compute) as the summarizer recorded it, with the factors the paper did not report listed as such. Post-training papers change several of these at once, so a paper's absolute number is not a baseline for a new experiment; use this file to see which papers actually share a base model or an eval with each other, and where the project's own design differs from each paper.
+
 ### Phase 8: Generate Report (Stage 1)
 
 Read the catalog and summaries. Create `<output_dir>/stage1_report.md` with:
@@ -387,7 +389,7 @@ Save final state to `<output_dir>/progress.json` with completion timestamp and s
 ### Report to User
 
 Summarize:
-- Location of `catalog.md` and `top_10_report.md`
+- Location of `catalog.md`, `top_10_report.md` and `configs.json`
 - Total papers found and summarized across all stages
 - Search term evolution across stages
 - Any issues encountered
