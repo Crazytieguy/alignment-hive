@@ -257,6 +257,12 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         checks.extend(legacy_models_block_check(&config));
         checks.push(shipped_agent_routes_check(&config));
         checks.extend(ultrafast_check(&config, dirs));
+        checks.extend(auto_mode_fallback_check(
+            &config,
+            config_path,
+            &settings,
+            &|var| std::env::var(var).ok(),
+        ));
         checks.extend(context_window_checks(
             config,
             dirs,
@@ -421,6 +427,126 @@ fn context_window_checks(
         check.detail = format!("{}; {note}", check.detail);
     }
     check.into_iter().collect()
+}
+
+/// The variables that switch off Claude Code's own auto-mode classifier for
+/// a session that does not opt back in, and whether any non-empty value
+/// does (2.1.319, measured for each: `0` counts for the first two only).
+const NO_LOCAL_CLASSIFIER_VARS: [(&str, bool); 4] = [
+    ("DISABLE_TELEMETRY", true),
+    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", true),
+    ("CLAUDE_CODE_DISABLE_FEATURE_FLAGS", false),
+    ("DISABLE_GROWTHBOOK", false),
+];
+
+/// The value of Claude Code variable `var` the next session gets: the
+/// winning settings file's `env` beats an inherited value.
+fn claude_env_var(
+    settings: &crate::claude_settings::Settings,
+    process_env: &dyn Fn(&str) -> Option<String>,
+    var: &str,
+) -> Option<(String, String)> {
+    if let Some((path, raw)) = crate::claude_settings::winning_setting(settings, &["env", var]) {
+        let value = raw.as_str().map_or_else(|| raw.to_string(), str::to_string);
+        return Some((value, format!("in {}", path.display())));
+    }
+    process_env(var).map(|value| {
+        (
+            value,
+            "in your environment (your shell or managed settings, not a settings file)".to_string(),
+        )
+    })
+}
+
+/// Whether Claude Code reads `value` as on (empty and the usual false
+/// spellings are off).
+fn env_on(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    !["", "0", "false", "no", "off"].contains(&value.as_str())
+}
+
+/// Warns when Claude Code would leave a routed reply's tool calls in auto
+/// mode with no safety check. As of 2.1.319, with telemetry or feature flags
+/// off, Claude Code no longer falls back to its own classifier when a reply
+/// carries no server verdict, which a routed reply never does unless the
+/// router's `[auto-mode-classifier]` adds one. Measured through the router
+/// on a GPT model: each of [`NO_LOCAL_CLASSIFIER_VARS`] got the Bash call
+/// denied in `claude -p` ("no local one judges in its place" in the debug
+/// log), with none set Claude Code's classifier judged it, and with
+/// `CLAUDE_CODE_AUTO_MODE_SERVER=0` too it judged GPT and Claude replies
+/// alike. Managed settings are not read.
+fn auto_mode_fallback_check(
+    config: &Config,
+    config_path: &std::path::Path,
+    settings: &crate::claude_settings::Settings,
+    process_env: &dyn Fn(&str) -> Option<String>,
+) -> Option<Check> {
+    if config.auto_mode_classifier.enabled {
+        return None;
+    }
+    if claude_env_var(settings, process_env, "CLAUDE_CODE_AUTO_MODE_SERVER")
+        .is_some_and(|(value, _)| !env_on(&value))
+    {
+        return None;
+    }
+    let set: Vec<(&str, String)> = NO_LOCAL_CLASSIFIER_VARS
+        .iter()
+        .filter_map(|&(var, any_value)| {
+            claude_env_var(settings, process_env, var)
+                .filter(|(value, _)| {
+                    if any_value {
+                        !value.is_empty()
+                    } else {
+                        env_on(value)
+                    }
+                })
+                .map(|(_, source)| (var, source))
+        })
+        .collect();
+    let (found, names) = match set.as_slice() {
+        [] => return None,
+        [(var, source)] => (format!("{var} is set {source}"), (*var).to_string()),
+        several => (
+            format!(
+                "{} are set",
+                several
+                    .iter()
+                    .map(|(var, source)| format!("{var} ({source})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            several
+                .iter()
+                .map(|(var, _)| *var)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    };
+    let (it, that) = if set.len() == 1 {
+        ("it", "this")
+    } else {
+        ("them", "each of these")
+    };
+    Some(Check {
+        name: "auto-mode-fallback",
+        ok: true,
+        warn: true,
+        detail: format!(
+            "{found}. Measured on Claude Code 2.1.319: in auto mode, Claude Code checks \
+             routed models' tool calls (GPT and others) with its own classifier, on Sonnet \
+             using your Claude plan, and {that} turns that classifier off, so those calls \
+             need your approval or are denied (denied under `claude -p`). Claude models' \
+             calls, which Anthropic's server checks, and sessions outside auto mode are \
+             unaffected. Any one of these fixes it from the next Claude Code session: unset \
+             {names}; set `enabled = true` under [auto-mode-classifier] in {}, then run \
+             `model-router service restart`, to have the router check those calls on a \
+             routed model (GPT by default) using that model's quota (experimental); or keep \
+             {it} and also set CLAUDE_CODE_AUTO_MODE_SERVER=0, which turns Claude Code's \
+             classifier back on and has it check every tool call, Claude models' included, \
+             so those use your Claude plan too",
+            config_path.display()
+        ),
+    })
 }
 
 /// Fails when a settings `fallbackModel` chain is in effect: Claude Code
@@ -2466,6 +2592,89 @@ display-name = "Kimi K3"
         assert!(fallback_model_check(&settings_by_precedence(None, project.path())).is_none());
         write_settings(project.path(), "settings.json", r#"{"model":"opus"}"#);
         assert!(fallback_model_check(&settings_by_precedence(None, project.path())).is_none());
+    }
+
+    #[test]
+    fn auto_mode_fallback_warns_only_when_routed_calls_go_unchecked() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let off = config("");
+        let check = |config: &Config, env: &[(&str, &str)]| {
+            let env: BTreeMap<String, String> = env
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect();
+            auto_mode_fallback_check(
+                config,
+                std::path::Path::new("config.toml"),
+                &settings_by_precedence(Some(home.path()), project.path()),
+                &|var| env.get(var).cloned(),
+            )
+        };
+
+        assert!(check(&off, &[]).is_none());
+        // Claude Code reads the telemetry variables as set whatever their
+        // value, and the feature-flag ones as booleans.
+        assert!(check(&off, &[("CLAUDE_CODE_DISABLE_FEATURE_FLAGS", "0")]).is_none());
+        assert!(check(&off, &[("DISABLE_TELEMETRY", "")]).is_none());
+        let warned = check(&off, &[("DISABLE_TELEMETRY", "0")]).unwrap();
+        assert!(warned.ok && warned.warn);
+        assert!(
+            warned
+                .detail
+                .starts_with("DISABLE_TELEMETRY is set in your environment (your shell or managed settings, not a settings file)."),
+            "{}",
+            warned.detail
+        );
+
+        // Either way out silences it.
+        let on = config("[auto-mode-classifier]\nenabled = true\n");
+        assert!(check(&on, &[("DISABLE_TELEMETRY", "1")]).is_none());
+        assert!(
+            check(
+                &off,
+                &[
+                    ("DISABLE_TELEMETRY", "1"),
+                    ("CLAUDE_CODE_AUTO_MODE_SERVER", "0")
+                ]
+            )
+            .is_none()
+        );
+
+        // A settings file's env beats the inherited value.
+        write_settings(
+            home.path(),
+            "settings.json",
+            r#"{"env":{"CLAUDE_CODE_DISABLE_FEATURE_FLAGS":"true","DISABLE_TELEMETRY":""}}"#,
+        );
+        let warned = check(&off, &[("DISABLE_TELEMETRY", "1")]).unwrap();
+        assert!(
+            warned.detail.starts_with(&format!(
+                "CLAUDE_CODE_DISABLE_FEATURE_FLAGS is set in {}.",
+                home.path().join(".claude/settings.json").display()
+            )),
+            "{}",
+            warned.detail
+        );
+
+        // Every variable in force is named, since each alone is enough.
+        let warned = check(&off, &[("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")]).unwrap();
+        assert!(
+            warned.detail.starts_with(&format!(
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC (in your environment (your shell or managed settings, not a settings file)), \
+                 CLAUDE_CODE_DISABLE_FEATURE_FLAGS (in {}) are set.",
+                home.path().join(".claude/settings.json").display()
+            )),
+            "{}",
+            warned.detail
+        );
+        assert!(
+            warned.detail.contains(
+                "unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, CLAUDE_CODE_DISABLE_FEATURE_FLAGS;"
+            ),
+            "{}",
+            warned.detail
+        );
     }
 
     #[test]
