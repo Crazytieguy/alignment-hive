@@ -321,6 +321,8 @@ export const SIWC_ONLY = new Set(['CodexSIWCRefreshLead', 'CodexSIWCNeedsRefresh
 export const REVIEWED_REFRESH: Record<string, Record<string, string>> = {
   shouldRefresh: {
     d0666c6776766507: '8.0.51: returns false for a Codex login with no refresh_token and no SIWC section (95f125ff). A login that can be copied has one, so it is not affected.',
+    '5ab5e6bdba298721':
+      '8.0.53: a new branch for a login whose refresh token was already rejected as terminal (RequiresSignIn, and the token equals RejectedRefreshToken; both in-memory only, so a fresh copy never starts in it). It returns false while the access token is valid, else true, and refreshAuth then hits the unchanged guard that never resubmits a rejected grant. It can only stop or reschedule refreshes, never submit one.',
   },
 };
 
