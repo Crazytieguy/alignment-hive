@@ -13,21 +13,13 @@ async fn server_with_instance(cleanup: Cleanup) -> (RemoteKernelsServer, tempfil
     let server = RemoteKernelsServer::new(config, AppState::new(dir.path().to_path_buf()), None);
     {
         let mut state = server.state.lock().await;
-        let inst = InstanceState::provisioning(
+        let mut record = InstanceRecord::for_test("fake", "fake-test-id", Phase::Provisioning);
+        record.cleanup = cleanup;
+        crate::state::create_record(&state.project_dir, "main", &record).unwrap();
+        state.instances.insert(
             "main".to_string(),
-            None,
-            "fake".to_string(),
-            "fake-test-id".to_string(),
-            "GPU".to_string(),
-            1.0,
-            cleanup,
-            "token".to_string(),
-            dir.path().join("id_ed25519"),
-            false,
+            InstanceState::from_record("main", &record),
         );
-        let record = inst.record();
-        state.instances.insert("main".to_string(), inst);
-        state.save_record("main", &record).unwrap();
     }
     (server, dir)
 }
@@ -44,9 +36,11 @@ async fn failed_start_cleanup_leaves_a_machine_stopped_during_setup_alone() {
     let (server, _dir) = server_with_instance(Cleanup::Terminate).await;
     {
         let mut state = server.state.lock().await;
-        let mut inst = state.instances.remove("main").unwrap();
-        inst.phase = Phase::Stopped;
-        state.save_record("main", &inst.record()).unwrap();
+        state.instances.remove("main").unwrap();
+        crate::state::with_record(&state.project_dir, "main", |record| {
+            record.phase = Phase::Stopped;
+        })
+        .unwrap();
     }
     for force_terminate in [false, true] {
         let outcome = server
@@ -69,18 +63,16 @@ async fn failed_start_terminate_policy_clears_record() {
     assert!(server.state.lock().await.instances.is_empty());
 }
 
-/// Stop policy: the machine must NOT be terminated. Here the provider
-/// stop is unconfirmed (fake stop errors on unknown ids), so the record
-/// must survive for retry — nothing is forgotten on provider failure.
+/// The provider has no such machine (the fake knows nothing of this id): that
+/// is a positive fact, so its record goes, whatever the policy.
 #[tokio::test]
-async fn failed_start_stop_policy_never_terminates_and_keeps_record() {
+async fn failed_start_on_a_machine_the_provider_no_longer_has_clears_it() {
     let (server, _dir) = server_with_instance(Cleanup::Stop).await;
     let outcome = server
         .cleanup_failed_start("main", "fake-test-id", "fake", false)
         .await;
-    assert!(matches!(outcome, FailedStartCleanup::Unconfirmed));
-    let record = record_of(&server).await.expect("record must be kept");
-    assert_eq!(record.external_id, "fake-test-id");
+    assert!(matches!(outcome, FailedStartCleanup::Stopped));
+    assert!(record_of(&server).await.is_none());
 }
 
 #[tokio::test]

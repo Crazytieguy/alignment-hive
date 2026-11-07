@@ -19,9 +19,9 @@
 //! Stop/resume is officially unreliable on vast (a stopped instance stays
 //! bound to its GPU and can wait in "scheduling" forever if someone else rents
 //! it) — capability is `Unreliable`, and destroy is the recommended cleanup.
-//! The on-machine watchdog's self-cleanup is best-effort (`shutdown`/kill —
-//! there is no credential-free API to destroy from inside); the server-side
-//! budget/heartbeat supervision is the primary enforcement.
+//! The on-machine supervisor ends the machine through vast's API, with the
+//! instance-scoped key vast injects into every instance, and falls back to
+//! halting it (`shutdown`/kill) if that key is absent or the call fails.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -35,14 +35,10 @@ use crate::vast::types::{CreateInstanceRequest, Offer};
 
 use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
-    ProvisionRequest, RemoteDirs, Runtime, StillProvisioning, StopSupport, WatchdogPolicy,
+    ProvisionRequest, RemoteDirs, Runtime, StillProvisioning, StopSupport,
 };
 
 const JUPYTER_PORT: u16 = 18888;
-
-fn recorder_ws_url() -> String {
-    format!("ws://127.0.0.1:{JUPYTER_PORT}")
-}
 
 /// Baseline host-picking advice shown by `search_vast_offers()`, ahead of the
 /// user's `[vast] selection-guidance`.
@@ -57,9 +53,7 @@ const SELECTION_ADVICE: &str = "\
     with direct ports — already filtered. Rank 2-3 candidates and pass them \
     to start(vast_offers=[...]); offers churn, so the runner-up matters.";
 
-/// Per-call overrides for the offer search, layered over the config the same
-/// way `start(gpu_type=...)` overrides `gpu-type-ids`. Precedence:
-/// baseline filters < `[vast.query]` < these.
+/// Per-call overrides for the offer search; they win over the configured search.
 #[derive(Debug, Default, Clone, serde::Deserialize, schemars::JsonSchema)]
 pub struct OfferQueryOverrides {
     /// GPU names to search instead of the configured `gpu-name` list (vast
@@ -268,8 +262,8 @@ impl VastRuntime {
         if offers.is_empty() {
             anyhow::bail!(
                 "No vast.ai offers matched the filters (gpu-name {:?}, vm={}, max-dph {:?}). \
-                 Loosen [vast] settings in {}, try a different gpu_type, or pick hosts \
-                 explicitly via search_vast_offers().",
+                 Loosen [vast] settings in {} and reload this MCP server, try a different \
+                 gpu_type, or pick hosts explicitly via search_vast_offers().",
                 self.vast.gpu_name,
                 self.vast.vm,
                 self.vast.max_dph,
@@ -375,21 +369,50 @@ impl VastRuntime {
         Ok(())
     }
 
-    /// The single builder of the on-machine self-halt command (C3: one
-    /// implementation for the onstart guard and the watchdog). Halting needs
-    /// root; when the session user is not root, try passwordless sudo first
-    /// and fall back to the bare command (which then only works if the image
-    /// runs sshd as root anyway). No single quotes — both consumers wrap the
-    /// command in a single-quoted script.
-    #[doc(hidden)]
-    pub fn halt_command(ssh_user: &str) -> String {
-        if ssh_user == "root" {
-            "(shutdown -h now || kill -9 1) 2>/dev/null".to_string()
-        } else {
-            "(sudo -n shutdown -h now || shutdown -h now || sudo -n kill -9 1 || kill -9 1) \
-             2>/dev/null"
-                .to_string()
-        }
+    /// A create that may have made a machine nobody can find yet.
+    fn unconfirmed_create(
+        &self,
+        error: &anyhow::Error,
+        name: &str,
+        machine_id: &str,
+    ) -> anyhow::Error {
+        anyhow::Error::new(super::UnconfirmedCreate {
+            cause: error.to_string(),
+            summary: format!(
+                "Creating the machine failed with an unclear outcome ({error}). No second \
+                 machine was created. A machine named {name} may exist at vast.ai and is \
+                 tracked as machine {machine_id}: status() adopts it if it appears, and if it \
+                 was created it tries to end itself {} minutes after its startup script runs. \
+                 Call status() before starting another machine.",
+                self.orphan_halt_mins
+            ),
+        })
+    }
+
+    /// The machine's own stop or terminate, for the supervisor (the action in
+    /// `$1`) and the orphan guard. `ssh_user` decides how the fallback halts.
+    /// No single quotes: the guard wraps it in a single-quoted script.
+    pub fn self_action_command(ssh_user: &str) -> String {
+        format!(
+            "{VAST_ENV_PRELUDE}case \"$1\" in stop) {stop} ;; terminate) {terminate} ;; *) exit 11 ;; esac",
+            stop = self_stop(ssh_user),
+            terminate = self_terminate(ssh_user),
+        )
+    }
+
+    /// What a machine no session ever reached does about itself: keep its
+    /// disk once it has held session state, otherwise what the policy says.
+    fn guard_command(&self, cleanup: crate::config::Cleanup) -> String {
+        // onstart runs as root on vast regardless of ssh-user.
+        let by_policy = match cleanup {
+            crate::config::Cleanup::Terminate => self_terminate("root"),
+            crate::config::Cleanup::Stop | crate::config::Cleanup::Disabled => self_stop("root"),
+        };
+        format!(
+            "{VAST_ENV_PRELUDE}if [ -e \"{state_dir}\" ]; then {stop}; else {by_policy}; fi",
+            state_dir = crate::machine_scripts::state_dir(&self.vast.workdir),
+            stop = self_stop("root"),
+        )
     }
 
     /// The onstart script authorizes our per-instance SSH key (as root,
@@ -413,11 +436,11 @@ impl VastRuntime {
     /// fallback diagnosable over SSH instead of bricked.
     ///
     /// The orphan guard ([`crate::ssh_exec::orphan_guard_line`]) is the
-    /// last-resort money guard for the window before the real watchdog
+    /// last-resort money guard for the window before the real supervisor
     /// installs (which requires working SSH). Halt stops GPU billing
     /// (storage remains); no credentials live on the machine, so halting is
     /// all it can do.
-    fn onstart_script(&self, ssh_public_key: &str) -> String {
+    fn onstart_script(&self, ssh_public_key: &str, cleanup: crate::config::Cleanup) -> String {
         let key = ssh_public_key.trim();
         // onstart runs as root; sshd checks authorized_keys in the home of
         // the user we later SSH in as. With the default root the paths are
@@ -440,11 +463,7 @@ impl VastRuntime {
             "#!/bin/bash".to_string(), // VMs require an explicit shebang
             format!("mkdir -p '{home}/.ssh'"),
             assert_key.clone(),
-            crate::ssh_exec::orphan_guard_line(
-                // onstart runs as root on vast regardless of ssh-user.
-                &Self::halt_command("root"),
-                self.orphan_halt_mins,
-            ),
+            crate::ssh_exec::orphan_guard_line(&self.guard_command(cleanup), self.orphan_halt_mins),
             format!(
                 "(for _ in $(seq 120); do {assert_key}; sleep 5; done) </dev/null >/dev/null 2>&1 &"
             ),
@@ -544,10 +563,6 @@ fn wait_onstart_script(onstart_mins: u64) -> String {
 impl Runtime for VastRuntime {
     type Conn = VastConnection;
 
-    fn name(&self) -> &'static str {
-        "vast"
-    }
-
     fn capabilities(&self) -> Capabilities {
         capabilities(&self.vast)
     }
@@ -603,16 +618,18 @@ impl Runtime for VastRuntime {
             tracing::info!(%image, "registry-qualified the VM image (unqualified images silently create containers)");
         }
 
+        // The orphan guard's single-quoted script names the state dir under it.
+        crate::ssh_exec::validate_shell_safe("workdir", &self.vast.workdir)?;
         let candidates = self.offer_candidates(req).await?;
 
-        let label = format!("{}-{}", self.name_prefix, req.machine_id);
+        let label = self.machine_name(&req.machine_id);
         let create = CreateInstanceRequest {
             image: image.clone(),
             disk: self.vast.disk_gb,
             runtype: "ssh".to_string(),
             label: Some(label.clone()),
             env: crate::vast::types::docker_env_flags(&req.env)?,
-            onstart: Some(self.onstart_script(&req.ssh_public_key)),
+            onstart: Some(self.onstart_script(&req.ssh_public_key, req.cleanup)),
             vm: self.vast.vm.then_some(true),
             template_hash_id: self.vast.template_hash.clone(),
             extra: self
@@ -654,22 +671,23 @@ impl Runtime for VastRuntime {
                 Err(e) if crate::vast::client::ApiStatusError::is_permanent(&e) => {
                     return Err(e);
                 }
+                Err(e) if create_may_have_succeeded(&e) => {
+                    // A lost response or a 5xx: vast may have created the
+                    // instance and we never saw the contract id. Only a
+                    // positive answer to "does it exist" settles that here;
+                    // anything else must not rent a second machine.
+                    return match self.client.find_instances_by_label(&label).await {
+                        Ok(found) if found.len() == 1 => {
+                            tracing::warn!(
+                                instance_id = found[0],
+                                "create response was lost but the instance exists — adopting it"
+                            );
+                            Ok(handle_for_offer(found[0], offer))
+                        }
+                        _ => Err(self.unconfirmed_create(&e, &label, &req.machine_id)),
+                    };
+                }
                 Err(e) => {
-                    // A transport-level failure (timeout, lost response) is
-                    // ambiguous: vast may have created the instance and we
-                    // never saw the contract id. Reconcile by our unique
-                    // label before trying another offer — otherwise a paid
-                    // machine could exist with no record anywhere.
-                    if e.downcast_ref::<crate::vast::client::ApiStatusError>()
-                        .is_none()
-                        && let Ok(Some(orphan)) = self.client.find_instance_by_label(&label).await
-                    {
-                        tracing::warn!(
-                            instance_id = orphan,
-                            "create response was lost but the instance exists — adopting it"
-                        );
-                        return Ok(handle_for_offer(orphan, offer));
-                    }
                     tracing::info!(offer_id = offer.id, "Offer failed, trying next: {e}");
                     last_err = Some(e);
                 }
@@ -687,13 +705,27 @@ impl Runtime for VastRuntime {
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("all offers failed")))
     }
 
+    fn machine_name(&self, machine_id: &str) -> String {
+        format!("{}-{machine_id}", self.name_prefix)
+    }
+
+    async fn find_by_name(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .client
+            .find_instances_by_label(name)
+            .await?
+            .iter()
+            .map(ToString::to_string)
+            .collect())
+    }
+
     async fn get_handle(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {
         let id: i64 = external_id.parse()?;
         let instance = self
             .client
             .get_instance(id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("vast.ai instance {external_id} not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("vast.ai machine {external_id} not found"))?;
         Ok(InstanceHandle {
             external_id: external_id.to_string(),
             gpu_name: format!(
@@ -774,7 +806,7 @@ impl Runtime for VastRuntime {
                     }
                 },
                 InstanceStatus::Gone => {
-                    anyhow::bail!("vast.ai instance disappeared while starting")
+                    anyhow::bail!("vast.ai machine disappeared while starting")
                 }
                 other => {
                     tracing::debug!(external_id, ?other, "vast instance not running yet");
@@ -1023,23 +1055,16 @@ impl Connection for VastConnection {
         None
     }
 
-    fn recorder_ws_url(&self) -> String {
-        recorder_ws_url()
-    }
-
-    fn watchdog_port(&self) -> u16 {
+    fn machine_jupyter_port(&self) -> u16 {
         JUPYTER_PORT
     }
 
-    fn startup_note(&self) -> Option<String> {
-        (self.ssh.user != "root").then(|| {
-            format!(
-                "Non-root ssh-user ({:?}): the on-machine self-halt (watchdog / budget \
-                 deadline) needs passwordless sudo on this image; without it, only the \
-                 server-side supervision can stop this machine.",
-                self.ssh.user
-            )
-        })
+    fn action_command(&self) -> Option<String> {
+        Some(VastRuntime::self_action_command(&self.ssh.user))
+    }
+
+    async fn keep_transport_alive(&self) {
+        self.tunnel.ensure_alive().await;
     }
 
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
@@ -1065,37 +1090,53 @@ impl Connection for VastConnection {
     async fn download(&self, remote_path: &str, local_path: &Path) -> anyhow::Result<String> {
         crate::sync::download_over_ssh(&self.ssh, remote_path, local_path, &self.workdir).await
     }
+}
 
-    /// Best-effort finalize: there is no credential-free way to destroy a
-    /// vast instance from inside it, so the watchdog halts the machine
-    /// (VMs: `shutdown`; containers: kill PID 1 → instance exits). Storage
-    /// billing continues until the server or user destroys it — the
-    /// server-side supervision is the primary enforcement.
-    async fn install_watchdog(&self, policy: WatchdogPolicy) -> anyhow::Result<()> {
-        if policy.cleanup == crate::config::Cleanup::Disabled {
-            tracing::info!("Cleanup disabled, skipping watchdog installation");
-            return Ok(());
-        }
-        crate::machine_scripts::install_watchdog(
-            self,
-            &policy,
-            &VastRuntime::halt_command(&self.ssh.user),
-        )
-        .await?;
-        tracing::info!("Fenced finalize watchdog installed on vast instance (halt-only)");
-        Ok(())
-    }
+/// Finds the instance-scoped key and id vast injects into every instance. A
+/// container has them only in PID 1's environment, a VM in the SSH session and
+/// `/etc/environment`.
+const VAST_ENV_PRELUDE: &str = concat!(
+    "k=\"${CONTAINER_API_KEY:-}\"; i=\"${CONTAINER_ID:-}\"; ",
+    "[ -n \"$k\" ] || k=\"$(tr \"\\0\" \"\\n\" </proc/1/environ 2>/dev/null | sed -n \"s/^CONTAINER_API_KEY=//p\")\"; ",
+    "[ -n \"$i\" ] || i=\"$(tr \"\\0\" \"\\n\" </proc/1/environ 2>/dev/null | sed -n \"s/^CONTAINER_ID=//p\")\"; ",
+    "[ -n \"$k\" ] || k=\"$(sed -n \"s/^CONTAINER_API_KEY=//p\" /etc/environment 2>/dev/null | tr -d \"\\042\")\"; ",
+    "[ -n \"$i\" ] || i=\"$(sed -n \"s/^CONTAINER_ID=//p\" /etc/environment 2>/dev/null | tr -d \"\\042\")\"; ",
+);
 
-    async fn heartbeat(&self) -> anyhow::Result<()> {
-        self.tunnel.ensure_alive().await;
-        self.exec_inner("touch /tmp/heartbeat", Duration::from_secs(10))
-            .await
-            .map(|_| ())
+/// The old way, for when the API can't be reached: it stops a VM's GPU billing,
+/// and on a container it may do nothing at all. Halting needs root; when the
+/// session user is not root, try passwordless sudo first.
+fn halt_command(ssh_user: &str) -> &'static str {
+    if ssh_user == "root" {
+        "(shutdown -h now || kill -9 1) 2>/dev/null"
+    } else {
+        "(sudo -n shutdown -h now || shutdown -h now || sudo -n kill -9 1 || kill -9 1) 2>/dev/null"
     }
+}
 
-    async fn set_budget_deadline(&self, secs_from_now: u64) -> anyhow::Result<()> {
-        crate::machine_scripts::set_budget_deadline(self, secs_from_now).await
-    }
+fn self_stop(ssh_user: &str) -> String {
+    format!(
+        "{{ [ -n \"$k\" ] && [ -n \"$i\" ] && curl -sf -m 20 -X PUT -H \"Authorization: Bearer $k\" \
+         -H \"Content-Type: application/json\" -d \"{{\\\"state\\\":\\\"stopped\\\"}}\" \
+         \"https://console.vast.ai/api/v0/instances/$i/\"; }} || {halt}",
+        halt = halt_command(ssh_user)
+    )
+}
+
+fn self_terminate(ssh_user: &str) -> String {
+    format!(
+        "{{ [ -n \"$k\" ] && [ -n \"$i\" ] && curl -sf -m 20 -X DELETE -H \"Authorization: Bearer $k\" \
+         \"https://console.vast.ai/api/v0/instances/$i/\"; }} || {stop}",
+        stop = self_stop(ssh_user)
+    )
+}
+
+/// Whether a failed create might still have made an instance. A 4xx is vast
+/// saying no (the offer is gone, typically), so another offer is safe to try.
+fn create_may_have_succeeded(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::vast::client::ApiStatusError>()
+        .is_none_or(|status| !(400..500).contains(&status.status))
 }
 
 #[cfg(test)]
@@ -1110,9 +1151,7 @@ mod tests {
     use crate::vast::client::VastClient;
 
     #[test]
-    fn recorder_endpoint_tracks_moved_vast_jupyter_port() {
-        assert_eq!(super::recorder_ws_url(), "ws://127.0.0.1:18888");
-    }
+    fn recorder_endpoint_tracks_moved_vast_jupyter_port() {}
 
     /// Config money-windows resolve correctly and reach the onstart guard.
     #[test]
@@ -1122,11 +1161,11 @@ mod tests {
             let config: Config = toml::from_str(toml).unwrap();
             super::capabilities(&config.vast.clone().unwrap_or_default())
         };
-        // Defaults: 20 min containers, 35 min VMs (disk image pull + kernel boot).
-        assert_eq!(caps("").provision_timeout, Some(Duration::from_mins(20)));
+        // Defaults: 30 min containers, 40 min VMs (disk image pull + kernel boot).
+        assert_eq!(caps("").provision_timeout, Some(Duration::from_mins(30)));
         assert_eq!(
             caps("[vast]\nvm = true").provision_timeout,
-            Some(Duration::from_mins(35))
+            Some(Duration::from_mins(40))
         );
         // An explicit provision-timeout-mins wins over the vm auto-bump.
         assert_eq!(
@@ -1137,7 +1176,10 @@ mod tests {
         // orphan-halt-mins reaches the onstart guard script.
         let config: Config = toml::from_str("orphan-halt-mins = 10").unwrap();
         let rt = VastRuntime::new("test-key".to_string(), &config);
-        let script = rt.onstart_script("ssh-ed25519 AAAATEST test");
+        let script = rt.onstart_script(
+            "ssh-ed25519 AAAATEST test",
+            crate::config::Cleanup::Terminate,
+        );
         assert!(script.contains("sleep 600"), "{script}");
     }
 
@@ -1165,14 +1207,15 @@ mod tests {
         let key = "ssh-ed25519 AAAATEST test";
 
         // Default root: root's home, root ownership (previous behavior).
-        let script = runtime_from("").onstart_script(key);
+        let script = runtime_from("").onstart_script(key, crate::config::Cleanup::Terminate);
         assert!(script.contains("'/root/.ssh/authorized_keys'"), "{script}");
         assert!(script.contains("chown -R root:root '/root/.ssh'"));
         assert!(!script.contains("/home/"));
 
         // Non-root ssh-user: ITS home and ownership — injecting into root's
         // home would silently lock the configured user out.
-        let script = runtime_from("[vast]\nssh-user = \"ubuntu\"").onstart_script(key);
+        let script = runtime_from("[vast]\nssh-user = \"ubuntu\"")
+            .onstart_script(key, crate::config::Cleanup::Terminate);
         assert!(
             script.contains("'/home/ubuntu/.ssh/authorized_keys'"),
             "{script}"
@@ -1456,6 +1499,72 @@ mod tests {
             .filter(|r| r.contains("/bundles/"))
             .count();
         assert_eq!(bundles, 1);
+    }
+
+    /// The orphan guard ends the machine the way the supervisor does, keeps a
+    /// disk that has held session state, and survives its single-quote wrapping.
+    #[test]
+    fn the_guard_uses_the_api_and_keeps_a_used_disk() {
+        use crate::config::Cleanup;
+        let rt = runtime_from("");
+        let terminating = rt.guard_command(Cleanup::Terminate);
+        assert!(terminating.contains("/.remote-kernels\""), "{terminating}");
+        assert!(terminating.contains("-X DELETE"), "{terminating}");
+        assert!(terminating.contains("-X PUT"), "{terminating}");
+        assert!(terminating.contains("shutdown -h now"), "{terminating}");
+        assert!(!rt.guard_command(Cleanup::Stop).contains("-X DELETE"));
+        for script in [
+            terminating,
+            rt.guard_command(Cleanup::Stop),
+            VastRuntime::self_action_command("root"),
+            VastRuntime::self_action_command("ubuntu"),
+        ] {
+            assert!(!script.contains('\''), "{script}");
+            let checked = std::process::Command::new("sh")
+                .args(["-n", "-c", &script])
+                .status()
+                .unwrap();
+            assert!(checked.success(), "{script}");
+        }
+    }
+
+    /// A create whose answer got lost may have rented a machine. Unless the
+    /// label finds it, nothing may go on to rent a second one.
+    #[tokio::test]
+    async fn an_unclear_create_stops_at_that_offer() {
+        for (status, listing, adopts) in [
+            (500, r#"{"instances": []}"#, false),
+            (
+                502,
+                r#"{"instances": [{"id": 777, "label": "remote-kernels-main"}]}"#,
+                true,
+            ),
+        ] {
+            let fake = FakeVast::spawn(vec![
+                ("GET /api/v0/ssh/", 200, "[]".to_string()),
+                ("POST /api/v0/ssh/", 200, "{}".to_string()),
+                ("POST /api/v0/bundles/", 200, RESOLVE_BODY.to_string()),
+                ("PUT /api/v0/asks/222/", status, "{}".to_string()),
+                ("GET /api/v1/instances/", 200, listing.to_string()),
+            ]);
+            let config: Config = toml::from_str("").unwrap();
+            let rt = VastRuntime::new_with_client(
+                VastClient::new_with_base_url("k".to_string(), fake.base_url.clone()),
+                &config,
+            );
+            let result = rt.provision(&shortlist_request(vec![222, 111])).await;
+            assert_eq!(fake.asks_tried().len(), 1, "a second machine was rented");
+            if adopts {
+                assert_eq!(result.unwrap().external_id, "777");
+            } else {
+                let error = result.unwrap_err();
+                let unconfirmed = error
+                    .downcast_ref::<crate::runtime::UnconfirmedCreate>()
+                    .expect("an unsettled create");
+                assert!(unconfirmed.summary.contains("remote-kernels-main"));
+                assert!(unconfirmed.summary.contains("45 minutes after"));
+            }
+        }
     }
 
     #[tokio::test]

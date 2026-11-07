@@ -40,9 +40,9 @@ When `remote-kernels.toml` sets `[runpod] network-volume-id` but no
 
 ## 1. Pick the runtime(s)
 
-- **RunPod** — managed pods, reliable stop/resume; the simplest choice
-  (MATS default)
-- **vast.ai** — cheapest marketplace GPUs; machines are best treated as
+- **RunPod** — managed pods with stop/resume (a GPU isn't guaranteed on
+  resume); the simplest choice (MATS default)
+- **vast.ai** — marketplace GPUs, often the cheapest; machines are best treated as
   ephemeral. VM mode runs Docker inside (e.g. Inspect sandboxed evals)
 - **Kubernetes** — lab clusters; pods from a lab-owned template, Kueue-aware
 
@@ -89,8 +89,8 @@ Cover these with the user regardless of runtime:
   file names the exact variable and where to get it. Kubernetes needs no
   key (kubeconfig).
 - **Environment on the machine** — what does the workload need (HF_TOKEN,
-  WANDB_API_KEY, ...)? `inherit-env` forwards local variables (including
-  from `.env`/`.env.local`); explicit values go in `[env]`.
+  WANDB_API_KEY, ...)? `inherit-env` forwards the local variables it names
+  (including ones from `.env`/`.env.local`); explicit values go in `[env]`.
 - **Budget** — set `REMOTE_KERNELS_BUDGET` in `.claude/settings.json`'s
   `env` section rather than `budget-cap` in remote-kernels.toml: the env var
   overrides the TOML, and settings.json edits get extra protection from
@@ -98,24 +98,28 @@ Cover these with the user regardless of runtime:
   though not an absolute guarantee in fully-automatic permission modes.
   Optional: no budget means the user manages spend manually, and that is a
   supported choice. When set, the cap is **per Claude session**: it covers
-  total provider spend attributable to that session — machines it started
-  plus, from the moment of attach, machines it adopted — including storage
-  that keeps billing on a stopped machine until someone terminates it
-  (status() shows that tail). The count is cumulative for the life of the
-  session (it survives restarts, backgrounding, and machine termination;
-  it resets only with a genuinely new session), and concurrent sessions
-  have independent caps — total exposure is cap x live sessions. A machine
-  left behind by an ended session keeps self-enforcing that session's
-  remaining budget until adopted. Frame the cap as a generous upper limit,
-  not a spending target — Claude should always stop or terminate machines
-  that are no longer in use, and the budget is the backstop for when that
-  fails. The money-safety windows (orphan halt, provision timeouts, budget
+  the estimated spend of machines that session started plus, from the moment
+  of attach, machines it adopted, including storage on a stopped machine
+  (status() shows that tail). Separately managed network volumes and anything
+  else the plugin doesn't track aren't counted. The count is cumulative for
+  the life of the session (it survives restarts, backgrounding, and machine
+  termination; it resets only with a genuinely new session), and concurrent
+  sessions have independent caps. Past the cap, tool calls that add work are
+  refused and the session's running machines get a grace window to save, then
+  stop or terminate themselves; a running machine left behind by an ended
+  session keeps enforcing that session's remaining budget until adopted. The
+  cap is not a hard ceiling on the bill: the grace window can go past it, and
+  a stopped machine keeps billing for storage until someone terminates it,
+  even after its session has ended. Frame the cap as a generous limit, not a
+  spending target — Claude should always stop or terminate machines that are
+  no longer in use, and the budget is the backstop for when that fails. The
+  money-safety windows (orphan halt, provision timeouts, budget
   grace) are also config with sane defaults — mention they exist in the
   template rather than walking through each.
-- **Notebooks** — everything executed on a kernel is saved as an `.ipynb`
-  file under `remote-kernels/` at the project root (one notebook per kernel;
-  configurable via `notebook-dir`). Decide with the user whether to commit
-  these or gitignore the directory.
+- **Notebooks** — code run on a kernel and its collected output are saved as
+  an `.ipynb` file under `remote-kernels/` at the project root (one notebook
+  per kernel; configurable via `notebook-dir`). Decide with the user whether
+  to commit these or gitignore the directory.
 
 ## 5. Data persistence & cleanup
 
@@ -126,10 +130,10 @@ per-runtime `cleanup` key). They must be decided together: `terminate`, the
 default, deletes machine-local data; separately managed network volumes and
 Kubernetes PVCs survive. The plugin does not automatically back up result files.
 
-On supervised RunPod and vast machines with cleanup enabled, disconnect
-cleanup waits for work, runs the matching finalize command, then acts, subject
-to configured idle-wait and budget-grace limits. Vast machines halt themselves;
-a later server completes provider-side termination. Kubernetes pods survive
+RunPod and vast machines clean themselves up after a disconnect: they wait for
+work, run the finalize command, then act, subject to configured idle-wait and
+budget-grace limits. A RunPod machine without SSH can't, and `status()` says so
+when that's the case. Kubernetes pods survive
 disconnects: their finalize command runs on explicit termination, not when a
 pod lifetime limit fires. Data can reach safety along three routes:
 
@@ -145,12 +149,17 @@ pod lifetime limit fires. Data can reach safety along three routes:
   to the project right after they're produced. No machine-side setup, but a
   disconnect between producing and downloading falls through to the
   finalize command below.
-- **Finalize command (the safety net)** — the per-runtime
-  `pre-terminate-command` / `pre-stop-command` run on the machine after
-  work drains and before cleanup acts. Ask directly: "if a machine has to
-  clean itself up while you're away, where should results go?" — and set
-  the command that puts them there. If the command fails, terminate
-  degrades to stop so the data stays collectable. When the finalize command
+- **Finalize command (the fallback)** — the per-runtime
+  `pre-terminate-command` / `pre-stop-command`. Self-cleanup and `finish()`
+  run it once work has drained; an explicit `stop()`/`terminate()` runs it
+  right away without waiting for kernels, and only if it can reach the
+  machine. Self-cleanup uses the command matching `cleanup` even when a
+  `finish()` plan changes the final action, so make that command safe for
+  both. It runs in the login directory, not the workdir, so use absolute
+  paths. Ask directly: "if a machine has to clean itself up while you're
+  away, where should results go?" — and set the command that puts them there.
+  If the command fails, terminate degrades to stop, which keeps persistent
+  storage but not a RunPod pod's container disk. When the finalize command
   reliably syncs everything, in-session downloads of the same artifacts are
   redundant (and doubly transferred) — pick which route owns which data.
 
@@ -160,12 +169,18 @@ may then lose unsynced work.
 With the persistence plan settled, have the user actively choose the
 cleanup mode rather than silently keeping the default:
 
-- `terminate` (default) — machine and remaining data deleted, no residual
-  costs. Safe exactly to the extent the plan above is real.
-- `stop` — machine preserved for a later `attach()`; storage keeps billing
-  until someone terminates it, and on vast a stopped machine may never be
-  resumable (its GPU can be re-rented) — prefer terminate there.
-- `disabled` — nothing automatic; the user owns the lifecycle and the bill.
+- `terminate` (default) — machine and its own disks deleted, a pod's own
+  volume included, and those stop costing anything. Network volumes and PVCs
+  stay, with their data and charges. Safe exactly to the extent the plan above
+  is real.
+- `stop` — machine kept for a later `attach()`. Persistent storage survives
+  and keeps billing until someone terminates it; kernel memory and a RunPod
+  container disk don't survive. A GPU isn't guaranteed on resume, and on vast a
+  stopped machine may never be resumable (its GPU can be re-rented) — prefer
+  terminate there.
+- `disabled` — no self-cleanup; the user owns the lifecycle and the bill. A
+  start that misses its provision timeout is still terminated, and on vast a
+  machine no session ever reached still stops itself.
 
 ## 6. Finish
 

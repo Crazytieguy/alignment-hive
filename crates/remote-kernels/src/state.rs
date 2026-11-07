@@ -1,14 +1,14 @@
 //! In-memory and on-disk state for the MCP server.
 //!
-//! Multiple concurrent machines are supported: each machine has its own state
-//! dir at `.claude/remote-kernels/instances/<id>/` holding its
-//! `state.json` (the durable record), `lifecycle.json`, and pinned
-//! `known_hosts`. SSH private keys live outside the project (see
-//! [`AppState::keys_root`]). Provider spend is derived
-//! from the append-only per-machine ledger in `.claude/remote-kernels/ledger`.
-//! Older on-disk layouts are upgraded at startup (`state/migrate.rs`).
+//! Each machine has one directory at `.claude/remote-kernels/instances/<id>/`
+//! holding `machine.json` (its durable record) and pinned `known_hosts`. SSH
+//! private keys live outside the project (see [`AppState::keys_root`]). Spend
+//! is derived: every record carries a meter, and `spend-history.jsonl` keeps
+//! what machines that no longer exist spent. Older on-disk layouts are
+//! upgraded at startup (`state/migrate.rs`).
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use crate::config::Cleanup;
-use crate::heartbeat::HeartbeatState;
 use crate::jupyter::messages::ExecutionOutput;
 use crate::jupyter::rest::JupyterClient;
 use crate::jupyter::ws::KernelConnection;
@@ -24,17 +23,15 @@ use crate::notebook::Notebook;
 use crate::runtime::AnyConnection;
 
 mod migrate;
-use migrate::{
-    migrate_existing_record_intervals, migrate_legacy_spend, migrate_legacy_state,
-    migrate_pending_transitions,
-};
 
-/// Lifecycle phase of an instance, as recorded durably.
+/// Lifecycle phase of a machine, as recorded durably.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
-    /// Allocated at the provider but not yet ready. Recorded immediately after
-    /// allocation so a crash mid-provision can never orphan a paid machine.
+    /// A create was issued and the provider has not confirmed its outcome:
+    /// there may or may not be a machine. Only a positive fact settles it.
+    Unconfirmed,
+    /// Allocated at the provider but not yet ready.
     Provisioning,
     Running,
     Stopped,
@@ -49,22 +46,40 @@ pub struct KernelRecord {
     pub name: Option<String>,
 }
 
-/// The durable per-instance record (`instances/<machine_id>/state.json`).
-///
-/// Contains everything needed to reconnect to — or terminate — the machine
-/// from a fresh process: provider identity, resolved cleanup policy, and
-/// connection credentials.
+/// One stretch of billing at fixed rates, charged to one budget pool.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeterInterval {
+    pub start_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<u64>,
+    pub compute_rate: f64,
+    pub storage_rate: f64,
+    pub pool: String,
+}
+
+/// What a create asked for, while its outcome is unknown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAttempt {
+    /// Provider-side name the create asked for: the only handle on a machine
+    /// whose id was never learned.
+    pub expected_name: String,
+    pub created_at_epoch: u64,
+    /// The failure the create ended with, once it has ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The durable per-machine record (`instances/<machine_id>/machine.json`):
+/// everything needed to reconnect to, or end, the machine from a fresh process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceRecord {
-    /// Server-generated machine identity. Older name-keyed records omit this;
-    /// their directory name remains the legacy id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub machine_id: Option<String>,
     /// Optional display-only label. It never participates in identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub runtime: String,
-    pub external_id: String,
+    /// `None` only while [`Phase::Unconfirmed`].
+    #[serde(default)]
+    pub external_id: Option<String>,
     pub phase: Phase,
     /// Cleanup policy resolved (and capability-validated) at start time.
     pub cleanup: Cleanup,
@@ -91,30 +106,191 @@ pub struct InstanceRecord {
     /// Kernel/notebook bindings survive MCP server restarts.
     #[serde(default)]
     pub kernels: Vec<KernelRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision_note: Option<String>,
+    /// A queued `finish()` not yet completed; a later attach resumes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_intent: Option<FinishIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_rate_per_hr: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_rate_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_volume_id: Option<String>,
+    /// Present while [`Phase::Unconfirmed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create: Option<CreateAttempt>,
+    #[serde(default)]
+    pub meter: Vec<MeterInterval>,
+    /// Names the old file this machine's earlier spend could not be read from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_unknown: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FinalizePhase {
-    Armed,
-    Finalizing,
-    CompletedStop,
-    /// Only in records from older versions, which resumed a stopped machine to
-    /// read its self-cleanup result. Kept so those records still load.
-    RetrievingOutcome,
-    /// As [`Self::RetrievingOutcome`].
-    RetrievalUnavailable,
+impl InstanceRecord {
+    #[cfg(test)]
+    pub(crate) fn for_test(runtime: &str, external_id: &str, phase: Phase) -> Self {
+        Self {
+            label: None,
+            runtime: runtime.to_string(),
+            external_id: Some(external_id.to_string()),
+            phase,
+            cleanup: Cleanup::Terminate,
+            jupyter_token: Some("test-token".to_string()),
+            ssh_key_path: Some("/tmp/test-key".to_string()),
+            gpu_name: Some("Test GPU".to_string()),
+            cost_per_hr: 0.0,
+            proxy_port_mapped: false,
+            remote_dirs: None,
+            kernels: Vec::new(),
+            supervision_note: None,
+            finish_intent: None,
+            storage_rate_per_hr: None,
+            storage_rate_note: None,
+            external_volume_id: None,
+            create: None,
+            meter: Vec::new(),
+            spend_unknown: None,
+        }
+    }
+
+    /// What is known about a machine before the provider has been asked for
+    /// it. Its meter is open at nothing, so it already says whose it is.
+    pub fn unconfirmed(
+        runtime: String,
+        cleanup: Cleanup,
+        credentials: (String, String),
+        create: CreateAttempt,
+        pool: String,
+    ) -> Self {
+        Self {
+            label: None,
+            runtime,
+            external_id: None,
+            phase: Phase::Unconfirmed,
+            cleanup,
+            jupyter_token: Some(credentials.0),
+            ssh_key_path: Some(credentials.1),
+            gpu_name: None,
+            cost_per_hr: 0.0,
+            proxy_port_mapped: false,
+            remote_dirs: None,
+            kernels: Vec::new(),
+            supervision_note: None,
+            finish_intent: None,
+            storage_rate_per_hr: None,
+            storage_rate_note: None,
+            external_volume_id: None,
+            meter: vec![MeterInterval {
+                start_ms: create.created_at_epoch.saturating_mul(1_000),
+                end_ms: None,
+                compute_rate: 0.0,
+                storage_rate: 0.0,
+                pool,
+            }],
+            create: Some(create),
+            spend_unknown: None,
+        }
+    }
+
+    /// The provider's id for this machine; empty while unconfirmed.
+    pub fn provider_id(&self) -> &str {
+        self.external_id.as_deref().unwrap_or_default()
+    }
+
+    /// External volumes bill the user directly and are not budget-tracked.
+    pub fn storage_rate(&self) -> f64 {
+        if self.external_volume_id.is_some() {
+            0.0
+        } else {
+            self.storage_rate_per_hr.unwrap_or(0.0).max(0.0)
+        }
+    }
+
+    /// The budget pool this machine's spend currently goes to.
+    pub fn pool(&self) -> Option<&str> {
+        self.meter.last().map(|interval| interval.pool.as_str())
+    }
+
+    fn switch_meter(&mut self, now_ms: u64, compute_rate: f64, storage_rate: f64, pool: String) {
+        if let Some(open) = self.meter.last_mut().filter(|last| last.end_ms.is_none()) {
+            if (open.compute_rate - compute_rate).abs() < f64::EPSILON
+                && (open.storage_rate - storage_rate).abs() < f64::EPSILON
+                && open.pool == pool
+            {
+                return;
+            }
+            open.end_ms = Some(now_ms.max(open.start_ms));
+        }
+        self.meter.push(MeterInterval {
+            start_ms: now_ms,
+            end_ms: None,
+            compute_rate,
+            storage_rate,
+            pool,
+        });
+    }
+
+    /// Bill at the running rate, disks included, in `pool` or the pool it was
+    /// already in.
+    pub fn meter_billing(&mut self, now_ms: u64, pool: Option<&str>) {
+        let pool = pool.or(self.pool()).unwrap_or_default().to_string();
+        self.switch_meter(now_ms, self.cost_per_hr.max(0.0), 0.0, pool);
+    }
+
+    /// The create this record was waiting on did make a machine, which has
+    /// billed since then: the interval it opened at nothing becomes the real one.
+    pub fn meter_from_create(&mut self) {
+        let started = self.meter.pop();
+        self.meter_billing(
+            started.as_ref().map_or_else(now_ms, |open| open.start_ms),
+            started.as_ref().map(|open| open.pool.as_str()),
+        );
+    }
+
+    /// Bill for storage only: the machine is stopped.
+    pub fn meter_stopped(&mut self, now_ms: u64) {
+        let pool = self.pool().unwrap_or_default().to_string();
+        let storage = self.storage_rate();
+        self.switch_meter(now_ms, 0.0, storage, pool);
+    }
+
+    /// Same rates, charged to `pool` from now on.
+    pub fn meter_adopt(&mut self, now_ms: u64, pool: &str) {
+        if let Some(open) = self.meter.last().filter(|last| last.end_ms.is_none()) {
+            let (compute, storage) = (open.compute_rate, open.storage_rate);
+            self.switch_meter(now_ms, compute, storage, pool.to_string());
+        }
+    }
+
+    fn spend_by_pool(&self, now_ms: u64) -> BTreeMap<String, f64> {
+        let mut totals = BTreeMap::new();
+        for interval in &self.meter {
+            let end = interval.end_ms.unwrap_or(now_ms).max(interval.start_ms);
+            #[allow(clippy::cast_precision_loss)] // millisecond spans are far below f64's range
+            let hours = (end - interval.start_ms) as f64 / 3_600_000.0;
+            *totals.entry(interval.pool.clone()).or_insert(0.0) +=
+                hours * (interval.compute_rate + interval.storage_rate);
+        }
+        totals
+    }
+
+    fn open_rate(&self) -> f64 {
+        self.meter
+            .last()
+            .filter(|last| last.end_ms.is_none())
+            .map_or(0.0, |open| open.compute_rate + open.storage_rate)
+    }
 }
 
 /// A queued `finish()` request: what to download and what to do afterwards.
-/// Persisted locally (this record) and as a machine-visible marker so the
-/// machine-side finalizer can honor it if no server is alive at drain time.
+/// Kept in the record and on the machine, so the machine's supervisor can
+/// honor it if no server is alive at drain time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinishIntent {
     /// Token minted per `finish()` call. A drain re-checks it before every
     /// irreversible step, so a superseding `finish()` (new token) makes stale
     /// workers abort instead of acting on a replaced plan.
-    #[serde(default)]
     pub uuid: String,
     /// Remote paths (relative to the machine workdir) still to download.
     #[serde(default)]
@@ -140,97 +316,23 @@ impl FinishThen {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LifecycleRecord {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supervision_note: Option<String>,
-    /// A queued `finish()` not yet completed; a later attach resumes it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finish_intent: Option<FinishIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_rate_per_hr: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_rate_note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_volume_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finalize_phase: Option<FinalizePhase>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub op_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<Cleanup>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at_epoch: Option<u64>,
-    #[serde(default)]
-    pub outcome_unknown: bool,
-    /// Only records from older versions have this: their outcome marker had
-    /// authorized a terminate that the provider call then left ambiguous.
-    #[serde(default)]
-    pub wants_terminate: bool,
-    /// The finalize was issued for a machine with NO machine-side finalizer
-    /// (unsupervisable) — no outcome marker can ever appear, so ambiguity
-    /// handling may not wait for one.
-    #[serde(default)]
-    pub finalize_unsupervised: bool,
-    /// When `attach()` last found this machine stopped and brought it back,
-    /// until a lease acquire clears it. While set, nothing on the machine has
-    /// taken over since the stop, and the provider may not show the resume yet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume_issued_at_epoch: Option<u64>,
-}
-
-/// A create whose outcome the provider never confirmed
-/// (`instances/<machine_id>/unconfirmed.json`).
-///
-/// Written INSTEAD of an [`InstanceRecord`], because there may be no machine
-/// at all: it carries no ledger event, no phase and no spend, and nothing
-/// that walks instance records sees it. `status()` settles it by asking the
-/// provider whether a machine named `expected_name` exists — one match is
-/// promoted to a real record, several reach the user, none keeps waiting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnconfirmedRecord {
-    pub runtime: String,
-    /// Provider-side name the create asked for — the only handle on a
-    /// machine whose id was never learned.
-    pub expected_name: String,
-    pub created_at_epoch: u64,
-    /// The provider failure the create ended with.
-    pub error: String,
-    /// Minutes after which the machine, if it exists, ends itself with no
-    /// action here. `None`: nothing bounds it.
-    #[serde(default)]
-    pub self_halt_mins: Option<u64>,
-    /// What a promotion needs to turn a found machine into a usable record:
-    /// the credentials the create already handed it. Without them the
-    /// machine could only be terminated, never used.
-    pub cleanup: Cleanup,
-    pub jupyter_token: String,
-    pub ssh_key_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    /// The directories the create was made with (its body embeds them), so a
-    /// later promotion records those rather than re-deriving them from a
-    /// config that may have changed since.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_dirs: Option<crate::runtime::RemoteDirs>,
-    /// When the provider was last asked whether `expected_name` exists.
-    /// Bounds how often a `status()` loop re-probes; zero means never asked.
-    #[serde(default)]
-    pub last_checked_epoch: u64,
-}
-
-/// One line of a legacy `<machine_id>.pending-transitions.jsonl`, which the
-/// startup migration folds into the ledger.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingTransition {
-    pub uuid: String,
-    pub ts: u64,
-    pub action: Cleanup,
-    pub post_action_rate: Option<f64>,
-}
-
 fn default_true() -> bool {
     true
+}
+
+/// How a setup came to be running, kept so a setup cut short by a stop that
+/// then failed can pick up where it left off.
+#[derive(Clone, Copy, Debug)]
+pub enum ConnectMode {
+    Fresh,
+    Attach {
+        force: bool,
+        resumed: bool,
+        /// The startup re-attach, which handles a session's machines one at a
+        /// time and must not let one machine's startup commands hold up the
+        /// next.
+        auto: bool,
+    },
 }
 
 /// Live state for one machine.
@@ -259,107 +361,170 @@ pub struct InstanceState {
     /// [`Self::provisioning`] wherever it comes from a record or a create.
     pub remote_dirs: Option<crate::runtime::RemoteDirs>,
     pub connection: Option<Arc<AnyConnection>>,
-    pub heartbeat: Option<HeartbeatState>,
-    /// Set when a lease refresh proves this process no longer owns the
-    /// machine. Kernel and instance data operations fail closed thereafter.
-    pub fenced: Option<FenceReason>,
-    /// Generation acquired by this server, when lease fencing is available.
-    pub lease_generation: Option<u64>,
-    /// Present when the machine stays usable but cannot be supervised/fenced.
-    pub supervision_note: Option<String>,
+    pub heartbeat: Option<tokio::task::JoinHandle<()>>,
+    /// Another session took this machine over. Kernel and instance data
+    /// operations refuse from then on.
+    pub detached: bool,
+    /// An explicit stop or terminate is in progress, so new executions are
+    /// refused. Everything else, the beat included, carries on until the
+    /// provider has said yes.
+    pub ending: bool,
     /// Pending executions that timed out. Keyed by (`kernel_id`, `cell_number`).
     pub pending_executions: HashMap<(String, u32), oneshot::Receiver<ExecutionOutput>>,
-    /// Completed outputs reconstructed from the machine recorder at attach.
+    /// Cells this server lost sight of, each with its place in
+    /// `pending_executions`. Same keys.
+    pub running_cells: HashMap<(String, u32), RunningCell>,
+    /// Finished outputs a cancelled or detached reply could not deliver.
     pub recovered_executions: HashMap<(String, u32), ExecutionOutput>,
+    /// One `reconnect_closed_kernels` at a time.
+    pub reconnect_flight: Arc<tokio::sync::Mutex<()>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FenceReason {
-    TakenOver,
-    Finalizing,
-    AuthorityUnknown,
+/// A cell that was running when its socket died, or before this server
+/// existed. The machine's recorder says when it ends.
+pub struct RunningCell {
+    pub parent_msg_id: String,
+    pub result_tx: oneshot::Sender<ExecutionOutput>,
 }
 
 impl InstanceState {
-    /// Fresh instance in the Provisioning phase (empty kernel state).
-    /// The single construction point for both new machines and reconnects.
-    #[allow(clippy::too_many_arguments)]
-    pub fn provisioning(
-        machine_id: String,
-        label: Option<String>,
-        runtime: String,
-        external_id: String,
-        gpu_name: String,
-        cost_per_hr: f64,
-        cleanup: Cleanup,
-        jupyter_token: String,
-        ssh_key_path: PathBuf,
-        proxy_port_mapped: bool,
-    ) -> Self {
+    /// A machine being connected to, new or not: Provisioning, nothing live.
+    pub fn from_record(machine_id: &str, record: &InstanceRecord) -> Self {
+        let jupyter_token = record.jupyter_token.clone().unwrap_or_default();
         Self {
-            machine_id,
-            label,
-            runtime,
-            external_id,
+            machine_id: machine_id.to_string(),
+            label: record.label.clone(),
+            runtime: record.runtime.clone(),
+            external_id: record.provider_id().to_string(),
             phase: Phase::Provisioning,
-            gpu_name,
-            cost_per_hr,
+            gpu_name: record
+                .gpu_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            cost_per_hr: record.cost_per_hr,
             started_at: std::time::Instant::now(),
-            cleanup,
+            cleanup: record.cleanup,
             // Placeholder until the runtime's connection provides the real
             // endpoint; all tool paths gate on phase == Running first.
             jupyter: JupyterClient::new("http://pending.invalid", &jupyter_token),
             jupyter_token,
             jupyter_session_id: uuid::Uuid::new_v4().to_string(),
             kernel_ids: Vec::new(),
-            kernels: Vec::new(),
+            kernels: record.kernels.clone(),
             kernel_connections: HashMap::new(),
             notebooks: HashMap::new(),
-            ssh_key_path,
-            proxy_port_mapped,
-            remote_dirs: None,
+            ssh_key_path: PathBuf::from(record.ssh_key_path.clone().unwrap_or_default()),
+            proxy_port_mapped: record.proxy_port_mapped,
+            remote_dirs: record.remote_dirs.clone(),
             connection: None,
             heartbeat: None,
-            fenced: None,
-            lease_generation: None,
-            supervision_note: Some("supervision setup is pending".to_string()),
+            detached: false,
+            ending: false,
             pending_executions: HashMap::new(),
+            running_cells: HashMap::new(),
             recovered_executions: HashMap::new(),
+            reconnect_flight: Arc::default(),
         }
     }
 
-    pub fn record(&self) -> InstanceRecord {
-        InstanceRecord {
-            machine_id: Some(self.machine_id.clone()),
-            label: self.label.clone(),
-            runtime: self.runtime.clone(),
-            external_id: self.external_id.clone(),
-            phase: self.phase,
-            cleanup: self.cleanup,
-            jupyter_token: Some(self.jupyter_token.clone()),
-            ssh_key_path: Some(self.ssh_key_path.display().to_string()),
-            gpu_name: Some(self.gpu_name.clone()),
-            cost_per_hr: self.cost_per_hr,
-            proxy_port_mapped: self.proxy_port_mapped,
-            remote_dirs: self.remote_dirs.clone(),
-            kernels: self.kernels.clone(),
+    /// This machine's kernels with no working socket.
+    pub fn closed_kernels(&self) -> Vec<String> {
+        self.kernel_ids
+            .iter()
+            .filter(|id| {
+                self.kernel_connections
+                    .get(*id)
+                    .is_none_or(KernelConnection::is_closed)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Take a closed kernel's new socket, if it got one. With no socket running
+    /// them, every cell its notebook still waits on is now the recorder's to
+    /// report.
+    pub fn reconnected(&mut self, kernel_id: &str, socket: Option<KernelConnection>) {
+        if let Some(socket) = socket {
+            self.kernel_connections
+                .insert(kernel_id.to_string(), socket);
         }
+        let unfinished = self
+            .notebooks
+            .get(kernel_id)
+            .map(Notebook::unfinished_cells)
+            .unwrap_or_default();
+        for (cell_number, parent_msg_id) in unfinished {
+            let key = (kernel_id.to_string(), cell_number);
+            if self.running_cells.contains_key(&key) {
+                continue;
+            }
+            // One that never left the old socket already has its answer.
+            if let Some(mut result_rx) = self.pending_executions.remove(&key) {
+                let answered = match result_rx.try_recv() {
+                    Ok(output) => {
+                        let (result_tx, answered_rx) = oneshot::channel();
+                        let _ = result_tx.send(output);
+                        Some(answered_rx)
+                    }
+                    Err(oneshot::error::TryRecvError::Empty) => Some(result_rx),
+                    Err(oneshot::error::TryRecvError::Closed) => None,
+                };
+                if let Some(answered) = answered {
+                    self.pending_executions.insert(key, answered);
+                    continue;
+                }
+            }
+            let (result_tx, result_rx) = oneshot::channel();
+            self.pending_executions.insert(key.clone(), result_rx);
+            self.running_cells.insert(
+                key,
+                RunningCell {
+                    parent_msg_id,
+                    result_tx,
+                },
+            );
+        }
+    }
+
+    /// Forget everything about one kernel's running work.
+    pub fn forget_executions(&mut self, kernel_id: &str) {
+        self.pending_executions
+            .retain(|(kernel, _), _| kernel != kernel_id);
+        self.running_cells
+            .retain(|(kernel, _), _| kernel != kernel_id);
+        self.recovered_executions
+            .retain(|(kernel, _), _| kernel != kernel_id);
+    }
+
+    /// Copy what the live instance owns onto its durable record.
+    pub fn write_to(&self, record: &mut InstanceRecord) {
+        record.phase = self.phase;
+        record.gpu_name = Some(self.gpu_name.clone());
+        record.cost_per_hr = self.cost_per_hr;
+        record.kernels.clone_from(&self.kernels);
     }
 
     pub fn stop_heartbeat(&mut self) {
-        if let Some(hb) = self.heartbeat.take() {
-            hb.stop();
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
         }
     }
 
-    /// Fence this server's generation and release every notebook/websocket
-    /// writer that could otherwise complete after a successor has rebound.
-    pub fn fence(&mut self, reason: FenceReason) {
-        self.fenced = Some(reason);
-        self.lease_generation = None;
+    /// Mark the machine as driven by another session and stop beating.
+    pub fn detach(&mut self) {
+        self.stop_heartbeat();
+        self.drop_writers();
+    }
+
+    /// Mark it as driven by another session and release every notebook and
+    /// websocket writer that could otherwise complete after that session has
+    /// rebound them.
+    pub fn drop_writers(&mut self) {
+        self.detached = true;
         self.kernel_connections.clear();
         self.notebooks.clear();
         self.pending_executions.clear();
+        self.running_cells.clear();
     }
 }
 
@@ -373,15 +538,19 @@ pub struct AppState {
     /// [`default_keys_root`]); overridable only for tests.
     pub keys_root: PathBuf,
     pub instances: BTreeMap<String, InstanceState>,
-    /// Budget/ownership scope: the Claude session driving this server
-    /// (`CLAUDE_CODE_SESSION_ID`, stable across resume and relaunch), or a
-    /// process-unique fallback that degrades scoping to per-process.
+    /// The Claude session driving this server (`CLAUDE_CODE_SESSION_ID`, stable
+    /// across resume and relaunch), or a process-unique fallback.
     pub session_owner: String,
     /// Machine ids currently being reattached automatically at startup —
     /// unknown-kernel/instance errors soften to "reconnecting, retry shortly"
     /// while an id is in flight.
     pub reattaching: std::collections::HashSet<String>,
-    accounting_init_error: Option<String>,
+    /// Those of them whose setup went on in the background.
+    pub reattaching_in_background: std::collections::HashSet<String>,
+    /// Machine ids whose provider create is running in this process.
+    pub creating: std::collections::HashSet<String>,
+    /// Old files whose spend could not be imported.
+    migration_problems: Vec<String>,
 }
 
 /// The Claude session id this process serves, resolved once per call:
@@ -394,20 +563,99 @@ pub fn resolve_session_owner() -> String {
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
-/// This session's spend picture: the durable rollups plus live-ledger
-/// attribution, with the unattributed remainder kept visible.
+/// This session's spend picture.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionSpend {
-    /// Cumulative spend attributed to this session (rollups + live ledgers).
+    /// Everything charged to this session's pool.
     pub spent: f64,
-    /// Aggregate hourly burn of the machines this session currently owns.
+    /// Aggregate hourly burn of the machines charged to this pool.
     pub hourly_rate: f64,
-    /// Spend owned by other sessions or by no session ([`crate::ledger::LEGACY_OWNER`]).
+    /// Spend charged to other pools.
     pub other_spend: f64,
+    /// Files whose spend could not be read, each with why. Their spend is unknown.
+    pub unreadable: Vec<String>,
+}
+
+pub fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 pub fn state_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".claude/remote-kernels")
+}
+
+fn history_path(project_dir: &Path) -> PathBuf {
+    state_dir(project_dir).join("spend-history.jsonl")
+}
+
+/// One line of `spend-history.jsonl`: what a machine that no longer exists
+/// spent in one pool. The last line per machine and pool wins, so writing it
+/// twice after a crash is harmless.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SpendHistoryEntry {
+    machine_id: String,
+    pool: String,
+    spent: f64,
+}
+
+/// Append entries in one write, durably. A crash can tear only the last line,
+/// which [`read_spend_history`] skips.
+fn append_spend_history(project_dir: &Path, entries: &[SpendHistoryEntry]) -> anyhow::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut lines = String::new();
+    for entry in entries {
+        lines.push_str(&serde_json::to_string(entry)?);
+        lines.push('\n');
+    }
+    let path = history_path(project_dir);
+    std::fs::create_dir_all(state_dir(project_dir))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    // A line torn by an earlier crash must not swallow this one.
+    if file.metadata()?.len() > 0 {
+        lines.insert(0, '\n');
+    }
+    file.write_all(lines.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// `(machine, pool) -> spent`, plus a problem if a line cannot be parsed. A
+/// line cut short by a crash is skipped, wherever later appends left it.
+fn read_spend_history(project_dir: &Path) -> (BTreeMap<(String, String), f64>, Option<String>) {
+    let path = history_path(project_dir);
+    let mut entries = BTreeMap::new();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (entries, None);
+        }
+        Err(error) => return (entries, Some(format!("{}: {error}", path.display()))),
+    };
+    let lines: Vec<&str> = content.lines().filter(|line| !line.is_empty()).collect();
+    let mut problem = None;
+    for (index, line) in lines.iter().enumerate() {
+        match serde_json::from_str::<SpendHistoryEntry>(line) {
+            Ok(entry) => {
+                entries.insert((entry.machine_id, entry.pool), entry.spent);
+            }
+            Err(_) if index + 1 == lines.len() || !line.ends_with('}') => {}
+            Err(error) => {
+                problem = Some(format!("{} line {}: {error}", path.display(), index + 1));
+            }
+        }
+    }
+    (entries, problem)
 }
 
 /// Default per-project root for generated SSH private keys:
@@ -473,61 +721,6 @@ fn instance_dir(project_dir: &Path, machine_id: &str) -> PathBuf {
     state_dir(project_dir).join("instances").join(machine_id)
 }
 
-/// Operation locks live outside instance directories so deleting a record
-/// cannot unlink the lock while another process still holds it.
-pub fn operation_lock_path(project_dir: &Path, machine_id: &str) -> PathBuf {
-    state_dir(project_dir)
-        .join("ledger")
-        .join(format!("{machine_id}.oplock"))
-}
-
-/// Acquire the cross-process machine-operation lock. The open file is the
-/// guard; rustix `flock` auto-releases it on process death.
-pub async fn acquire_operation_lock(
-    project_dir: &Path,
-    machine_id: &str,
-) -> anyhow::Result<std::fs::File> {
-    let path = operation_lock_path(project_dir, machine_id);
-    tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
-        Ok(file)
-    })
-    .await?
-}
-
-/// Non-blocking variant: the same flock, but an already-held lock returns
-/// `None` instead of waiting. Used wherever waiting is the wrong answer —
-/// startup key migration, and `status()`, which must report and move on
-/// rather than hang behind another session's long-running operation.
-pub fn try_operation_lock(project_dir: &Path, machine_id: &str) -> Option<std::fs::File> {
-    let path = operation_lock_path(project_dir, machine_id);
-    std::fs::create_dir_all(path.parent()?).ok()?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path)
-        .ok()?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).ok()?;
-    Some(file)
-}
-
-/// New ids are canonical 26-character Crockford-base32 ULIDs. Every other
-/// safe directory key is a legacy id and remains addressable for migration.
-pub fn is_legacy_machine_id(machine_id: &str) -> bool {
-    !crate::ulid::is_valid(machine_id)
-}
-
 fn ensure_gitignore(project_dir: &Path) {
     let gitignore = state_dir(project_dir).join(".gitignore");
     if !gitignore.exists() {
@@ -535,9 +728,7 @@ fn ensure_gitignore(project_dir: &Path) {
     }
 }
 
-/// Validate an id as one filesystem path component. Legacy records predate
-/// ULIDs, so attachment accepts any existing component rather than applying
-/// the old provider-label alphabet.
+/// Validate an id as one filesystem path component.
 pub fn validate_machine_id(machine_id: &str) -> Result<(), String> {
     let mut components = Path::new(machine_id).components();
     match (components.next(), components.next()) {
@@ -551,7 +742,7 @@ pub fn validate_machine_id(machine_id: &str) -> Result<(), String> {
 }
 
 impl AppState {
-    /// Create project state and roll forward any interrupted epoch/migration.
+    /// Create project state, upgrading any older on-disk layout.
     pub fn new(project_dir: PathBuf) -> Self {
         let keys_root = default_keys_root(&project_dir);
         Self::new_with_keys_root(project_dir, keys_root)
@@ -562,312 +753,155 @@ impl AppState {
     pub fn new_with_keys_root(project_dir: PathBuf, keys_root: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(state_dir(&project_dir));
         ensure_gitignore(&project_dir);
-        migrate_legacy_state(&project_dir);
-        let accounting_init_error = migrate_legacy_spend(&project_dir)
-            .and_then(|()| migrate_pending_transitions(&project_dir))
-            .and_then(|()| migrate_existing_record_intervals(&project_dir))
-            .err()
-            .map(|error| error.to_string());
-
+        let migration_problems = migrate::run(&project_dir);
         let state = Self {
             project_dir,
             keys_root,
             instances: BTreeMap::new(),
             session_owner: resolve_session_owner(),
             reattaching: std::collections::HashSet::new(),
-            accounting_init_error,
+            reattaching_in_background: std::collections::HashSet::new(),
+            creating: std::collections::HashSet::new(),
+            migration_problems,
         };
-        // After the legacy layout migration (it may have just moved a key
-        // into instances/main) and before any caller can reattach: records
-        // must stop pointing at in-project keys.
+        // After the machine.json migration and before any caller can reattach:
+        // records must stop pointing at in-project keys.
         state.migrate_key_locations();
         state
     }
 
-    pub fn spend_summary(&self) -> Result<crate::ledger::SpendSummary, String> {
-        if let Some(error) = &self.accounting_init_error {
-            return Err(error.clone());
-        }
-        crate::ledger::fold(&self.project_dir, crate::ledger::now_ms())
-            .map_err(|error| error.to_string())
+    /// The budget pool this session's new spend goes to. Nothing else in the
+    /// lifecycle or the machine scripts knows sessions are what pools mean.
+    pub fn pool(&self) -> String {
+        format!("session:{}", self.session_owner)
     }
 
-    /// Spend and burn rate attributed to THIS session: durable per-owner
-    /// rollups (epochs already garbage-collected) plus live-ledger
-    /// attribution. Fails closed on any accounting corruption.
-    pub fn session_spend(&self) -> Result<SessionSpend, String> {
-        if let Some(error) = &self.accounting_init_error {
-            return Err(error.clone());
-        }
-        let guard = crate::ledger::EpochGuard::acquire(&self.project_dir)
-            .map_err(|error| error.to_string())?;
-        let summary = guard
-            .fold(crate::ledger::now_ms())
-            .map_err(|error| error.to_string())?;
-        let rollups = guard.owner_rollups().map_err(|error| error.to_string())?;
-        let mine = rollups
-            .owners
-            .get(&self.session_owner)
-            .copied()
-            .unwrap_or(0.0)
-            + summary
-                .owner_totals
-                .get(&self.session_owner)
-                .copied()
-                .unwrap_or(0.0);
-        let all_time: f64 = rollups.owners.values().sum::<f64>() + summary.total;
-        let hourly_rate = summary
-            .machine_rates
-            .iter()
-            .filter(|(machine_id, _)| {
-                summary.machine_owners.get(*machine_id) == Some(&self.session_owner)
-            })
-            .map(|(_, rate)| rate)
-            .sum();
-        Ok(SessionSpend {
-            spent: mine,
-            hourly_rate,
-            other_spend: (all_time - mine).max(0.0),
-        })
+    /// Everything spent so far, as this session sees it: every record's meter
+    /// plus the history of machines that no longer exist. Never fails: what
+    /// cannot be read is named in `unreadable`.
+    pub fn session_spend(&self) -> SessionSpend {
+        let (records, unreadable) = scan_records(&self.project_dir);
+        self.spend_of(&records, &unreadable)
     }
 
-    /// Current ledger owner of one machine (`None`: no current-epoch events).
-    pub fn machine_ledger_owner(&self, machine_id: &str) -> Result<Option<String>, String> {
-        if let Some(error) = &self.accounting_init_error {
-            return Err(error.clone());
-        }
-        crate::ledger::EpochGuard::acquire(&self.project_dir)
-            .and_then(|guard| guard.machine_owner(machine_id))
-            .map_err(|error| error.to_string())
-    }
-
-    /// Append an `owner-changed` event moving the machine's spend to this
-    /// session — the adoption commit after a lease acquire proves authority.
-    pub fn append_owner_change(&self, machine_id: &str) -> anyhow::Result<bool> {
-        self.append_ledger_event(
-            machine_id,
-            crate::ledger::EventKind::OwnerChanged,
-            None,
-            None,
-            None,
-            Some("adopted by lease acquire".to_string()),
-        )
-    }
-
-    /// Total epoch spend. A corrupt ledger returns the conservative valid
-    /// prefix with its last rate kept open; admission paths use
-    /// [`Self::spend_summary`] to surface and block on the corruption.
-    pub fn total_spend(&self) -> f64 {
-        if self.accounting_init_error.is_some() {
-            return f64::INFINITY;
-        }
-        match crate::ledger::fold(&self.project_dir, crate::ledger::now_ms()) {
-            Ok(summary) => summary.total,
-            Err(crate::ledger::LedgerError::CorruptFold {
-                conservative_total, ..
-            }) => conservative_total,
-            Err(_) => f64::INFINITY,
-        }
-    }
-
-    /// Aggregate hourly burn rate across billing (provisioning or running)
-    /// metered instances.
-    pub fn aggregate_cost_per_hr(&self) -> f64 {
-        if self.accounting_init_error.is_some() {
-            return f64::INFINITY;
-        }
-        match crate::ledger::fold(&self.project_dir, crate::ledger::now_ms()) {
-            Ok(summary) => summary.hourly_rate,
-            Err(crate::ledger::LedgerError::CorruptFold {
-                conservative_rate, ..
-            }) => conservative_rate,
-            Err(_) => f64::INFINITY,
-        }
-    }
-
-    pub fn append_ledger_event(
+    /// [`Self::session_spend`] from records already read.
+    pub fn spend_of(
         &self,
-        machine_id: &str,
-        kind: crate::ledger::EventKind,
-        uuid: Option<String>,
-        ts_ms: Option<u64>,
-        post_action_rate: Option<f64>,
-        note: Option<String>,
-    ) -> anyhow::Result<bool> {
-        if let Some(error) = &self.accounting_init_error {
-            anyhow::bail!("accounting failed closed: {error}");
-        }
-        validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
-        let record = load_instance_record(&self.project_dir, machine_id);
-        let lifecycle = load_lifecycle_record(&self.project_dir, machine_id);
-        let storage = if lifecycle.external_volume_id.is_some() {
-            0.0
-        } else {
-            lifecycle.storage_rate_per_hr.unwrap_or(0.0).max(0.0)
+        records: &[(String, InstanceRecord)],
+        unreadable: &[(String, String)],
+    ) -> SessionSpend {
+        let now = now_ms();
+        let pool = self.pool();
+        let mut spend = SessionSpend {
+            unreadable: self.migration_problems.clone(),
+            ..SessionSpend::default()
         };
-        let total = self
-            .instances
-            .get(machine_id)
-            .map(|instance| instance.cost_per_hr)
-            .or_else(|| record.as_ref().map(|record| record.cost_per_hr))
-            .unwrap_or(0.0)
-            .max(0.0);
-        let (compute, storage) = match kind {
-            crate::ledger::EventKind::Provisioned | crate::ledger::EventKind::Resumed => {
-                (total, storage)
-            }
-            crate::ledger::EventKind::Stopped => (0.0, post_action_rate.unwrap_or(storage)),
-            crate::ledger::EventKind::RateChanged => post_action_rate
-                .map_or((total, storage), |post_action_rate| (0.0, post_action_rate)),
-            // Ownership never alters rates; the fold ignores these fields.
-            crate::ledger::EventKind::Terminated | crate::ledger::EventKind::OwnerChanged => {
-                (0.0, 0.0)
+        let add = |entry_pool: &str, amount: f64, spend: &mut SessionSpend| {
+            if entry_pool == pool {
+                spend.spent += amount;
+            } else {
+                spend.other_spend += amount;
             }
         };
-        let generation = self
-            .instances
-            .get(machine_id)
-            .and_then(|instance| instance.lease_generation)
-            .unwrap_or(0);
-        let stable_remote_uuid = uuid.clone();
-        let mut event = crate::ledger::event(kind, compute, storage, generation, uuid, note);
-        if matches!(
-            kind,
-            crate::ledger::EventKind::Provisioned
-                | crate::ledger::EventKind::Resumed
-                | crate::ledger::EventKind::OwnerChanged
-        ) {
-            event.owner = Some(self.session_owner.clone());
+        for (_, record) in records {
+            for (entry_pool, amount) in record.spend_by_pool(now) {
+                add(&entry_pool, amount, &mut spend);
+            }
+            if record.pool() == Some(pool.as_str()) {
+                spend.hourly_rate += record.open_rate();
+            }
+            if let Some(file) = &record.spend_unknown {
+                spend.unreadable.push(file.clone());
+            }
         }
-        if let Some(ts_ms) = ts_ms {
-            event.ts_ms = ts_ms;
+        spend
+            .unreadable
+            .extend(unreadable.iter().map(|(_, problem)| problem.clone()));
+        let (history, problem) = read_spend_history(&self.project_dir);
+        spend.unreadable.extend(problem);
+        for ((machine_id, entry_pool), amount) in history {
+            // A record still here means its ending was interrupted: its meter
+            // already counts all of this.
+            if !records.iter().any(|(id, _)| *id == machine_id) {
+                add(&entry_pool, amount, &mut spend);
+            }
         }
-        // One in-flight WAL slot per transition kind. A retry after process
-        // death discovers and reuses that slot's UUID; after a confirmed
-        // append the slot is removed, so a later legitimate transition gets
-        // a fresh UUID.
-        let operation = stable_remote_uuid
-            .map_or_else(|| format!("{kind:?}"), |uuid| format!("{kind:?}-{uuid}"));
-        Ok(crate::ledger::EpochGuard::acquire(&self.project_dir)?
-            .append(machine_id, &operation, event)?)
+        spend
     }
 
-    /// Persist the first durable record and its billing interval under the
-    /// epoch lock so an epoch close cannot land between them.
-    pub fn admit_provision(
-        &self,
-        machine_id: &str,
-        record: &InstanceRecord,
-        lifecycle: &LifecycleRecord,
-    ) -> anyhow::Result<()> {
-        self.admit(machine_id, record, lifecycle, false).map(|_| ())
+    /// The live instance of this machine, if it is still this one.
+    pub fn live_mut(&mut self, machine_id: &str, external_id: &str) -> Option<&mut InstanceState> {
+        self.instances
+            .get_mut(machine_id)
+            .filter(|instance| instance.external_id == external_id)
     }
 
-    /// [`Self::admit_provision`] for a machine the caller DISCOVERED rather
-    /// than created — a create the provider never confirmed, found later by
-    /// name. Returns `Ok(false)` when a durable record is already there:
-    /// something admitted it first, and a second admission would write a
-    /// second `Provisioned` event and double the machine's recorded spend.
-    ///
-    /// The check lives here, under the epoch lock and immediately before the
-    /// write, because a caller cannot hold one across the provider
-    /// round-trips it takes to get this far — by the time it arrives, its
-    /// own pre-check is stale.
-    pub fn admit_provision_if_absent(
-        &self,
-        machine_id: &str,
-        record: &InstanceRecord,
-        lifecycle: &LifecycleRecord,
-    ) -> anyhow::Result<bool> {
-        self.admit(machine_id, record, lifecycle, true)
-    }
-
-    fn admit(
-        &self,
-        machine_id: &str,
-        record: &InstanceRecord,
-        lifecycle: &LifecycleRecord,
-        only_if_absent: bool,
-    ) -> anyhow::Result<bool> {
-        if let Some(error) = &self.accounting_init_error {
-            anyhow::bail!("accounting failed closed: {error}");
-        }
-        validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
-        let guard = crate::ledger::EpochGuard::acquire(&self.project_dir)?;
-        // Under the lock, before anything is written.
-        if only_if_absent && load_instance_record(&self.project_dir, machine_id).is_some() {
-            return Ok(false);
-        }
-        let storage = if lifecycle.external_volume_id.is_some() {
-            0.0
-        } else {
-            lifecycle.storage_rate_per_hr.unwrap_or(0.0).max(0.0)
-        };
-        let mut event = crate::ledger::event(
-            crate::ledger::EventKind::Provisioned,
-            record.cost_per_hr.max(0.0),
-            storage,
-            0,
-            None,
-            Some(format!(
-                "provider external_id={}; {}",
-                record.external_id,
-                lifecycle
-                    .storage_rate_note
-                    .as_deref()
-                    .unwrap_or("storage pricing recorded")
-            )),
-        );
-        // The initial owner rides ON the provision event, keeping admission
-        // one crash-atomic WAL'd write — never a second recoverable entry.
-        event.owner = Some(self.session_owner.clone());
-        guard.prepare(machine_id, "provisioned", event)?;
-        // The WAL is durable before either half of admission can be lost.
-        // Startup recovers it when the record exists, or fails closed on an
-        // orphan WAL rather than admitting untracked spend.
-        self.save_record(machine_id, record)?;
-        save_lifecycle_record(&self.project_dir, machine_id, lifecycle)?;
-        guard.commit_wal(machine_id, "provisioned")?;
-        Ok(true)
-    }
-
-    /// Write an instance's durable record. Called immediately after provider
-    /// allocation (phase = Provisioning) and on every phase change.
-    pub fn save_record(&self, machine_id: &str, record: &InstanceRecord) -> anyhow::Result<()> {
-        write_json_atomic(&self.project_dir, machine_id, "state", "state.json", record)
-    }
-
-    /// Remove an instance's durable record (after terminate).
-    pub fn clear_record(&self, machine_id: &str) -> anyhow::Result<()> {
-        let epoch = crate::ledger::EpochGuard::acquire(&self.project_dir)?;
-        // The key may live outside the instance dir (keys_root). Delete it
-        // only when the record's persisted path is this machine's managed
-        // per-instance location — never the stable key, never an external or
-        // hand-edited path, never another machine's dir.
-        if let Some(record) = load_instance_record(&self.project_dir, machine_id)
-            && let Some(key_path) = record.ssh_key_path.map(PathBuf::from)
+    /// Let go of the live instance of this machine, if it is still this one.
+    pub fn remove_live(&mut self, machine_id: &str, external_id: &str) {
+        if self.live_mut(machine_id, external_id).is_some()
+            && let Some(mut instance) = self.instances.remove(machine_id)
         {
-            let managed_dir = self.keys_root.join("instances").join(machine_id);
-            if key_path.starts_with(&managed_dir) {
-                let _ = std::fs::remove_dir_all(&managed_dir);
+            instance.stop_heartbeat();
+        }
+    }
+
+    /// Persist what the live instance owns onto its durable record.
+    pub fn save_live(&self, machine_id: &str) -> anyhow::Result<()> {
+        let Some(instance) = self.instances.get(machine_id) else {
+            return Ok(());
+        };
+        with_record(&self.project_dir, machine_id, |record| {
+            if record.external_id.as_deref() == Some(instance.external_id.as_str()) {
+                instance.write_to(record);
             }
-        }
-        remove_instance_dir(&self.project_dir, machine_id)?;
-        if !epoch.has_instance_records()? {
-            epoch.close_epoch(crate::ledger::now_ms())?;
-        }
+        })?;
         Ok(())
     }
 
-    /// Drop an unconfirmed create entirely: the marker, the instance
-    /// directory it lives in, and the key material minted for a machine that
-    /// was never confirmed. No ledger involvement — a marker never admitted
-    /// any spend, so there is no interval to close.
-    pub fn clear_unconfirmed(&self, machine_id: &str) -> anyhow::Result<()> {
+    /// A machine is gone for good: move its spend to the history, then delete
+    /// its whole directory, so nothing can bring its record back, and its
+    /// managed key. An interrupted run leaves the record, and the next
+    /// reconcile does this again.
+    pub fn end_machine(&self, machine_id: &str) -> anyhow::Result<()> {
         validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
-        let managed_dir = self.keys_root.join("instances").join(machine_id);
-        let _ = std::fs::remove_dir_all(&managed_dir);
-        remove_instance_dir(&self.project_dir, machine_id)?;
+        let dir = instance_dir(&self.project_dir, machine_id);
+        let Some(_lock) = lock_record(&dir)? else {
+            return Ok(());
+        };
+        match read_record(&dir) {
+            Ok(Some(record)) => {
+                let now = now_ms();
+                let entries = record
+                    .spend_by_pool(now)
+                    .into_iter()
+                    .map(|(pool, spent)| SpendHistoryEntry {
+                        machine_id: machine_id.to_string(),
+                        pool,
+                        spent,
+                    })
+                    .collect::<Vec<_>>();
+                append_spend_history(&self.project_dir, &entries)?;
+                // The key may live outside the instance dir (keys_root). Delete
+                // it only when the record's path is this machine's managed
+                // location: never the stable key, never a hand-edited path.
+                if let Some(key_path) = record.ssh_key_path.map(PathBuf::from) {
+                    let managed_dir = self.keys_root.join("instances").join(machine_id);
+                    if key_path.starts_with(&managed_dir) {
+                        let _ = std::fs::remove_dir_all(&managed_dir);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                target: "remote_kernels::state",
+                instance = machine_id,
+                "ended a machine whose record is unreadable, so its spend is lost: {error}"
+            ),
+        }
+        std::fs::remove_dir_all(&dir)?;
+        if let Some(parent) = dir.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
         Ok(())
     }
 
@@ -919,7 +953,8 @@ impl AppState {
                 Ok(name.to_string())
             } else {
                 Err(format!(
-                    "No instance named {name:?}. Active instances: {}",
+                    "No machine with id {name:?} is attached in this server. Attached: {}. status() \
+                     lists every machine on record; attach() picks one up.",
                     self.instance_names_display()
                 ))
             };
@@ -929,8 +964,8 @@ impl AppState {
             (None, _) => Err("No machine is attached in this server.".to_string()),
             (Some(sole), None) => Ok(sole.clone()),
             (Some(_), Some(_)) => Err(format!(
-                "Multiple instances are active — specify one with the `instance` parameter. \
-                 Active instances: {}",
+                "Several machines are attached — pass the `instance` parameter to pick one. \
+                 Attached: {}",
                 self.instance_names_display()
             )),
         }
@@ -958,303 +993,182 @@ impl AppState {
     }
 }
 
-/// List all persisted instance records for a project.
-/// Delete one machine's state directory and make the deletion durable. The
-/// parent fsync is what stops a crash from resurrecting a record for a
-/// machine that no longer exists.
-fn remove_instance_dir(project_dir: &Path, machine_id: &str) -> anyhow::Result<()> {
-    let dir = instance_dir(project_dir, machine_id);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
-        if let Some(parent) = dir.parent() {
-            std::fs::File::open(parent)?.sync_all()?;
-        }
-    }
+const RECORD_FILE: &str = "machine.json";
+const LOCK_FILE: &str = "machine.lock";
+
+/// The short per-machine lock: it is only ever held across local file work,
+/// never across network I/O. `None` when the machine has no directory.
+fn lock_record(dir: &Path) -> anyhow::Result<Option<std::fs::File>> {
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join(LOCK_FILE))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+    Ok(Some(file))
+}
+
+fn read_record(dir: &Path) -> anyhow::Result<Option<InstanceRecord>> {
+    let path = dir.join(RECORD_FILE);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(anyhow::anyhow!("{}: {error}", path.display())),
+    };
+    let record: InstanceRecord = serde_json::from_str(&content)
+        .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
+    anyhow::ensure!(
+        record.phase != Phase::Unconfirmed || record.create.is_some(),
+        "{}: unconfirmed, with no create to settle it by",
+        path.display()
+    );
+    Ok(Some(record))
+}
+
+/// Write the record durably: a temp file, fsync, rename, then fsync the
+/// directory. A partly written record is a machine this tool has lost.
+fn write_record(dir: &Path, record: &InstanceRecord) -> anyhow::Result<()> {
+    let temporary = dir.join(format!(".machine.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(record)?)?;
+    std::fs::File::open(&temporary)?.sync_all()?;
+    std::fs::rename(temporary, dir.join(RECORD_FILE))?;
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
 
-/// Persist one JSON record durably: write a per-process temp file, fsync it,
-/// rename it over the target, then fsync the directory. Every record under
-/// `instances/<machine_id>/` goes through here — a partially written state
-/// or lifecycle file is a machine this tool can no longer account for.
-fn write_json_atomic<T: Serialize>(
+/// Write a new machine's first record.
+pub fn create_record(
     project_dir: &Path,
     machine_id: &str,
-    tmp_stem: &str,
-    filename: &str,
-    value: &T,
+    record: &InstanceRecord,
 ) -> anyhow::Result<()> {
     validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
     let dir = instance_dir(project_dir, machine_id);
     std::fs::create_dir_all(&dir)?;
     ensure_gitignore(project_dir);
-    let temporary = dir.join(format!(".{tmp_stem}.{}.tmp", std::process::id()));
-    std::fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
-    std::fs::File::open(&temporary)?.sync_all()?;
-    std::fs::rename(temporary, dir.join(filename))?;
-    std::fs::File::open(&dir)?.sync_all()?;
-    Ok(())
+    write_record(&dir, record)
 }
 
-/// Every record of one kind under `instances/`, sorted by machine id.
-/// `load` decides what a directory without that record means.
-fn list_records<T>(
+/// Read-modify-write one record under its short lock. `Ok(None)` when the
+/// record no longer exists. No network I/O may happen inside `mutate`.
+pub fn with_record<T>(
     project_dir: &Path,
-    load: impl Fn(&Path, &str) -> Option<T>,
-) -> Vec<(String, T)> {
-    let instances_dir = state_dir(project_dir).join("instances");
-    let Ok(entries) = std::fs::read_dir(&instances_dir) else {
-        return Vec::new();
+    machine_id: &str,
+    mutate: impl FnOnce(&mut InstanceRecord) -> T,
+) -> anyhow::Result<Option<T>> {
+    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
+    let dir = instance_dir(project_dir, machine_id);
+    let Some(_lock) = lock_record(&dir)? else {
+        return Ok(None);
     };
+    let Some(mut record) = read_record(&dir)? else {
+        return Ok(None);
+    };
+    let result = mutate(&mut record);
+    write_record(&dir, &record)?;
+    Ok(Some(result))
+}
+
+fn instance_ids(project_dir: &Path) -> Vec<String> {
+    let mut ids = std::fs::read_dir(state_dir(project_dir).join("instances"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+/// Every record, sorted by machine id: those that could be read, and the
+/// ids of those that couldn't, each with why.
+pub type RecordScan = (Vec<(String, InstanceRecord)>, Vec<(String, String)>);
+
+pub fn scan_records(project_dir: &Path) -> RecordScan {
     let mut records = Vec::new();
-    for entry in entries.flatten() {
-        let machine_id = entry.file_name().to_string_lossy().to_string();
-        if let Some(record) = load(project_dir, &machine_id) {
-            records.push((machine_id, record));
+    let mut unreadable = Vec::new();
+    for id in instance_ids(project_dir) {
+        match read_record(&instance_dir(project_dir, &id)) {
+            Ok(Some(record)) => records.push((id, record)),
+            Ok(None) => {}
+            Err(error) => unreadable.push((id, error.to_string())),
         }
     }
-    records.sort_by(|a, b| a.0.cmp(&b.0));
-    records
+    (records, unreadable)
 }
 
 pub fn list_instance_records(project_dir: &Path) -> Vec<(String, InstanceRecord)> {
-    list_records(project_dir, load_instance_record)
+    scan_records(project_dir).0
 }
 
 pub fn load_instance_record(project_dir: &Path, machine_id: &str) -> Option<InstanceRecord> {
     validate_machine_id(machine_id).ok()?;
-    let path = instance_dir(project_dir, machine_id).join("state.json");
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-/// Strict variant for decision gates that guard destructive actions: a
-/// MISSING file is a normal default, but a file that exists and cannot be
-/// parsed fails closed — its lost fields (`wants_terminate`,
-/// `finalize_phase`) are exactly the ones that hold destructive actions
-/// back.
-pub fn load_lifecycle_record_checked(
-    project_dir: &Path,
-    machine_id: &str,
-) -> Result<LifecycleRecord, String> {
-    validate_machine_id(machine_id)?;
-    let path = instance_dir(project_dir, machine_id).join("lifecycle.json");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LifecycleRecord::default());
-        }
-        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
-    };
-    serde_json::from_str(&content).map_err(|error| {
-        format!(
-            "{} exists but cannot be parsed ({error}); inspect or restore it — its fields gate destructive actions",
-            path.display()
-        )
-    })
-}
-
-pub fn load_lifecycle_record(project_dir: &Path, machine_id: &str) -> LifecycleRecord {
-    if validate_machine_id(machine_id).is_err() {
-        return LifecycleRecord::default();
-    }
-    let path = instance_dir(project_dir, machine_id).join("lifecycle.json");
-    std::fs::read_to_string(path)
+    read_record(&instance_dir(project_dir, machine_id))
         .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
-}
-
-pub fn save_lifecycle_record(
-    project_dir: &Path,
-    machine_id: &str,
-    lifecycle: &LifecycleRecord,
-) -> anyhow::Result<()> {
-    write_json_atomic(
-        project_dir,
-        machine_id,
-        "lifecycle",
-        "lifecycle.json",
-        lifecycle,
-    )
-}
-
-fn unconfirmed_path(project_dir: &Path, machine_id: &str) -> PathBuf {
-    instance_dir(project_dir, machine_id).join("unconfirmed.json")
-}
-
-/// Persist the marker for a create the provider never confirmed. Same
-/// tmp+rename durability as every other record here: the marker is the only
-/// local trace of a machine that may be billing.
-pub fn save_unconfirmed_record(
-    project_dir: &Path,
-    machine_id: &str,
-    record: &UnconfirmedRecord,
-) -> anyhow::Result<()> {
-    write_json_atomic(
-        project_dir,
-        machine_id,
-        "unconfirmed",
-        "unconfirmed.json",
-        record,
-    )
-}
-
-/// A marker file that is there but cannot be turned into a record. It must
-/// never be silently dropped: it is the only local trace of a machine that
-/// may be billing, so the failure to read it is itself news for the user.
-#[derive(Debug, Clone)]
-pub struct UnreadableMarker {
-    pub path: PathBuf,
-    pub error: String,
-}
-
-/// `None` — no marker at all. `Some(Ok)` — a marker that parsed.
-/// `Some(Err)` — a marker that exists and could not be read.
-pub fn load_unconfirmed_record(
-    project_dir: &Path,
-    machine_id: &str,
-) -> Option<Result<UnconfirmedRecord, UnreadableMarker>> {
-    validate_machine_id(machine_id).ok()?;
-    let path = unconfirmed_path(project_dir, machine_id);
-    let unreadable = |error: String| {
-        Some(Err(UnreadableMarker {
-            path: path.clone(),
-            error,
-        }))
-    };
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => return unreadable(error.to_string()),
-    };
-    match serde_json::from_str(&content) {
-        Ok(record) => Some(Ok(record)),
-        Err(error) => unreadable(error.to_string()),
-    }
-}
-
-/// Every unconfirmed create still waiting to be settled, including the ones
-/// whose marker could not be read.
-pub fn list_unconfirmed_records(
-    project_dir: &Path,
-) -> Vec<(String, Result<UnconfirmedRecord, UnreadableMarker>)> {
-    list_records(project_dir, load_unconfirmed_record)
-}
-
-/// Drop just the marker, keeping whatever else the instance directory holds
-/// — used when the machine turned out to exist and became a real record.
-pub fn clear_unconfirmed_marker(project_dir: &Path, machine_id: &str) -> anyhow::Result<()> {
-    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
-    match std::fs::remove_file(unconfirmed_path(project_dir, machine_id)) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub fn clear_lifecycle_record(project_dir: &Path, machine_id: &str) -> anyhow::Result<()> {
-    validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
-    let path = instance_dir(project_dir, machine_id).join("lifecycle.json");
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
+        .flatten()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn instance(
-        machine_id: &str,
-        cost_per_hr: f64,
-        running_for: std::time::Duration,
-    ) -> InstanceState {
-        InstanceState {
-            machine_id: machine_id.to_string(),
-            label: None,
-            runtime: "runpod".to_string(),
-            external_id: format!("pod-{machine_id}"),
-            phase: Phase::Running,
-            gpu_name: "Test GPU".to_string(),
-            cost_per_hr,
-            started_at: std::time::Instant::now().checked_sub(running_for).unwrap(),
-            cleanup: Cleanup::Terminate,
-            jupyter: JupyterClient::new("http://127.0.0.1:1", "test-token"),
-            jupyter_token: "test-token".to_string(),
-            jupyter_session_id: "test-session".to_string(),
-            kernel_ids: Vec::new(),
-            kernels: Vec::new(),
-            kernel_connections: HashMap::new(),
-            notebooks: HashMap::new(),
-            ssh_key_path: PathBuf::from("/tmp/test-key"),
-            proxy_port_mapped: false,
-            remote_dirs: None,
-            connection: None,
-            heartbeat: None,
-            fenced: None,
-            lease_generation: None,
-            supervision_note: None,
-            pending_executions: HashMap::new(),
-            recovered_executions: HashMap::new(),
-        }
+    fn instance(machine_id: &str) -> InstanceState {
+        InstanceState::from_record(machine_id, &record_of(machine_id, 0.0, "p"))
+    }
+
+    pub(super) fn record_of(machine_id: &str, cost_per_hr: f64, pool: &str) -> InstanceRecord {
+        let mut record =
+            InstanceRecord::for_test("runpod", &format!("pod-{machine_id}"), Phase::Running);
+        record.cost_per_hr = cost_per_hr;
+        record.meter_billing(now_ms() - 3_600_000, Some(pool));
+        record
     }
 
     #[test]
     fn ulid_record_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let mut state = AppState::new(dir.path().to_path_buf());
         let machine_id = crate::ulid::new();
-        let mut inst = instance(&machine_id, 0.5, std::time::Duration::ZERO);
-        inst.label = Some("training".to_string());
-        inst.kernels.push(KernelRecord {
+        let mut record = record_of(&machine_id, 0.5, "session:a");
+        record.label = Some("training".to_string());
+        record.kernels.push(KernelRecord {
             kernel_id: "kernel-1".to_string(),
             notebook_path: "/tmp/kernel-1.ipynb".to_string(),
             name: Some("analysis".to_string()),
         });
-        let record = inst.record();
-        state.instances.insert(machine_id.clone(), inst);
-
-        state.save_record(&machine_id, &record).unwrap();
+        create_record(dir.path(), &machine_id, &record).unwrap();
 
         let loaded = load_instance_record(dir.path(), &machine_id).unwrap();
-        assert_eq!(loaded.external_id, format!("pod-{machine_id}"));
-        assert_eq!(loaded.machine_id.as_deref(), Some(machine_id.as_str()));
+        assert_eq!(loaded.provider_id(), format!("pod-{machine_id}"));
         assert_eq!(loaded.label.as_deref(), Some("training"));
-        assert_eq!(loaded.runtime, "runpod");
         assert_eq!(loaded.phase, Phase::Running);
-        assert_eq!(loaded.cleanup, Cleanup::Terminate);
-        assert_eq!(loaded.jupyter_token.as_deref(), Some("test-token"));
         assert_eq!(loaded.kernels, record.kernels);
+        assert_eq!(loaded.meter, record.meter);
 
         let all = list_instance_records(dir.path());
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].0, machine_id);
-        assert!(!is_legacy_machine_id(&all[0].0));
     }
 
     #[test]
-    fn legacy_name_keyed_record_remains_resolvable() {
+    fn ids_can_be_any_name_but_never_escape() {
         let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(dir.path().to_path_buf());
-        let legacy = instance("old_name", 0.0, std::time::Duration::ZERO).record();
-        state.save_record("old_name", &legacy).unwrap();
-
-        let loaded = load_instance_record(dir.path(), "old_name").unwrap();
-        assert_eq!(loaded.external_id, "pod-old_name");
-        assert!(is_legacy_machine_id("old_name"));
+        create_record(dir.path(), "old_name", &record_of("old_name", 0.0, "p")).unwrap();
+        assert!(load_instance_record(dir.path(), "old_name").is_some());
         assert!(load_instance_record(dir.path(), "../escape").is_none());
+        assert!(create_record(dir.path(), "../escape", &record_of("x", 0.0, "p")).is_err());
     }
 
     #[test]
     fn state_dir_gets_gitignore() {
         let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(dir.path().to_path_buf());
-        let inst = instance("main", 0.0, std::time::Duration::ZERO);
-        state.save_record("main", &inst.record()).unwrap();
-
+        create_record(dir.path(), "main", &record_of("main", 0.0, "p")).unwrap();
         let gitignore = dir.path().join(".claude/remote-kernels/.gitignore");
         assert_eq!(std::fs::read_to_string(gitignore).unwrap(), "*\n");
     }
@@ -1278,132 +1192,206 @@ mod tests {
         assert!(!path.exists(), "reset must drop the pinned host key");
     }
 
+    /// Ending a machine moves its spend to the history and leaves nothing of
+    /// it behind, including the old-format files migration reads.
     #[test]
-    fn clear_record_closes_epoch_but_never_deletes_instance_state_early() {
+    fn ending_a_machine_keeps_its_spend_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        let inst = instance("main", 1.0, std::time::Duration::from_hours(1));
-        let record = inst.record();
-        state.instances.insert("main".to_string(), inst);
-        state
-            .admit_provision("main", &record, &LifecycleRecord::default())
-            .unwrap();
-        assert!(
-            dir.path()
-                .join(".claude/remote-kernels/ledger/main.jsonl")
-                .exists()
-        );
+        state.session_owner = "a".to_string();
+        create_record(dir.path(), "main", &record_of("main", 1.0, "session:a")).unwrap();
+        std::fs::write(instance_dir(dir.path(), "main").join("state.json"), "{}").unwrap();
+        let before = state.session_spend();
+        assert!((before.spent - 1.0).abs() < 0.01, "{before:?}");
+        assert!((before.hourly_rate - 1.0).abs() < f64::EPSILON);
 
-        state.clear_record("main").unwrap();
+        state.end_machine("main").unwrap();
+        assert!(!instance_dir(dir.path(), "main").exists());
+        let after = state.session_spend();
+        assert!((after.spent - 1.0).abs() < 0.01, "{after:?}");
+        assert!(after.hourly_rate.abs() < f64::EPSILON);
+        // Ending twice is fine.
+        state.end_machine("main").unwrap();
+
+        // A new server for the same project and session: nothing resets it.
+        let mut restarted = AppState::new(dir.path().to_path_buf());
+        restarted.session_owner = "a".to_string();
+        assert!((restarted.session_spend().spent - 1.0).abs() < 0.01);
         assert!(load_instance_record(dir.path(), "main").is_none());
-        assert!(
-            !dir.path()
-                .join(".claude/remote-kernels/ledger/main.jsonl")
-                .exists()
-        );
-        // Clearing twice is fine.
-        state.clear_record("main").unwrap();
     }
 
+    /// An interrupted ending leaves both the record and its history lines:
+    /// the machine must not count twice.
     #[test]
-    fn stable_ssh_key_is_outside_instance_dirs_and_survives_clear_record() {
+    fn an_interrupted_ending_does_not_double_count() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        let stable = state.stable_ssh_key_path();
-        assert_ne!(stable, state.ssh_key_path("main"));
-
-        let inst = instance("main", 0.0, std::time::Duration::ZERO);
-        let record = inst.record();
-        state.instances.insert("main".to_string(), inst);
-        state.save_record("main", &record).unwrap();
-
-        std::fs::create_dir_all(stable.parent().unwrap()).unwrap();
-        std::fs::write(&stable, "fake key").unwrap();
-        state.clear_record("main").unwrap();
-        assert!(stable.exists());
+        state.session_owner = "a".to_string();
+        create_record(dir.path(), "main", &record_of("main", 1.0, "session:a")).unwrap();
+        append_spend_history(
+            dir.path(),
+            &[SpendHistoryEntry {
+                machine_id: "main".to_string(),
+                pool: "session:a".to_string(),
+                spent: 1.0,
+            }],
+        )
+        .unwrap();
+        assert!((state.session_spend().spent - 1.0).abs() < 0.01);
     }
 
     #[test]
-    fn spend_fold_tracks_all_machine_rates_and_stop_tail() {
+    fn the_last_history_line_wins_and_a_torn_one_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        assert!(state.total_spend().abs() < f64::EPSILON);
+        state.session_owner = "a".to_string();
+        let line = |spent: f64| {
+            serde_json::json!({"machine_id": "m", "pool": "session:a", "spent": spent}).to_string()
+        };
+        std::fs::write(
+            history_path(dir.path()),
+            format!("{}\n{}\n{{\"machine_id\":\"m", line(1.0), line(2.0)),
+        )
+        .unwrap();
+        let spend = state.session_spend();
+        assert!((spend.spent - 2.0).abs() < f64::EPSILON, "{spend:?}");
+        assert!(spend.unreadable.is_empty(), "{spend:?}");
 
-        for (machine_id, rate) in [("a", 0.5), ("b", 1.0)] {
-            let inst = instance(machine_id, rate, std::time::Duration::ZERO);
-            let record = inst.record();
-            state.instances.insert(machine_id.to_string(), inst);
-            state
-                .admit_provision(machine_id, &record, &LifecycleRecord::default())
-                .unwrap();
-        }
-        assert!((state.aggregate_cost_per_hr() - 1.5).abs() < f64::EPSILON);
-        state
-            .append_ledger_event(
-                "a",
-                crate::ledger::EventKind::Stopped,
-                None,
-                None,
-                Some(0.1),
-                None,
-            )
-            .unwrap();
-        assert!((state.aggregate_cost_per_hr() - 1.1).abs() < f64::EPSILON);
+        // The next append starts its own line rather than joining the torn one.
+        create_record(dir.path(), "n", &record_of("n", 1.0, "session:a")).unwrap();
+        state.end_machine("n").unwrap();
+        let spend = state.session_spend();
+        assert!((spend.spent - 3.0).abs() < 0.01, "{spend:?}");
     }
 
     #[test]
-    fn external_runpod_volume_is_excluded_from_running_and_stopped_rates() {
+    fn a_bad_history_line_in_the_middle_is_named() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::new(dir.path().to_path_buf());
-        let record = instance("main", 2.0, std::time::Duration::ZERO).record();
-        state
-            .admit_provision(
-                "main",
-                &record,
-                &LifecycleRecord {
-                    storage_rate_per_hr: Some(99.0),
-                    external_volume_id: Some("vol-user-owned".into()),
-                    storage_rate_note: Some(
-                        "external volume vol-user-owned: not budget-tracked".into(),
-                    ),
-                    ..LifecycleRecord::default()
-                },
-            )
-            .unwrap();
-        assert!((state.aggregate_cost_per_hr() - 2.0).abs() < f64::EPSILON);
-        state
-            .append_ledger_event(
-                "main",
-                crate::ledger::EventKind::Stopped,
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-        assert!(state.aggregate_cost_per_hr().abs() < f64::EPSILON);
+        std::fs::write(
+            history_path(dir.path()),
+            "{garbage}\n{\"machine_id\":\"m\",\"pool\":\"p\",\"spent\":1.0}\n",
+        )
+        .unwrap();
+        let spend = state.session_spend();
+        assert!(
+            spend.unreadable[0].contains("spend-history.jsonl"),
+            "{spend:?}"
+        );
+    }
+
+    /// A stop closes the compute interval and opens a storage-only one; a
+    /// resume does the reverse. External volumes rate zero.
+    #[test]
+    fn meter_follows_stop_resume_and_pool_changes() {
+        let mut record = record_of("m", 2.0, "session:a");
+        record.storage_rate_per_hr = Some(0.5);
+        let t0 = now_ms();
+        record.meter_stopped(t0);
+        let stopped = record.meter.last().unwrap();
+        assert!(stopped.compute_rate.abs() < f64::EPSILON);
+        assert!((stopped.storage_rate - 0.5).abs() < f64::EPSILON);
+        assert_eq!(record.meter.len(), 2);
+        assert_eq!(record.meter[0].end_ms, Some(t0));
+
+        // Recording the same stop again adds nothing.
+        record.meter_stopped(t0 + 10);
+        assert_eq!(record.meter.len(), 2);
+
+        record.meter_billing(t0 + 20, None);
+        let billing = record.meter.last().unwrap();
+        assert!((billing.compute_rate - 2.0).abs() < f64::EPSILON);
+        assert_eq!(billing.pool, "session:a");
+
+        record.meter_adopt(t0 + 30, "session:b");
+        assert_eq!(record.pool(), Some("session:b"));
+        assert_eq!(record.meter.len(), 4);
+
+        record.external_volume_id = Some("vol".to_string());
+        record.meter_stopped(t0 + 40);
+        assert!(record.meter.last().unwrap().storage_rate.abs() < f64::EPSILON);
     }
 
     #[test]
-    fn ledger_is_authoritative_across_restart() {
+    fn budgets_are_per_pool() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
-        let inst = instance("main", 2.0, std::time::Duration::from_hours(1));
-        let record = inst.record();
-        state.instances.insert("main".to_string(), inst);
-        state
-            .admit_provision("main", &record, &LifecycleRecord::default())
-            .unwrap();
+        state.session_owner = "a".to_string();
+        create_record(dir.path(), "mine", &record_of("mine", 1.0, "session:a")).unwrap();
+        create_record(dir.path(), "theirs", &record_of("theirs", 3.0, "session:b")).unwrap();
+        let spend = state.session_spend();
+        assert!((spend.spent - 1.0).abs() < 0.01, "{spend:?}");
+        assert!((spend.other_spend - 3.0).abs() < 0.01, "{spend:?}");
+        assert!((spend.hourly_rate - 1.0).abs() < f64::EPSILON);
+    }
 
-        // Server restart with the machine still recorded: spend is hydrated
-        // so budget enforcement can't be reset by a crash.
-        let restarted = AppState::new(dir.path().to_path_buf());
-        assert!((restarted.aggregate_cost_per_hr() - 2.0).abs() < f64::EPSILON);
+    /// An unreadable record is named, not guessed at, and doesn't hide the rest.
+    #[test]
+    fn an_unreadable_record_is_named_and_the_rest_still_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        state.session_owner = "a".to_string();
+        create_record(dir.path(), "good", &record_of("good", 1.0, "session:a")).unwrap();
+        create_record(dir.path(), "bad", &record_of("bad", 1.0, "session:a")).unwrap();
+        std::fs::write(instance_dir(dir.path(), "bad").join(RECORD_FILE), "{broken").unwrap();
+        let spend = state.session_spend();
+        assert!((spend.spent - 1.0).abs() < 0.01, "{spend:?}");
+        assert!(spend.unreadable[0].contains("machine.json"), "{spend:?}");
+        assert_eq!(scan_records(dir.path()).1[0].0, "bad");
+    }
 
-        // After the machine is gone, a fresh session starts from zero.
-        restarted.clear_record("main").unwrap();
-        let fresh = AppState::new(dir.path().to_path_buf());
-        assert!(fresh.total_spend().abs() < f64::EPSILON);
+    /// Nothing could settle it, so it is named rather than half-read.
+    #[test]
+    fn an_unconfirmed_record_without_its_create_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = record_of("m", 0.0, "p");
+        record.phase = Phase::Unconfirmed;
+        create_record(dir.path(), "m", &record).unwrap();
+        assert!(load_instance_record(dir.path(), "m").is_none());
+        assert_eq!(scan_records(dir.path()).1[0].0, "m");
+    }
+
+    #[test]
+    fn with_record_never_recreates_an_ended_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        create_record(dir.path(), "main", &record_of("main", 1.0, "p")).unwrap();
+        state.end_machine("main").unwrap();
+        assert!(with_record(dir.path(), "main", |_| ()).unwrap().is_none());
+        assert!(!instance_dir(dir.path(), "main").exists());
+    }
+
+    /// Concurrent writers can't lose each other's updates, across threads
+    /// sharing nothing but the file lock.
+    #[test]
+    fn with_record_serializes_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        create_record(dir.path(), "main", &record_of("main", 1.0, "p")).unwrap();
+        let joins = (0..8)
+            .map(|index| {
+                let root = dir.path().to_path_buf();
+                std::thread::spawn(move || {
+                    with_record(&root, "main", |record| {
+                        record.kernels.push(KernelRecord {
+                            kernel_id: index.to_string(),
+                            notebook_path: String::new(),
+                            name: None,
+                        });
+                    })
+                    .unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for join in joins {
+            join.join().unwrap();
+        }
+        assert_eq!(
+            load_instance_record(dir.path(), "main")
+                .unwrap()
+                .kernels
+                .len(),
+            8
+        );
     }
 
     /// Same-named projects under different parents must never share a key
@@ -1419,91 +1407,10 @@ mod tests {
         assert_ne!(default_keys_root(&a), default_keys_root(&b));
     }
 
-    /// Records written before the key relocation point at keys inside the
-    /// project dir (unusable on WSL /mnt/c). Startup must move the exact
-    /// bytes out and rewrite the record — never regenerate (the public half
-    /// is in the machine's `authorized_keys`).
+    /// Ending removes only that machine's managed key dir; the stable (vast,
+    /// account-registered) key and other machines' keys survive.
     #[test]
-    fn startup_migrates_in_project_keys_byte_exact() {
-        let dir = tempfile::tempdir().unwrap();
-        let keys = tempfile::tempdir().unwrap();
-        let machine_id = crate::ulid::new();
-
-        let old_key = instance_dir(dir.path(), &machine_id).join("id_ed25519");
-        std::fs::create_dir_all(old_key.parent().unwrap()).unwrap();
-        std::fs::write(&old_key, "exact-key-bytes").unwrap();
-        let mut record = {
-            let staging =
-                AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().join("staging"));
-            let inst = instance(&machine_id, 0.5, std::time::Duration::ZERO);
-            let mut record = inst.record();
-            record.ssh_key_path = Some(old_key.display().to_string());
-            staging.save_record(&machine_id, &record).unwrap();
-            record
-        };
-
-        let state =
-            AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().join("real"));
-        let migrated = load_instance_record(dir.path(), &machine_id).unwrap();
-        let new_key = state.ssh_key_path(&machine_id);
-        assert_eq!(
-            migrated.ssh_key_path.as_deref(),
-            Some(new_key.to_str().unwrap())
-        );
-        assert_eq!(std::fs::read(&new_key).unwrap(), b"exact-key-bytes");
-        // The old file stays — another live session may still be using it.
-        assert!(old_key.exists());
-
-        // An external / hand-managed key path is never touched.
-        let external = dir.path().join("my-own-key");
-        std::fs::write(&external, "user-key").unwrap();
-        record.ssh_key_path = Some(external.display().to_string());
-        state.save_record(&machine_id, &record).unwrap();
-        let state =
-            AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().join("real"));
-        let untouched = load_instance_record(dir.path(), &machine_id).unwrap();
-        assert_eq!(
-            untouched.ssh_key_path.as_deref(),
-            Some(external.to_str().unwrap())
-        );
-        drop(state);
-    }
-
-    /// A machine whose operation lock is held (a live session is driving it)
-    /// is skipped by key migration — rewriting its record from a snapshot
-    /// could revert that session's concurrent update.
-    #[test]
-    fn key_migration_skips_machines_locked_by_another_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let keys = tempfile::tempdir().unwrap();
-        let machine_id = crate::ulid::new();
-
-        let old_key = instance_dir(dir.path(), &machine_id).join("id_ed25519");
-        std::fs::create_dir_all(old_key.parent().unwrap()).unwrap();
-        std::fs::write(&old_key, "held-key").unwrap();
-        {
-            let staging =
-                AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().join("staging"));
-            let inst = instance(&machine_id, 0.5, std::time::Duration::ZERO);
-            let mut record = inst.record();
-            record.ssh_key_path = Some(old_key.display().to_string());
-            staging.save_record(&machine_id, &record).unwrap();
-        }
-
-        let _held = try_operation_lock(dir.path(), &machine_id).unwrap();
-        let _state =
-            AppState::new_with_keys_root(dir.path().to_path_buf(), keys.path().join("real"));
-        let record = load_instance_record(dir.path(), &machine_id).unwrap();
-        assert_eq!(
-            record.ssh_key_path.as_deref(),
-            Some(old_key.to_str().unwrap())
-        );
-    }
-
-    /// Terminate removes only that machine's managed key dir; the stable
-    /// (vast, account-registered) key and other machines' keys survive.
-    #[test]
-    fn clear_record_removes_managed_key_dir_only() {
+    fn ending_a_machine_removes_its_managed_key_dir_only() {
         let dir = tempfile::tempdir().unwrap();
         let keys = tempfile::tempdir().unwrap();
         let state =
@@ -1516,339 +1423,14 @@ mod tests {
         let other_id = crate::ulid::new();
         crate::ssh::generate_keypair(&state.ssh_key_path(&other_id)).unwrap();
 
-        let inst = instance(&machine_id, 0.5, std::time::Duration::ZERO);
-        let mut record = inst.record();
+        let mut record = record_of(&machine_id, 0.5, "p");
         record.ssh_key_path = Some(key_path.display().to_string());
-        state.save_record(&machine_id, &record).unwrap();
+        create_record(dir.path(), &machine_id, &record).unwrap();
 
-        state.clear_record(&machine_id).unwrap();
+        state.end_machine(&machine_id).unwrap();
         assert!(!key_path.exists());
         assert!(state.stable_ssh_key_path().exists());
         assert!(state.ssh_key_path(&other_id).exists());
-    }
-
-    #[test]
-    fn legacy_single_instance_state_migrates_to_main() {
-        let dir = tempfile::tempdir().unwrap();
-        let state_dir = dir.path().join(".claude/remote-kernels");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        let key_path = state_dir.join("id_ed25519");
-        std::fs::write(&key_path, "fake-key").unwrap();
-        std::fs::write(
-            state_dir.join("state.json"),
-            serde_json::json!({
-                "pod_id": "legacy-pod",
-                "cleanup": "stop",
-                "accumulated_spend": 1.25,
-                "jupyter_token": "tok",
-                "ssh_key_path": key_path.display().to_string(),
-                "gpu_name": "RTX 4090"
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let state = AppState::new(dir.path().to_path_buf());
-
-        let record = load_instance_record(dir.path(), "main").unwrap();
-        assert_eq!(record.external_id, "legacy-pod");
-        assert_eq!(record.cleanup, Cleanup::Stop);
-        assert_eq!(record.gpu_name.as_deref(), Some("RTX 4090"));
-        // SSH key ends up under keys_root (legacy layout migration moves it
-        // into the instance dir, then the key-location migration moves it —
-        // byte-exact — out of the project dir entirely).
-        let new_key = state.ssh_key_path("main");
-        assert!(!new_key.starts_with(dir.path()));
-        assert_eq!(std::fs::read(&new_key).unwrap(), b"fake-key");
-        assert_eq!(
-            record.ssh_key_path.as_deref(),
-            Some(new_key.to_str().unwrap())
-        );
-        // Old state file is gone; spend carried over.
-        assert!(!state_dir.join("state.json").exists());
-        assert!((state.total_spend() - 1.25).abs() < 0.001);
-        assert!(!state_dir.join("spend.json").exists());
-    }
-
-    #[test]
-    fn corrupt_legacy_state_is_preserved_instead_of_deleted() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = state_dir(dir.path());
-        std::fs::create_dir_all(&root).unwrap();
-        let legacy_path = root.join("state.json");
-        // Truncated after a crash: the pod id is still readable by a human.
-        std::fs::write(&legacy_path, r#"{"pod_id":"abc"#).unwrap();
-
-        let _state = AppState::new(dir.path().to_path_buf());
-
-        assert_eq!(
-            std::fs::read_to_string(&legacy_path).unwrap(),
-            r#"{"pod_id":"abc"#
-        );
-        assert!(load_instance_record(dir.path(), "main").is_none());
-    }
-
-    #[test]
-    fn legacy_spend_corruption_blocks_accounting_instead_of_becoming_zero() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = state_dir(dir.path());
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("spend.json"), "{broken").unwrap();
-        let state = AppState::new(dir.path().to_path_buf());
-        assert!(state.spend_summary().unwrap_err().contains("corrupt"));
-        assert!(state.total_spend().is_infinite());
-        assert!(root.join("spend.json").exists());
-    }
-
-    #[test]
-    fn upgrade_migration_opens_interval_for_eventless_live_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let initial = AppState::new(dir.path().to_path_buf());
-        let record = instance("main", 2.0, std::time::Duration::ZERO).record();
-        initial.save_record("main", &record).unwrap();
-        save_lifecycle_record(
-            dir.path(),
-            "main",
-            &LifecycleRecord {
-                storage_rate_per_hr: Some(0.25),
-                ..LifecycleRecord::default()
-            },
-        )
-        .unwrap();
-        std::fs::write(
-            state_dir(dir.path()).join("spend.json"),
-            serde_json::json!({"accumulated_spend": 1.5}).to_string(),
-        )
-        .unwrap();
-
-        let migrated = AppState::new(dir.path().to_path_buf());
-        let summary = migrated.spend_summary().unwrap();
-        assert!((summary.hourly_rate - 2.25).abs() < f64::EPSILON);
-        assert!(summary.total >= 1.5);
-        let ledger =
-            std::fs::read_to_string(state_dir(dir.path()).join("ledger/main.jsonl")).unwrap();
-        assert!(ledger.contains("migration-main"), "{ledger}");
-        assert!(!state_dir(dir.path()).join("spend.json").exists());
-    }
-
-    #[test]
-    fn eventless_instance_record_fails_fold_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(dir.path().to_path_buf());
-        let record = instance("main", 2.0, std::time::Duration::ZERO).record();
-        state.save_record("main", &record).unwrap();
-        let error = state.spend_summary().unwrap_err();
-        assert!(error.contains("no current-epoch ledger events"), "{error}");
-    }
-
-    #[test]
-    fn phase4_pending_transition_file_migrates_before_accounting() {
-        let dir = tempfile::tempdir().unwrap();
-        let initial = AppState::new(dir.path().to_path_buf());
-        initial
-            .save_record(
-                "main",
-                &instance("main", 1.0, std::time::Duration::ZERO).record(),
-            )
-            .unwrap();
-        let path = state_dir(dir.path()).join("ledger/main.pending-transitions.jsonl");
-        let transition = PendingTransition {
-            uuid: "phase4-op".into(),
-            ts: crate::ledger::now_ms() / 1_000,
-            action: Cleanup::Stop,
-            post_action_rate: Some(0.15),
-        };
-        std::fs::write(&path, serde_json::to_string(&transition).unwrap() + "\n").unwrap();
-
-        let state = AppState::new(dir.path().to_path_buf());
-        assert!((state.aggregate_cost_per_hr() - 0.15).abs() < f64::EPSILON);
-        assert!(!path.exists());
-        let ledger =
-            std::fs::read_to_string(state_dir(dir.path()).join("ledger/main.jsonl")).unwrap();
-        assert_eq!(ledger.lines().count(), 1);
-    }
-
-    #[test]
-    fn corrupt_phase4_pending_transition_fails_closed_and_is_preserved() {
-        let dir = tempfile::tempdir().unwrap();
-        let _ = AppState::new(dir.path().to_path_buf());
-        let path = state_dir(dir.path()).join("ledger/main.pending-transitions.jsonl");
-        std::fs::write(&path, "{broken\n").unwrap();
-        let state = AppState::new(dir.path().to_path_buf());
-        assert!(
-            state
-                .spend_summary()
-                .unwrap_err()
-                .contains("pending transition")
-        );
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn concurrent_app_states_cannot_lose_provision_events() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let barrier = Arc::new(std::sync::Barrier::new(3));
-        let mut joins = Vec::new();
-        for machine_id in ["one", "two"] {
-            let root = root.clone();
-            let barrier = barrier.clone();
-            joins.push(std::thread::spawn(move || {
-                let state = AppState::new(root);
-                let record = instance(machine_id, 1.0, std::time::Duration::ZERO).record();
-                barrier.wait();
-                state
-                    .admit_provision(machine_id, &record, &LifecycleRecord::default())
-                    .unwrap();
-            }));
-        }
-        barrier.wait();
-        for join in joins {
-            join.join().unwrap();
-        }
-        let state = AppState::new(root);
-        assert!((state.aggregate_cost_per_hr() - 2.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn multiprocess_append_helper() {
-        let Ok(root) = std::env::var("RK_LEDGER_CHILD_DIR") else {
-            return;
-        };
-        let machine_id = std::env::var("RK_LEDGER_CHILD_NAME").unwrap();
-        let state = AppState::new(PathBuf::from(root));
-        let record = instance(&machine_id, 1.0, std::time::Duration::ZERO).record();
-        state
-            .admit_provision(&machine_id, &record, &LifecycleRecord::default())
-            .unwrap();
-    }
-
-    #[test]
-    fn separate_processes_cannot_clobber_the_shared_ledger() {
-        let dir = tempfile::tempdir().unwrap();
-        let executable = std::env::current_exe().unwrap();
-        let mut children = ["process-one", "process-two"].map(|machine_id| {
-            std::process::Command::new(&executable)
-                .args([
-                    "--exact",
-                    "state::tests::multiprocess_append_helper",
-                    "--nocapture",
-                ])
-                .env("RK_LEDGER_CHILD_DIR", dir.path())
-                .env("RK_LEDGER_CHILD_NAME", machine_id)
-                .spawn()
-                .unwrap()
-        });
-        for child in &mut children {
-            assert!(child.wait().unwrap().success());
-        }
-        let state = AppState::new(dir.path().to_path_buf());
-        assert!((state.aggregate_cost_per_hr() - 2.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn terminate_last_machine_opens_fresh_budget_epoch() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = AppState::new(dir.path().to_path_buf());
-        let record = instance("first", 5.0, std::time::Duration::ZERO).record();
-        first
-            .admit_provision("first", &record, &LifecycleRecord::default())
-            .unwrap();
-        first
-            .append_ledger_event(
-                "first",
-                crate::ledger::EventKind::Terminated,
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-        first.clear_record("first").unwrap();
-
-        let second = AppState::new(dir.path().to_path_buf());
-        assert!(second.total_spend().abs() < f64::EPSILON);
-        let record = instance("second", 1.0, std::time::Duration::ZERO).record();
-        second
-            .admit_provision("second", &record, &LifecycleRecord::default())
-            .unwrap();
-        assert!((second.aggregate_cost_per_hr() - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn terminated_machine_ledger_is_a_tombstone_while_epoch_remains_open() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(dir.path().to_path_buf());
-        for machine_id in ["terminated", "survivor"] {
-            let record = instance(machine_id, 1.0, std::time::Duration::ZERO).record();
-            state
-                .admit_provision(machine_id, &record, &LifecycleRecord::default())
-                .unwrap();
-        }
-        state
-            .append_ledger_event(
-                "terminated",
-                crate::ledger::EventKind::Terminated,
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-        state.clear_record("terminated").unwrap();
-        assert!(
-            state_dir(dir.path())
-                .join("ledger/terminated.jsonl")
-                .exists()
-        );
-        assert!(state.total_spend() >= 0.0);
-    }
-
-    #[test]
-    fn epoch_close_and_concurrent_provision_never_delete_new_machine_ledger() {
-        let dir = tempfile::tempdir().unwrap();
-        let initial = AppState::new(dir.path().to_path_buf());
-        let old = instance("old", 1.0, std::time::Duration::ZERO).record();
-        initial
-            .admit_provision("old", &old, &LifecycleRecord::default())
-            .unwrap();
-        initial
-            .append_ledger_event(
-                "old",
-                crate::ledger::EventKind::Terminated,
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-
-        let barrier = Arc::new(std::sync::Barrier::new(3));
-        let clear_root = dir.path().to_path_buf();
-        let clear_barrier = Arc::clone(&barrier);
-        let clear = std::thread::spawn(move || {
-            let state = AppState::new(clear_root);
-            clear_barrier.wait();
-            state.clear_record("old").unwrap();
-        });
-        let provision_root = dir.path().to_path_buf();
-        let provision_barrier = Arc::clone(&barrier);
-        let provision = std::thread::spawn(move || {
-            let state = AppState::new(provision_root);
-            let record = instance("new", 1.0, std::time::Duration::ZERO).record();
-            provision_barrier.wait();
-            state
-                .admit_provision("new", &record, &LifecycleRecord::default())
-                .unwrap();
-        });
-        barrier.wait();
-        clear.join().unwrap();
-        provision.join().unwrap();
-
-        let state = AppState::new(dir.path().to_path_buf());
-        assert!(load_instance_record(dir.path(), "new").is_some());
-        assert!(state_dir(dir.path()).join("ledger/new.jsonl").exists());
-        assert!((state.aggregate_cost_per_hr() - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1857,18 +1439,14 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
 
         assert!(state.resolve_instance(None).is_err());
-        state.instances.insert(
-            "main".to_string(),
-            instance("main", 0.0, std::time::Duration::ZERO),
-        );
+        state.instances.insert("main".to_string(), instance("main"));
         assert_eq!(state.resolve_instance(None).unwrap(), "main");
         assert_eq!(state.resolve_instance(Some("main")).unwrap(), "main");
         assert!(state.resolve_instance(Some("nope")).is_err());
 
-        state.instances.insert(
-            "gpu-2".to_string(),
-            instance("gpu-2", 0.0, std::time::Duration::ZERO),
-        );
+        state
+            .instances
+            .insert("gpu-2".to_string(), instance("gpu-2"));
         let err = state.resolve_instance(None).unwrap_err();
         assert!(err.contains("gpu-2") && err.contains("main"), "{err}");
     }

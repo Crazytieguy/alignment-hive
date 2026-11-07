@@ -98,6 +98,7 @@ async fn k8s_full_lifecycle_via_kueue() {
     // Start (blocking): template → pod → Kueue admission → Running → Jupyter.
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
+            force: None,
             label: None,
             runtime: None,
             gpu_type: None,
@@ -228,6 +229,7 @@ async fn k8s_priority_label_and_capability_validation() {
 
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
+            force: None,
             label: Some("queued".to_string()),
             runtime: None,
             gpu_type: None,
@@ -266,7 +268,7 @@ async fn k8s_priority_label_and_capability_validation() {
 
     let result = server
         .terminate(Parameters(remote_kernels::server::TerminateParams {
-            instance: Some("queued".to_string()),
+            instance: Some(machine_id.to_string()),
             skip_pre_terminate_command: None,
         }))
         .await
@@ -291,6 +293,7 @@ pod-template = "pod-template.yaml"
     let server = server_in(dir.path());
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
+            force: None,
             label: Some("nostop".to_string()),
             runtime: None,
             gpu_type: None,
@@ -363,6 +366,7 @@ workdir = "/home/jovyan/work"
 
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
+            force: None,
             label: None,
             runtime: None,
             gpu_type: None,

@@ -1,140 +1,58 @@
-//! The attach ladder shared by `attach()` and the startup auto-reattach: check
-//! the durable record and the provider, settle what the ledger is owed for a
-//! resume, then hand off to `finalize_start`. Auto-reattach never resumes a
-//! stopped machine, since resuming restarts billing.
+//! The attach path shared by `attach()` and the startup auto-reattach: check
+//! the record and the provider, resume if needed, then hand off to
+//! `finalize_start`, whose install takes the machine over. Auto-reattach never
+//! resumes a stopped machine, since resuming restarts billing.
 
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, ContentBlock};
 
 use crate::runtime::{InstanceStatus, Runtime};
-use crate::state::{FenceReason, InstanceState, Phase};
+use crate::state::{ConnectMode, InstanceState, Phase, load_instance_record, now_ms, with_record};
 
-use super::budget::ledger_reopen_refusal;
-use super::provision::{BudgetUnenforceable, ConnectMode};
-use super::{RemoteKernelsServer, err_text, now_epoch};
+use super::cleanup::{CleanupAction, CleanupTarget};
+use super::provision::BudgetUnenforceable;
+use super::{RemoteKernelsServer, err_text};
 
-/// What an attach owes the cost ledger before it touches the machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ResumeAccounting {
-    /// The ledger already carries an open compute interval for this machine.
-    AlreadyOpen,
-    /// The machine is stopped: issue the provider `start` AND open the
-    /// interval (opened first — an unconfirmed start must not bill silently).
-    ResumeAndOpen,
-    /// The machine is billing already: open the interval, make no provider
-    /// call.
-    OpenOnly,
-}
-
-/// Decide it from the provider's answer and the durable record's phase.
-///
-/// The subtle case is a record that says stopped while the provider reports
-/// the machine as *coming up*: something outside this server started it (the
-/// console, or a resume this process died in the middle of), and `RunPod` v2
-/// reports `PROVISIONING`/`STARTING` for the first minutes of that — where
-/// v1's `desiredStatus` read `RUNNING` from the first poll. The meter runs
-/// during it either way, so it must reopen the interval exactly like the
-/// running case: otherwise attach installs a budget deadline computed from
-/// the stopped machine's storage rate on a machine burning its compute rate.
-pub(super) fn resume_accounting(
-    provider_status: &InstanceStatus,
-    phase: Phase,
-) -> ResumeAccounting {
-    if *provider_status == InstanceStatus::Stopped {
-        return ResumeAccounting::ResumeAndOpen;
-    }
-    if phase == Phase::Stopped && provider_status.is_billing() {
-        return ResumeAccounting::OpenOnly;
-    }
-    ResumeAccounting::AlreadyOpen
+/// What a call held by [`RemoteKernelsServer::settle_startup`] is about.
+#[derive(Clone, Copy)]
+pub(super) enum StartupTarget<'a> {
+    Kernel(&'a str),
+    /// A tool's `instance` argument, if it was given.
+    Machine(Option<&'a str>),
+    Any,
 }
 
 impl RemoteKernelsServer {
     /// Shared attach path. `auto` is the startup re-attach: no budget gate
     /// (reattaching spends nothing, and supervision must return even when
     /// exhausted), and never a resume (resume = money = explicit tool call).
-    #[allow(clippy::too_many_lines)] // the attach ladder is kept linear for auditability
+    #[allow(clippy::too_many_lines)] // one linear path, kept auditable
     pub(super) async fn attach_machine(
         &self,
         machine_id: String,
         force: bool,
         auto: bool,
     ) -> Result<CallToolResult, McpError> {
-        let reconcile_message = self.reconcile_machine(&machine_id).await;
-        // Queue-then-reclaim (like start()): reconcile outcomes are one-shot,
-        // and every attach refusal path below must not swallow them.
-        if let Some(message) = &reconcile_message {
-            self.start_failures.lock().await.push(message.clone());
-        }
-        if !auto {
-            self.check_budget().await?;
-        }
         if let Err(message) = crate::state::validate_machine_id(&machine_id) {
             return err_text(message);
         }
-
-        let (project_dir, record) = {
+        let Some(record) = load_instance_record(&self.project_dir, &machine_id) else {
             let state = self.state.lock().await;
-            let Some(record) = crate::state::load_instance_record(&state.project_dir, &machine_id)
-            else {
-                return err_text(Self::unknown_machine_message(&state, &machine_id));
-            };
-            (state.project_dir.clone(), record)
+            return err_text(Self::unknown_machine_message(&state, &machine_id));
         };
-        let lifecycle = match crate::state::load_lifecycle_record_checked(&project_dir, &machine_id)
-        {
-            Ok(lifecycle) => lifecycle,
-            // Fail closed: the unreadable fields are the ones that hold
-            // destructive/racy actions back (wants_terminate, finalize
-            // state) — attaching blind could revive a machine mid-cleanup.
-            Err(error) => return err_text(format!("Machine {machine_id}: {error}")),
-        };
-        if (lifecycle.finalize_phase == Some(crate::state::FinalizePhase::Finalizing)
-            && !lifecycle.wants_terminate)
-            || (lifecycle.wants_terminate && !force)
-        {
-            let reason = if lifecycle.wants_terminate {
-                format!(
-                    "Machine {machine_id} committed to terminating itself; its data may already be gone. attach(\"{machine_id}\", force=true) can revive it if it still exists at the provider."
-                )
-            } else {
-                format!(
-                    "Machine {machine_id} has a self-cleanup whose outcome isn't known yet. Call status() to let the server check the provider and finish the bookkeeping, then retry."
-                )
-            };
-            return err_text(reason);
+        if record.phase == Phase::Unconfirmed {
+            return err_text(format!(
+                "Machine {machine_id}'s create had an unclear outcome and no machine has been found for it. Call status(), which adopts it if it appears."
+            ));
         }
-        let operation_lock = Self::acquire_operation_lock(&project_dir, &machine_id).await?;
-        let prior_fence = match self.claim_attach_slot(&machine_id).await {
-            Ok(prior_fence) => prior_fence,
+        let (status, finding) = match self.check_record(&machine_id, &record).await {
+            Ok(checked) => checked,
             Err(message) => return err_text(message),
         };
-        let runtime = self.runtime_for(&record.runtime).await?;
-
-        let provider_status = runtime
-            .describe(&record.external_id)
-            .await
-            .map_err(|error| {
-                McpError::internal_error(
-                    format!(
-                        "Could not verify machine {machine_id} ({}): {error}. Its record was kept.",
-                        record.external_id
-                    ),
-                    None,
-                )
-            })?;
-        match &provider_status {
+        match &status {
             InstanceStatus::Gone => {
-                self.record_terminated_and_clear(&machine_id)
-                    .await
-                    .map_err(|error| {
-                        McpError::internal_error(
-                            format!("Failed to clear gone machine record: {error}"),
-                            None,
-                        )
-                    })?;
                 return err_text(format!(
-                    "Machine {machine_id} is gone at the provider; its durable record was cleared."
+                    "Machine {machine_id} is gone at the provider; its local record was cleared."
                 ));
             }
             InstanceStatus::Unknown(status) => {
@@ -144,12 +62,24 @@ impl RemoteKernelsServer {
             }
             InstanceStatus::Stopped | InstanceStatus::Running | InstanceStatus::Provisioning => {}
         }
-
-        let Some((jupyter_token, ssh_key_path)) = record
-            .jupyter_token
-            .clone()
-            .zip(record.ssh_key_path.clone().map(std::path::PathBuf::from))
-        else {
+        // Queued rather than returned: no refusal below may swallow it.
+        self.queue_alerts(finding.into_iter().collect()).await;
+        if !auto {
+            self.check_new_spend().await?;
+        }
+        if self
+            .state
+            .lock()
+            .await
+            .instances
+            .get(&machine_id)
+            .is_some_and(|instance| !instance.detached)
+        {
+            return err_text(format!(
+                "Machine {machine_id} is already attached in this server."
+            ));
+        }
+        let (Some(_), Some(ssh_key_path)) = (&record.jupyter_token, &record.ssh_key_path) else {
             return err_text(format!(
                 "Machine {machine_id} is missing its SSH key or Jupyter token; record kept."
             ));
@@ -157,295 +87,254 @@ impl RemoteKernelsServer {
         // Fail closed BEFORE any resume: resuming restarts billing, and a
         // key OpenSSH refuses (missing, or mode not enforceable — WSL
         // /mnt/c) means the machine would bill without being controllable.
-        if let Err(error) = crate::ssh::validate_private_key_file(&ssh_key_path) {
+        if let Err(error) =
+            crate::ssh::validate_private_key_file(std::path::Path::new(ssh_key_path))
+        {
             return err_text(format!(
                 "Machine {machine_id} cannot be attached: {error:#}; record kept."
             ));
         }
-        // One reading of what this attach owes the ledger: whether an
-        // interval has to be opened (and with what note), and whether the
-        // provider has to be asked to start the machine at all.
-        let (needs_provider_resume, interval_note) =
-            match resume_accounting(&provider_status, record.phase) {
-                ResumeAccounting::AlreadyOpen => (false, None),
-                ResumeAccounting::ResumeAndOpen => (true, Some("resume provider call admitted")),
-                ResumeAccounting::OpenOnly => (
-                    false,
-                    Some("already billing at the provider; interval reopened"),
-                ),
-            };
-        let resumed = interval_note.is_some();
-        if needs_provider_resume && auto {
-            // Startup re-attach never resumes: resuming restarts billing and
-            // is always an explicit decision. (A machine that is already
-            // billing is not skipped — leaving it unsupervised is the
-            // expensive outcome.)
-            return err_text(format!(
-                "Machine {machine_id} is stopped; automatic reattach skipped it. attach(\"{machine_id}\") resumes it (billing restarts)."
-            ));
-        }
-        if let Some(note) = interval_note {
-            self.state.lock().await.reset_known_hosts(&machine_id);
-            if let Err(error) = self
-                .update_lifecycle(&machine_id, |lifecycle| {
-                    lifecycle.resume_issued_at_epoch = Some(now_epoch());
-                })
-                .await
-            {
-                tracing::warn!(target: super::LOG_TARGET, instance = %machine_id, "Could not record the resume: {error}");
+        let external_id = record.provider_id().to_string();
+        // Stopped until now: nobody on the machine has been driving it.
+        let resumed = status == InstanceStatus::Stopped;
+        if resumed {
+            if auto {
+                return err_text(format!(
+                    "Machine {machine_id} is stopped; automatic reattach skipped it. attach(\"{machine_id}\") resumes it (billing restarts)."
+                ));
             }
-            self.accounted_resume(&machine_id, note, async {
-                if needs_provider_resume {
-                    runtime.resume(&record.external_id).await
-                } else {
-                    Ok(())
-                }
-            })
-            .await
-            .map_err(|error| {
-                McpError::internal_error(
-                    if needs_provider_resume {
-                        format!(
-                            "Failed to resume machine {machine_id}: {error}. Retry attach(\"{machine_id}\")."
-                        )
-                    } else {
-                        ledger_reopen_refusal(&machine_id, &error, &project_dir)
-                    },
+            if let Err(error) = self.resume(&machine_id, &record).await {
+                return Err(McpError::internal_error(
+                    format!(
+                        "Failed to resume machine {machine_id}: {error}. Retry attach(\"{machine_id}\")."
+                    ),
                     None,
-                )
-            })?;
-            let mut resumed_record = record.clone();
-            resumed_record.phase = Phase::Running;
-            self.state
-                .lock()
-                .await
-                .save_record(&machine_id, &resumed_record)
-                .map_err(|error| {
-                    McpError::internal_error(
-                        format!(
-                            "Machine {machine_id} was resumed and is billing, but its running state could not be persisted: {error}"
-                        ),
-                        None,
-                    )
-                })?;
+                ));
+            }
         }
 
         {
             let mut state = self.state.lock().await;
-            let mut instance = InstanceState::provisioning(
-                machine_id.clone(),
-                record.label.clone(),
-                record.runtime.clone(),
-                record.external_id.clone(),
-                record
-                    .gpu_name
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                record.cost_per_hr,
-                record.cleanup,
-                jupyter_token,
-                ssh_key_path,
-                record.proxy_port_mapped,
-            );
-            instance.kernels.clone_from(&record.kernels);
-            instance.remote_dirs.clone_from(&record.remote_dirs);
-            // A fenced husk may be replaced so attach can try to reacquire,
-            // but it stays fenced until acquire proves ownership of the new
-            // generation. A failed attach therefore cannot reopen a
-            // destructive record-only path in the superseded process.
-            if let Some(reason) = prior_fence {
-                instance.fence(reason);
-            }
+            let instance = InstanceState::from_record(&machine_id, &record);
             if let Some(mut previous) = state.instances.insert(machine_id.clone(), instance) {
                 previous.stop_heartbeat();
             }
         }
 
-        drop(operation_lock);
-        match self
-            .finalize_start(
-                &machine_id,
-                &record.external_id,
-                ConnectMode::Attach {
-                    force,
-                    resumed,
-                    auto,
-                },
-            )
-            .await
-        {
+        let mode = ConnectMode::Attach {
+            force,
+            resumed,
+            auto,
+        };
+        match self.finalize_start(&machine_id, &external_id, mode).await {
             Ok(summary) => {
                 let recovery = self.recover_attached_kernels(&machine_id, &record).await;
-                let reconciliation = self
-                    .reclaim_start_alerts(reconcile_message.as_slice())
-                    .await;
-                let finish_note = if crate::state::load_lifecycle_record(&project_dir, &machine_id)
-                    .finish_intent
-                    .is_some()
-                {
-                    self.spawn_finish_drain(&machine_id);
-                    "\n\nA queued finish() plan was found and resumed."
-                } else {
-                    ""
-                };
+                let alerts = self.drain_alerts().await;
+                let finish_note = self.resume_queued_finish(&machine_id);
                 Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                    "Attached to machine.\n{summary}\n\n{recovery}{reconciliation}{finish_note}"
+                    "Attached to machine.\n{summary}\n\n{recovery}{alerts}{finish_note}"
                 ))]))
             }
             Err(error) if error.is::<crate::runtime::StillProvisioning>() => {
-                self.spawn_background_finalize(
-                    &machine_id,
-                    &record.external_id,
-                    &record.runtime,
-                    ConnectMode::Attach {
-                        force,
-                        resumed,
-                        auto,
-                    },
-                );
+                if auto {
+                    self.state
+                        .lock()
+                        .await
+                        .reattaching_in_background
+                        .insert(machine_id.clone());
+                }
+                self.spawn_background_finalize(&machine_id, &external_id, &record.runtime, mode);
                 Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "Machine {machine_id} is still provisioning; attachment continues in the background. Poll status()."
                 ))]))
             }
-            // A stop()/terminate() during setup removed the instance (or a
-            // newer attach replaced it): nothing here may touch it now.
+            // A stop()/terminate() during setup, or a newer attach replacing
+            // it: nothing here may touch the machine now.
             Err(error) if error.is::<super::provision::EndedDuringSetup>() => err_text(format!(
                 "Attach of machine {machine_id} did not complete: {error}"
             )),
-            Err(error) => {
-                {
-                    let mut state = self.state.lock().await;
-                    let keep_fenced_husk = state
-                        .instances
-                        .get(&machine_id)
-                        .is_some_and(|instance| instance.fenced.is_some());
-                    if !keep_fenced_husk
-                        && let Some(mut instance) = state.instances.remove(&machine_id)
-                    {
-                        instance.stop_heartbeat();
-                    }
-                }
-                let detail = format!("{error:#}");
-                if resumed && error.is::<BudgetUnenforceable>() {
-                    // A budget is configured but the machine this attach just
-                    // resumed cannot enforce it — never leave it billing with
-                    // no enforceable deadline.
-                    let outcome = self
-                        .restop_after_resume(&machine_id, &record.external_id, &record.runtime)
-                        .await;
-                    return err_text(format!(
-                        "Attach failed for machine {machine_id}: {detail}. {outcome}"
-                    ));
-                }
-                let prefix = if resumed && !detail.contains("resumed and is billing") {
-                    format!("Machine {machine_id} was resumed and is billing; attach failed")
-                } else {
-                    format!("Attach refused for machine {machine_id}")
-                };
-                err_text(format!("{prefix}: {detail}"))
-            }
-        }
-    }
-
-    /// Close the billing interval a failed budgeted attach opened: stop the
-    /// machine again and record it. Returns the user-facing outcome sentence.
-    pub(super) async fn restop_after_resume(
-        &self,
-        machine_id: &str,
-        external_id: &str,
-        runtime_name: &str,
-    ) -> String {
-        let Ok(runtime) = self.runtime_for(runtime_name).await else {
-            return format!(
-                "The machine could not be stopped again and is still billing: the {runtime_name} runtime is not usable from this session (its credentials or config are wrong). Fix that and call stop(instance=\"{machine_id}\"), or tell the user it is billing."
-            );
-        };
-        match runtime.stop(external_id).await {
-            Ok(()) => {
-                if let Err(error) = self.record_stopped(machine_id, None).await {
-                    return format!(
-                        "The machine was stopped again (no unenforced billing), but recording the stop failed ({error})."
-                    );
-                }
-                let project_dir = self.state.lock().await.project_dir.clone();
-                if let Some(mut record) =
-                    crate::state::load_instance_record(&project_dir, machine_id)
-                {
-                    record.phase = Phase::Stopped;
-                    let _ = self.state.lock().await.save_record(machine_id, &record);
-                }
-                "Because a budget is set and the machine could not be supervised, it was stopped again — it is not billing unsupervised.".to_string()
-            }
-            Err(error) => Self::action_needed(
-                machine_id,
-                external_id,
-                &format!(
-                    "it was resumed, its budget cannot be enforced, and stopping it again failed ({error})"
-                ),
-                "call stop",
+            Err(error) => err_text(
+                self.attach_failed(&machine_id, &external_id, &record.runtime, mode, &error)
+                    .await,
             ),
         }
     }
 
-    /// Called only while the machine operation lock is held. A fenced entry
-    /// may be replaced after provider checks, but its fence is carried into
-    /// the replacement until lease acquire succeeds. A live entry owns the
-    /// slot and refuses a second same-server attach.
-    pub(super) async fn claim_attach_slot(
+    /// Pick up a `finish()` plan an attach found. Returns the reply's note on it.
+    fn resume_queued_finish(&self, machine_id: &str) -> &'static str {
+        if load_instance_record(&self.project_dir, machine_id)
+            .is_some_and(|record| record.finish_intent.is_some())
+        {
+            self.spawn_finish_drain(machine_id);
+            "\n\nA queued finish() plan was found and resumed."
+        } else {
+            ""
+        }
+    }
+
+    /// An attach that had to finish in the background: what its reply would have
+    /// done, told through the next `status()` instead.
+    pub(super) async fn finish_background_attach(&self, machine_id: &str) {
+        let Some(record) = load_instance_record(&self.project_dir, machine_id) else {
+            return;
+        };
+        let recovery = self.recover_attached_kernels(machine_id, &record).await;
+        let finish_note = self.resume_queued_finish(machine_id);
+        self.queue_alerts(vec![format!(
+            "Machine {machine_id} is attached.\n{recovery}{finish_note}"
+        )])
+        .await;
+    }
+
+    /// Bring a stopped machine back. The meter opens first, so a resume whose
+    /// answer gets lost can't bill silently, and moves to this session's pool
+    /// only once the machine is really back.
+    async fn resume(
         &self,
         machine_id: &str,
-    ) -> Result<Option<FenceReason>, String> {
-        let mut state = self.state.lock().await;
-        let Some(existing) = state.instances.get_mut(machine_id) else {
-            return Ok(None);
+        record: &crate::state::InstanceRecord,
+    ) -> anyhow::Result<()> {
+        let runtime = self
+            .runtime_for(&record.runtime)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let pool = {
+            let state = self.state.lock().await;
+            state.reset_known_hosts(machine_id);
+            state.pool()
         };
-        if let Some(reason) = existing.fenced {
-            existing.stop_heartbeat();
-            return Ok(Some(reason));
+        let log_failure = |what: &str, result: anyhow::Result<Option<()>>| {
+            if let Err(error) = result {
+                tracing::warn!(target: super::LOG_TARGET, instance = %machine_id, "Could not {what}: {error:#}");
+            }
+        };
+        log_failure(
+            "open its meter",
+            with_record(&self.project_dir, machine_id, |record| {
+                record.phase = Phase::Running;
+                record.meter_billing(now_ms(), None);
+            }),
+        );
+        if let Err(error) = runtime.resume(record.provider_id()).await {
+            self.record_stopped(machine_id, record.provider_id()).await;
+            return Err(error);
         }
-        Err(format!(
-            "Machine {machine_id} is already attached in this server."
-        ))
+        log_failure(
+            "move its meter to this session",
+            with_record(&self.project_dir, machine_id, |record| {
+                record.meter_adopt(now_ms(), &pool);
+            }),
+        );
+        Ok(())
     }
 
-    /// Reattach, in the background, every durable running machine whose
-    /// ledger owner is this session — the respawned server picks its own
-    /// machines back up without ceremony (and before finalize-wait can fire).
-    /// Never resumes stopped machines, never checks the budget (reattaching
-    /// spends nothing, and supervision must return even when exhausted).
-    pub fn spawn_auto_reattach(&self) {
-        let server = self.clone();
-        tokio::spawn(async move { server.auto_reattach().await });
+    /// The machine stays, whatever failed; this session lets go of it, unless
+    /// that session has it, so its tools keep saying who does. Under a budget a
+    /// machine this attach resumed must not be left billing unenforced. The
+    /// returned text is what the caller reports.
+    pub(super) async fn attach_failed(
+        &self,
+        machine_id: &str,
+        external_id: &str,
+        runtime: &str,
+        mode: ConnectMode,
+        error: &anyhow::Error,
+    ) -> String {
+        {
+            let mut state = self.state.lock().await;
+            let detached = state
+                .instances
+                .get(machine_id)
+                .is_some_and(|instance| instance.detached);
+            if !detached {
+                state.remove_live(machine_id, external_id);
+            }
+        }
+        let billing = if !matches!(mode, ConnectMode::Attach { resumed: true, .. }) {
+            String::new()
+        } else if error.is::<BudgetUnenforceable>() {
+            let target = CleanupTarget {
+                machine_id: machine_id.to_string(),
+                external_id: external_id.to_string(),
+                runtime: runtime.to_string(),
+            };
+            match self
+                .explicit_cleanup_instance(&target, CleanupAction::Stop, true, false)
+                .await
+            {
+                Ok(_) => " Because a budget is set and the machine has no self-cleanup to enforce it, it was stopped again, so only its storage is billing. terminate() ends that; a new machine with SSH (for example cloud-type = \"SECURE\" on RunPod) can run under the budget.".to_string(),
+                Err(stop_error) => format!(
+                    " ACTION NEEDED — machine {machine_id} (provider id {external_id}) may still be running and billing: it was resumed, its budget cannot be enforced, and stopping it again failed ({stop_error}). call stop(instance=\"{machine_id}\") to end it; if that keeps failing, tell the user."
+                ),
+            }
+        } else {
+            " The machine was resumed and is billing.".to_string()
+        };
+        format!("Attach of machine {machine_id} failed: {error:#}.{billing}")
     }
 
-    pub(super) async fn auto_reattach(&self) {
-        let project_dir = self.state.lock().await.project_dir.clone();
+    /// Reattach every machine charged to this session that is running or was
+    /// still being set up when its server died — the respawned server picks its
+    /// own machines back up without ceremony. Never resumes stopped machines,
+    /// never checks the budget (reattaching spends nothing, and supervision must
+    /// return even when exhausted).
+    /// Hold a machine or kernel call made right after a server restart until
+    /// this session's machines are back, rather than answering "not found,
+    /// retry" to an agent that has no way to tell how long to wait. Bounded:
+    /// past it the call answers from whatever state there is.
+    ///
+    /// A call whose machine is already back doesn't wait for the others.
+    pub(super) async fn settle_startup(&self, target: StartupTarget<'_>) {
+        const MOST: std::time::Duration = std::time::Duration::from_mins(3);
+        let deadline = tokio::time::Instant::now() + MOST;
+        while tokio::time::Instant::now() < deadline {
+            let starting = self
+                .startup_check_running
+                .load(std::sync::atomic::Ordering::Acquire);
+            {
+                let state = self.state.lock().await;
+                let target_machine = match target {
+                    StartupTarget::Kernel(kernel_id) => state.instance_for_kernel(kernel_id),
+                    StartupTarget::Machine(id) => id.filter(|id| state.instances.contains_key(*id)),
+                    StartupTarget::Any => None,
+                };
+                let settled = !starting && state.reattaching.is_empty();
+                if settled || target_machine.is_some_and(|id| !state.reattaching.contains(id)) {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    pub async fn auto_reattach(&self) {
         let mut mine = Vec::new();
         {
             let mut state = self.state.lock().await;
-            for (machine_id, record) in crate::state::list_instance_records(&project_dir) {
-                if record.phase != Phase::Running || state.instances.contains_key(&machine_id) {
-                    continue;
-                }
-                match state.machine_ledger_owner(&machine_id) {
-                    Ok(owner) if owner.as_deref() == Some(self.lease_owner.as_str()) => {
-                        state.reattaching.insert(machine_id.clone());
-                        mine.push(machine_id);
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        // Skipping silently would leave a possibly-ours
-                        // running machine unsupervised with no signal.
-                        self.start_failures.lock().await.push(format!(
-                            "Automatic reattach skipped machine {machine_id}: its spend owner could not be read ({error}); attach(\"{machine_id}\") manually if it is yours"
-                        ));
-                    }
+            let pool = state.pool();
+            for (machine_id, record) in crate::state::list_instance_records(&self.project_dir) {
+                if matches!(record.phase, Phase::Running | Phase::Provisioning)
+                    && !state.instances.contains_key(&machine_id)
+                    && record.pool() == Some(pool.as_str())
+                {
+                    state.reattaching.insert(machine_id.clone());
+                    mine.push(machine_id);
                 }
             }
         }
+        // Only now: `settle_startup` must never see neither flag set while a
+        // reattach is about to begin.
+        self.startup_check_running
+            .store(false, std::sync::atomic::Ordering::Release);
         for machine_id in mine {
             let result = self.attach_machine(machine_id.clone(), false, true).await;
-            self.state.lock().await.reattaching.remove(&machine_id);
+            {
+                // One still finishing in the background is still reconnecting.
+                let mut state = self.state.lock().await;
+                if !state.reattaching_in_background.contains(&machine_id) {
+                    state.reattaching.remove(&machine_id);
+                }
+            }
             match result {
                 Ok(reply) if !reply.is_error.unwrap_or(false) => {
                     tracing::info!(target: super::LOG_TARGET, instance = %machine_id, "Automatically reattached");

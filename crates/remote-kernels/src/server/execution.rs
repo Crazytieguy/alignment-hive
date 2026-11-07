@@ -8,6 +8,10 @@
 //! outputs that completed for that reply go to `recovered_executions` for
 //! `get_output()` instead of being consumed. Cancelling never interrupts the
 //! kernel.
+//!
+//! A socket dying during a cell is neither a result nor a failure: the cell
+//! carries on, the waiter is told, and the cell comes back to
+//! `pending_executions` when the socket does (see `kernel_recovery`).
 
 use std::fmt::Write;
 
@@ -19,6 +23,7 @@ use crate::config::Cleanup;
 use crate::images::ImageCollector;
 use crate::jupyter::messages::ExecutionOutput;
 
+use super::kernel_recovery::CONNECTION_DOWN;
 use super::params::{ExecuteParams, GetOutputParams, WaitParams};
 use super::{RemoteKernelsServer, err_text};
 
@@ -83,7 +88,7 @@ enum WaitOutcome {
     Completed(CompletedOutput),
     StillRunning,
     Cancelled,
-    Fenced(String),
+    Detached(String),
     ConnectionLost,
 }
 
@@ -91,6 +96,16 @@ enum WaitOutcome {
 /// handler.
 fn cancelled_reply() -> Result<CallToolResult, McpError> {
     err_text("Cancelled by the client; pending results were kept for wait()/get_output().")
+}
+
+/// What a waiter hears when the socket dies during its cell.
+fn dropped_during_cell(kernel_id: &str, cell_number: Option<u32>) -> String {
+    let collect = cell_number.map_or_else(String::new, |cell_number| {
+        format!(" Collect its output with get_output(kernel_id=\"{kernel_id}\", cell_number={cell_number}).")
+    });
+    format!(
+        "The connection to the machine dropped before this cell finished. It may still be running. The connection is retried automatically, and status() reports if the machine or kernel is gone.{collect}"
+    )
 }
 
 /// Render an output's reply text, adding its images to `images`. Image
@@ -143,6 +158,7 @@ impl RemoteKernelsServer {
         ctx: CallContext,
     ) -> Result<CallToolResult, McpError> {
         self.check_budget().await?;
+        self.reconnect_kernel_now(&params.kernel_id).await;
 
         let background = params.background.unwrap_or(false);
         if background && params.timeout.is_some() {
@@ -156,28 +172,6 @@ impl RemoteKernelsServer {
         let timeout_secs = params.timeout.unwrap_or(30);
         let queue = params.queue.unwrap_or(false);
 
-        let (guard_instance, guard_external_id) = {
-            let state = self.state.lock().await;
-            let Some(machine_id) = state
-                .instance_for_kernel(&params.kernel_id)
-                .map(String::from)
-            else {
-                return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
-            };
-            let instance = &state.instances[&machine_id];
-            if let Some(message) = Self::fenced_message(instance) {
-                return err_text(message);
-            }
-            (machine_id, instance.external_id.clone())
-        };
-        let mutation_guard = match self
-            .mutation_guard(&guard_instance, &guard_external_id)
-            .await
-        {
-            Ok(guard) => guard,
-            Err(message) => return err_text(message),
-        };
-
         let (mut result_rx, cell_number, kernel_id, machine_id, cleanup) = {
             let mut state = self.state.lock().await;
             let Some(machine_id) = state
@@ -186,30 +180,40 @@ impl RemoteKernelsServer {
             else {
                 return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
             };
-            if crate::state::load_lifecycle_record(&state.project_dir, &machine_id)
-                .finish_intent
-                .is_some()
+            if crate::state::load_instance_record(&self.project_dir, &machine_id)
+                .is_some_and(|record| record.finish_intent.is_some())
             {
                 return err_text(
-                    "A finish() plan is queued for this machine. Wait for it to complete before \
-                     executing more code, or supersede it with a new finish() plan.",
+                    "A finish() plan is queued for this machine, so it takes no new code. status() \
+                     shows its progress. To keep working instead, call finish(then=\"keep\"), which \
+                     replaces the plan; the machine takes new code again once running work finishes.",
                 );
             }
             let inst = state.instances.get_mut(&machine_id).expect("resolved");
-            if let Some(message) = Self::fenced_message(inst) {
+            if let Some(message) = Self::detached_message(inst) {
                 return err_text(message);
+            }
+            if inst.ending {
+                return err_text(format!(
+                    "Machine {machine_id} is being stopped or terminated, so it takes no new executions."
+                ));
             }
             let cleanup = inst.cleanup;
 
-            let Some(conn) = inst.kernel_connections.get(&params.kernel_id) else {
-                return err_text(format!(
-                    "Kernel {} exists but its connection was lost. Use restart_kernel().",
-                    params.kernel_id
-                ));
+            let Some(conn) = inst
+                .kernel_connections
+                .get(&params.kernel_id)
+                .filter(|conn| !conn.is_closed())
+            else {
+                return err_text(CONNECTION_DOWN);
             };
 
-            // Check if kernel is busy.
-            if conn.has_pending_work() && !queue {
+            // Check if kernel is busy, with a cell the socket knows or one it doesn't.
+            let running_out_of_sight = inst
+                .running_cells
+                .keys()
+                .any(|(id, _)| *id == params.kernel_id);
+            if (conn.has_pending_work() || running_out_of_sight) && !queue {
                 return err_text(
                     "Kernel is busy. Use queue=true to wait, or interrupt() to cancel the current execution.",
                 );
@@ -256,7 +260,7 @@ impl RemoteKernelsServer {
                     // receiver under — say so instead of silently dropping
                     // the only handle to the result.
                     msg.push_str(
-                        "\nWARNING: its notebook cell could not be created, so the result cannot be collected with get_output(); the kernel still runs it, and the machine-side recorder (if active) captures the output.",
+                        "\nWARNING: its notebook cell could not be created, so get_output() can't collect the result. The kernel still runs it; its output may reach the notebook after a reconnect, so re-run the cell if you need the result.",
                     );
                 }
                 return Ok(CallToolResult::success(vec![ContentBlock::text(msg)]));
@@ -264,7 +268,6 @@ impl RemoteKernelsServer {
 
             (rx, cell_number, kernel_id, machine_id, cleanup)
         };
-        drop(mutation_guard);
         // State lock dropped here — we can await freely.
 
         if wait_uncapped {
@@ -317,10 +320,9 @@ impl RemoteKernelsServer {
         }
 
         let Ok(Some(output)) = waited else {
-            return Err(McpError::internal_error(
-                "Kernel connection dropped before execution completed",
-                None,
-            ));
+            return Ok(self
+                .lost_socket_reply(&machine_id, &kernel_id, cell_number)
+                .await);
         };
 
         // Update notebook with final output.
@@ -352,13 +354,14 @@ impl RemoteKernelsServer {
         let Some(kernel_id) = params.kernel_id else {
             return self.wait_all(timeout, ctx).await;
         };
+        self.reconnect_kernel_now(&kernel_id).await;
         let held = {
             let mut state = self.state.lock().await;
             let Some(machine_id) = state.instance_for_kernel(&kernel_id).map(String::from) else {
                 return err_text(Self::unknown_kernel_message(&state, &kernel_id));
             };
             let inst = state.instances.get_mut(&machine_id).expect("resolved");
-            if let Some(message) = Self::fenced_message(inst) {
+            if let Some(message) = Self::detached_message(inst) {
                 return err_text(format!("{message}; the execution continues on the machine"));
             }
             let Some(cell_number) = inst
@@ -368,6 +371,9 @@ impl RemoteKernelsServer {
                 .map(|(_, cell_number)| *cell_number)
                 .min()
             else {
+                if inst.closed_kernels().contains(&kernel_id) {
+                    return err_text(CONNECTION_DOWN);
+                }
                 return err_text(format!(
                     "No available pending execution found for kernel {kernel_id}."
                 ));
@@ -409,54 +415,66 @@ impl RemoteKernelsServer {
             },
         }
 
+        self.reconnect_all_now().await;
         let deadline = timeout_secs.map(|secs| {
             tokio::time::Instant::now() + std::time::Duration::from_secs(clamp_timeout_secs(secs))
         });
         let mut sections: Vec<Section> = Vec::new();
         let mut any_error = false;
-        // Executions on already-fenced machines stay in place, exactly like
+        // Executions on already-detached machines stay in place, exactly like
         // the single-kernel wait, which refuses before consuming a receiver.
-        let mut held: Vec<HeldExecution> =
+        let mut held: Vec<HeldExecution> = {
+            let mut state = self.state.lock().await;
+            for (_, inst) in state
+                .instances
+                .iter()
+                .filter(|(_, inst)| inst.detached && !inst.pending_executions.is_empty())
             {
-                let mut state = self.state.lock().await;
-                for (_, inst) in state.instances.iter().filter(|(_, inst)| {
-                    inst.fenced.is_some() && !inst.pending_executions.is_empty()
-                }) {
-                    let message = Self::fenced_message(inst).expect("filtered on fenced");
-                    any_error = true;
-                    sections.push(Section::Text(format!(
-                        "{message}; its pending executions were left in place"
-                    )));
-                }
-                let mut keys: Vec<(String, String, u32)> = state
-                    .instances
-                    .iter()
-                    .filter(|(_, inst)| inst.fenced.is_none())
-                    .flat_map(|(machine_id, inst)| {
-                        inst.pending_executions
-                            .keys()
-                            .map(|(kernel_id, cell)| (machine_id.clone(), kernel_id.clone(), *cell))
-                    })
-                    .collect();
-                keys.sort();
-                let mut held = Vec::new();
-                for (machine_id, kernel_id, cell_number) in keys {
-                    let inst = state.instances.get_mut(&machine_id).expect("listed");
-                    let result_rx = inst
-                        .pending_executions
-                        .remove(&(kernel_id.clone(), cell_number))
-                        .expect("listed pending execution");
-                    held.push(HeldExecution {
-                        result_rx,
-                        machine_id,
-                        kernel_id,
-                        cell_number: Some(cell_number),
-                        cleanup: inst.cleanup,
-                    });
-                }
-                held
-            };
+                let message = Self::detached_message(inst).expect("filtered on detached");
+                any_error = true;
+                sections.push(Section::Text(format!(
+                    "{message}; its pending executions were left in place"
+                )));
+            }
+            let mut keys: Vec<(String, String, u32)> = state
+                .instances
+                .iter()
+                .filter(|(_, inst)| !inst.detached)
+                .flat_map(|(machine_id, inst)| {
+                    inst.pending_executions
+                        .keys()
+                        .map(|(kernel_id, cell)| (machine_id.clone(), kernel_id.clone(), *cell))
+                })
+                .collect();
+            keys.sort();
+            let mut held = Vec::new();
+            for (machine_id, kernel_id, cell_number) in keys {
+                let inst = state.instances.get_mut(&machine_id).expect("listed");
+                let result_rx = inst
+                    .pending_executions
+                    .remove(&(kernel_id.clone(), cell_number))
+                    .expect("listed pending execution");
+                held.push(HeldExecution {
+                    result_rx,
+                    machine_id,
+                    kernel_id,
+                    cell_number: Some(cell_number),
+                    cleanup: inst.cleanup,
+                });
+            }
+            held
+        };
         if held.is_empty() && sections.is_empty() {
+            let down = self
+                .state
+                .lock()
+                .await
+                .instances
+                .values()
+                .any(|instance| !instance.detached && !instance.closed_kernels().is_empty());
+            if down {
+                return err_text(CONNECTION_DOWN);
+            }
             return err_text("No pending executions found on any kernel.");
         }
 
@@ -482,7 +500,7 @@ impl RemoteKernelsServer {
                     Ok(output) => {
                         let done = held.swap_remove(index);
                         let label = batch_label(&done);
-                        match self.park_if_fenced(&done, output).await {
+                        match self.park_if_detached(&done, output).await {
                             Ok(output) => {
                                 if let Some(cell_number) = done.cell_number {
                                     self.update_notebook_cell(
@@ -509,24 +527,33 @@ impl RemoteKernelsServer {
                     Err(tokio::sync::oneshot::error::TryRecvError::Empty) => index += 1,
                     Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                         let done = held.swap_remove(index);
-                        any_error = true;
                         // A takeover tears down connections; prefer its
                         // guidance over a bare connection-lost line.
-                        let fence = {
+                        let detached = {
                             let state = self.state.lock().await;
                             state
                                 .instances
                                 .get(&done.machine_id)
-                                .and_then(Self::fenced_message)
+                                .and_then(Self::detached_message)
                         };
-                        sections.push(Section::Text(match fence {
-                            Some(message) => format!(
-                                "[{}] {message}; the execution continues on the machine",
-                                batch_label(&done)
-                            ),
-                            None => {
-                                format!("[{}] Kernel connection was lost.", batch_label(&done))
+                        sections.push(Section::Text(match detached {
+                            Some(message) => {
+                                any_error = true;
+                                format!(
+                                    "[{}] {message}; the execution continues on the machine",
+                                    batch_label(&done)
+                                )
                             }
+                            None => format!(
+                                "[{}] {}",
+                                batch_label(&done),
+                                self.lost_socket_text(
+                                    &done.machine_id,
+                                    &done.kernel_id,
+                                    done.cell_number
+                                )
+                                .await
+                            ),
                         }));
                     }
                 }
@@ -542,7 +569,7 @@ impl RemoteKernelsServer {
                     let message = state
                         .instances
                         .get(&held[index].machine_id)
-                        .and_then(Self::fenced_message);
+                        .and_then(Self::detached_message);
                     if let Some(message) = message {
                         let dropped = held.swap_remove(index);
                         any_error = true;
@@ -698,7 +725,7 @@ impl RemoteKernelsServer {
         is_error: bool,
     ) -> Result<CallToolResult, McpError> {
         let spend = self.state.lock().await.session_spend();
-        if let Some(spend_line) = self.format_spend_line(spend) {
+        if let Some(spend_line) = self.budget_line(&spend).map(|line| format!("\n[{line}]")) {
             body.push_str(&spend_line);
         }
         if cleanup_disabled {
@@ -709,17 +736,17 @@ impl RemoteKernelsServer {
         Ok(execution_reply(body, images, is_error))
     }
 
-    /// Post-completion fence gate shared by the wait paths: a fenced machine
+    /// Post-completion detach gate shared by the wait paths: a detached machine
     /// keeps the output in `recovered_executions` (for `get_output()` after a
-    /// takeover is resolved) and reports the fence instead of the result.
-    async fn park_if_fenced(
+    /// takeover is resolved) and reports the detach instead of the result.
+    async fn park_if_detached(
         &self,
         done: &HeldExecution,
         output: ExecutionOutput,
     ) -> Result<ExecutionOutput, String> {
         let mut state = self.state.lock().await;
         if let Some(inst) = state.instances.get_mut(&done.machine_id)
-            && let Some(message) = Self::fenced_message(inst)
+            && let Some(message) = Self::detached_message(inst)
         {
             if let Some(cell_number) = done.cell_number {
                 inst.recovered_executions
@@ -737,6 +764,9 @@ impl RemoteKernelsServer {
         ctx: CallContext,
     ) -> Result<CallToolResult, McpError> {
         let cleanup = held.cleanup;
+        let machine_id = held.machine_id.clone();
+        let kernel_id = held.kernel_id.clone();
+        let cell_number = held.cell_number;
         let deadline = timeout_secs.map(|secs| {
             tokio::time::Instant::now() + std::time::Duration::from_secs(clamp_timeout_secs(secs))
         });
@@ -751,20 +781,51 @@ impl RemoteKernelsServer {
                 ))]))
             }
             WaitOutcome::Cancelled => cancelled_reply(),
-            WaitOutcome::Fenced(message) => {
+            WaitOutcome::Detached(message) => {
                 err_text(format!("{message}; the execution continues on the machine"))
             }
-            WaitOutcome::ConnectionLost => err_text("Kernel connection was lost."),
+            WaitOutcome::ConnectionLost => Ok(self
+                .lost_socket_reply(&machine_id, &kernel_id, cell_number)
+                .await),
         }
     }
 
+    /// Why a waiter's socket went away: the socket alone, or the whole machine
+    /// (which takes its sockets with it, and its cell).
+    async fn lost_socket_text(
+        &self,
+        machine_id: &str,
+        kernel_id: &str,
+        cell_number: Option<u32>,
+    ) -> String {
+        if self.state.lock().await.instances.contains_key(machine_id) {
+            dropped_during_cell(kernel_id, cell_number)
+        } else {
+            format!(
+                "Machine {machine_id} stopped or was deleted while this cell was running. Call status()."
+            )
+        }
+    }
+
+    async fn lost_socket_reply(
+        &self,
+        machine_id: &str,
+        kernel_id: &str,
+        cell_number: Option<u32>,
+    ) -> CallToolResult {
+        CallToolResult::success(vec![ContentBlock::text(
+            self.lost_socket_text(machine_id, kernel_id, cell_number)
+                .await,
+        )])
+    }
+
     /// Put one still-running execution back for a later call (a timeout or
-    /// a cancelled call). On a fenced machine the receiver is dropped instead
-    /// and the fence message returned; attach recovery collects the output.
+    /// a cancelled call). On a detached machine the receiver is dropped instead
+    /// and the detach message returned; attach recovery collects the output.
     async fn repark_one(&self, held: HeldExecution) -> Option<String> {
         let mut state = self.state.lock().await;
         let inst = state.instances.get_mut(&held.machine_id)?;
-        if let Some(message) = Self::fenced_message(inst) {
+        if let Some(message) = Self::detached_message(inst) {
             return Some(message);
         }
         if let Some(cell_number) = held.cell_number {
@@ -777,8 +838,8 @@ impl RemoteKernelsServer {
     /// Hold one pending execution to completion (the engine behind
     /// `wait_held`; `wait_all` polls its batch directly). On `StillRunning`
     /// and `Cancelled` the receiver has been reinserted into
-    /// `pending_executions`; on `Fenced` after completion the output is
-    /// parked in `recovered_executions` via `park_if_fenced`.
+    /// `pending_executions`; on `Detached` after completion the output is
+    /// parked in `recovered_executions` via `park_if_detached`.
     #[allow(clippy::cast_precision_loss, clippy::collapsible_if)]
     async fn wait_execution(
         &self,
@@ -788,8 +849,8 @@ impl RemoteKernelsServer {
     ) -> WaitOutcome {
         let progress = ctx.progress.as_ref();
         let started = std::time::Instant::now();
-        let mut fence_check = tokio::time::interval(std::time::Duration::from_millis(200));
-        fence_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut detach_check = tokio::time::interval(std::time::Duration::from_millis(200));
+        detach_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut progress_tick = tokio::time::interval(std::time::Duration::from_mins(1));
         progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         progress_tick.tick().await;
@@ -798,11 +859,11 @@ impl RemoteKernelsServer {
         let output = loop {
             tokio::select! {
                 result = &mut held.result_rx => break result.ok(),
-                _ = fence_check.tick() => {
+                _ = detach_check.tick() => {
                     let state = self.state.lock().await;
                     if let Some(inst) = state.instances.get(&held.machine_id) {
-                        if let Some(message) = Self::fenced_message(inst) {
-                            return WaitOutcome::Fenced(message);
+                        if let Some(message) = Self::detached_message(inst) {
+                            return WaitOutcome::Detached(message);
                         }
                     }
                 }
@@ -824,13 +885,13 @@ impl RemoteKernelsServer {
                 }
                 () = async { timeout.as_mut().expect("guarded timeout").as_mut().await }, if timeout.is_some() => {
                     return match self.repark_one(held).await {
-                        Some(message) => WaitOutcome::Fenced(message),
+                        Some(message) => WaitOutcome::Detached(message),
                         None => WaitOutcome::StillRunning,
                     };
                 }
                 () = ctx.cancel.cancelled() => {
                     return match self.repark_one(held).await {
-                        Some(message) => WaitOutcome::Fenced(message),
+                        Some(message) => WaitOutcome::Detached(message),
                         None => WaitOutcome::Cancelled,
                     };
                 }
@@ -840,15 +901,15 @@ impl RemoteKernelsServer {
         let Some(output) = output else {
             let state = self.state.lock().await;
             if let Some(inst) = state.instances.get(&held.machine_id) {
-                if let Some(message) = Self::fenced_message(inst) {
-                    return WaitOutcome::Fenced(message);
+                if let Some(message) = Self::detached_message(inst) {
+                    return WaitOutcome::Detached(message);
                 }
             }
             return WaitOutcome::ConnectionLost;
         };
 
-        match self.park_if_fenced(&held, output).await {
-            Err(message) => WaitOutcome::Fenced(message),
+        match self.park_if_detached(&held, output).await {
+            Err(message) => WaitOutcome::Detached(message),
             Ok(output) => {
                 if let Some(cell_number) = held.cell_number {
                     self.update_notebook_cell(&held.kernel_id, cell_number, &output)
@@ -866,6 +927,7 @@ impl RemoteKernelsServer {
     ) -> Result<CallToolResult, McpError> {
         let wait = params.wait.unwrap_or(true);
         let timeout_secs = params.timeout.unwrap_or(30);
+        self.reconnect_kernel_now(&params.kernel_id).await;
 
         let (mut result_rx, machine_id, cleanup) = {
             let mut state = self.state.lock().await;
@@ -876,7 +938,7 @@ impl RemoteKernelsServer {
                 return err_text(Self::unknown_kernel_message(&state, &params.kernel_id));
             };
             let inst = state.instances.get_mut(&machine_id).expect("resolved");
-            if let Some(message) = Self::fenced_message(inst) {
+            if let Some(message) = Self::detached_message(inst) {
                 return err_text(message);
             }
 
@@ -892,6 +954,9 @@ impl RemoteKernelsServer {
                 return self.single_output_reply(&ctx, done, None).await;
             }
             let Some(rx) = inst.pending_executions.remove(&key) else {
+                if inst.closed_kernels().contains(&params.kernel_id) {
+                    return err_text(CONNECTION_DOWN);
+                }
                 return err_text(format!(
                     "No available pending execution found for kernel {} cell {}. It may have completed, or another wait/get_output call may currently hold it.",
                     params.kernel_id, params.cell_number
@@ -901,12 +966,12 @@ impl RemoteKernelsServer {
         };
 
         if wait {
-            // Same engine as wait(): fence ticks, progress keep-alive, and
+            // Same engine as wait(): detach ticks, progress keep-alive, and
             // receiver preservation on timeout. timeout 0 = no cap.
             let held = HeldExecution {
                 result_rx,
-                machine_id,
-                kernel_id: params.kernel_id,
+                machine_id: machine_id.clone(),
+                kernel_id: params.kernel_id.clone(),
                 cell_number: Some(params.cell_number),
                 cleanup,
             };
@@ -927,10 +992,12 @@ impl RemoteKernelsServer {
                     ))]))
                 }
                 WaitOutcome::Cancelled => cancelled_reply(),
-                WaitOutcome::Fenced(message) => {
+                WaitOutcome::Detached(message) => {
                     err_text(format!("{message}; the execution continues on the machine"))
                 }
-                WaitOutcome::ConnectionLost => err_text("Kernel connection was lost."),
+                WaitOutcome::ConnectionLost => Ok(self
+                    .lost_socket_reply(&machine_id, &params.kernel_id, Some(params.cell_number))
+                    .await),
             }
         } else {
             // Non-blocking check.
@@ -957,9 +1024,35 @@ impl RemoteKernelsServer {
                         "Execution is still running.",
                     )]))
                 }
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    err_text("Kernel connection was lost.")
-                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Ok(self
+                    .lost_socket_reply(&machine_id, &params.kernel_id, Some(params.cell_number))
+                    .await),
+            }
+        }
+    }
+
+    /// Finished cells nobody collected go into the notebook now: the machine is
+    /// about to end, and with it any later way of asking for them. Cells still
+    /// running stay pending.
+    pub(super) async fn save_uncollected_outputs(&self, machine_id: &str) {
+        let pending = {
+            let mut state = self.state.lock().await;
+            let Some(instance) = state.instances.get_mut(machine_id) else {
+                return;
+            };
+            std::mem::take(&mut instance.pending_executions)
+        };
+        for ((kernel_id, cell_number), mut result_rx) in pending {
+            if let Ok(output) = result_rx.try_recv() {
+                self.update_notebook_cell(&kernel_id, cell_number, &output)
+                    .await;
+                continue;
+            }
+            let mut state = self.state.lock().await;
+            if let Some(instance) = state.instances.get_mut(machine_id) {
+                instance
+                    .pending_executions
+                    .insert((kernel_id, cell_number), result_rx);
             }
         }
     }
@@ -978,7 +1071,7 @@ impl RemoteKernelsServer {
         if let Some(inst) = state
             .instances
             .get_mut(&machine_id)
-            .filter(|instance| instance.fenced.is_none())
+            .filter(|instance| !instance.detached)
             && let Some(nb) = inst.notebooks.get_mut(kernel_id)
             && let Err(e) = nb.update_cell_output(cell_number, output)
         {

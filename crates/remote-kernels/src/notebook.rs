@@ -215,6 +215,19 @@ impl Notebook {
         Ok(())
     }
 
+    /// Every cell still waiting for its output: its number and execute-request id.
+    pub fn unfinished_cells(&self) -> Vec<(u32, String)> {
+        self.cells
+            .iter()
+            .zip(1u32..)
+            .filter(|(cell, _)| cell["metadata"]["remote_kernels"]["placeholder"] == true)
+            .filter_map(|(cell, number)| {
+                let id = cell["metadata"]["remote_kernels"]["parent_msg_id"].as_str()?;
+                Some((number, id.to_string()))
+            })
+            .collect()
+    }
+
     /// Back-fill one still-empty placeholder by its execute-request message id.
     /// A finalized/live-written cell is never changed, which is the catch-up
     /// dedupe boundary.

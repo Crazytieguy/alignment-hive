@@ -10,21 +10,26 @@ use std::path::Path;
 pub fn server_instructions(project_dir: &Path) -> String {
     format!(
         "Cloud GPU machines with persistent Jupyter kernels.\n\
-         Typical flow: start() a machine → create_kernel() → sync() project files → execute() \
+         Typical flow: start() a machine → sync() project files → create_kernel() → execute() \
          code (kernel state persists across calls) → download() results → stop() or terminate() \
-         when done (configured automatic cleanup is the backstop).\n\
+         when done.\n\
+         Self-cleanup is the backstop: when no server has contacted a machine for five minutes or the \
+         budget has run out, the machine waits for its work, saves results if configured, and \
+         stops or terminates itself as configured.\n\
          start() always creates a fresh machine; its optional label is display-only. status() \
-         lists durable machines. This session's running machines are reattached automatically \
+         lists this project's machines. This session's running machines are reattached automatically \
          when the server starts; attach(machine_id) is for resuming a stopped machine (billing \
          restarts) or adopting a machine from another session. When several machines are \
          active, machine-scoped tools take an \
          `instance` argument; kernel-scoped tools never do (each kernel id routes to its machine \
          automatically). Machines are single-controller: one session drives a machine at a \
-         time, and sharing one across sessions is unsupported — a fenced error means \
-         another session took over; stop using that machine here (attach(force=true) is \
-         the deliberate way to move control).\n\
-         Everything executed is auto-saved to a local .ipynb notebook (path shown at kernel \
-         creation) — inspect it to recover context after conversation compaction.\n\
+         time, and sharing one across sessions is unsupported — if a tool says another session \
+         took control, stop using that machine here (attach(force=true) is the deliberate way \
+         to move control).\n\
+         Code and collected output are saved to a local .ipynb notebook (path shown at kernel \
+         creation) — inspect it to recover context after conversation compaction. Output \
+         the server has received is saved even if never collected; a cell still running when \
+         its machine ends is lost, so finish() is the way to let work complete first.\n\
          For long cells, prefer wait() over polling — holding the call open keeps a background \
          session alive; with no kernel_id, wait() covers every pending execution. Polling with \
          get_output() is fine when there is other work to do meanwhile.\n\

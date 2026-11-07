@@ -1,23 +1,254 @@
 //! One-way upgrades from older on-disk layouts, run on every startup by
 //! [`AppState::new_with_keys_root`]. Each is safe to re-run: once its input
-//! has been migrated it does nothing. Log calls name the parent's target so
-//! the diagnostics read `remote_kernels::state` as they did before the split.
+//! has been migrated it does nothing. Old files are copied from, never moved:
+//! an older binary may still be running in another session.
+//!
+//! A problem with old input never drops a machine: the record is kept, its
+//! spend is marked unknown, and the file is named. A machine whose provider
+//! may still be billing is not something this tool can afford to forget.
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::{
-    AppState, InstanceRecord, LifecycleRecord, PendingTransition, Phase, instance_dir,
-    list_instance_records, load_instance_record, state_dir, try_operation_lock,
-    validate_machine_id,
+    AppState, CreateAttempt, FinishIntent, FinishThen, InstanceRecord, MeterInterval, Phase,
+    RECORD_FILE, SpendHistoryEntry, append_spend_history, create_record, instance_dir,
+    instance_ids, list_instance_records, now_ms, state_dir, with_record,
 };
 use crate::config::Cleanup;
+use crate::ledger;
 
-/// The legacy `spend.json` shape.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct PersistedSpend {
-    accumulated_spend: f64,
+/// The old `lifecycle.json`, reduced to what survives.
+#[derive(Default, Deserialize)]
+struct OldLifecycle {
+    #[serde(default)]
+    supervision_note: Option<String>,
+    #[serde(default)]
+    finish_intent: Option<OldFinishIntent>,
+    #[serde(default)]
+    storage_rate_per_hr: Option<f64>,
+    #[serde(default)]
+    storage_rate_note: Option<String>,
+    #[serde(default)]
+    external_volume_id: Option<String>,
+}
+
+/// Plans from before plans had tokens have none.
+#[derive(Deserialize)]
+struct OldFinishIntent {
+    #[serde(default)]
+    uuid: String,
+    #[serde(default)]
+    downloads: Vec<String>,
+    then: FinishThen,
+}
+
+impl From<OldFinishIntent> for FinishIntent {
+    fn from(old: OldFinishIntent) -> Self {
+        Self {
+            uuid: if old.uuid.is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                old.uuid
+            },
+            downloads: old.downloads,
+            then: old.then,
+        }
+    }
+}
+
+/// The old `unconfirmed.json`.
+#[derive(Deserialize)]
+struct OldUnconfirmed {
+    runtime: String,
+    expected_name: String,
+    created_at_epoch: u64,
+    error: String,
+    cleanup: Cleanup,
+    jupyter_token: String,
+    ssh_key_path: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    remote_dirs: Option<crate::runtime::RemoteDirs>,
+}
+
+/// Run every migration; what comes back is the files whose spend is unknown.
+pub(super) fn run(project_dir: &Path) -> Vec<String> {
+    let mut problems = Vec::new();
+    for machine_id in instance_ids(project_dir) {
+        problems.extend(migrate_machine(project_dir, &machine_id));
+    }
+    problems.extend(import_spend_once(project_dir));
+    problems
+}
+
+fn owner_pool(owner: &str) -> String {
+    format!("session:{owner}")
+}
+
+fn migrate_machine(project_dir: &Path, machine_id: &str) -> Option<String> {
+    let dir = instance_dir(project_dir, machine_id);
+    if dir.join(RECORD_FILE).exists() {
+        return None;
+    }
+    let state_path = dir.join("state.json");
+    if state_path.exists() {
+        return migrate_state_file(project_dir, machine_id, &dir, &state_path);
+    }
+    let marker_path = dir.join("unconfirmed.json");
+    if marker_path.exists() {
+        return migrate_marker(project_dir, machine_id, &marker_path);
+    }
+    None
+}
+
+fn migrate_state_file(
+    project_dir: &Path,
+    machine_id: &str,
+    dir: &Path,
+    state_path: &Path,
+) -> Option<String> {
+    let content = std::fs::read_to_string(state_path).ok()?;
+    // Without this file nothing says what the machine is, so it stays as it
+    // is and gets named.
+    let mut record: InstanceRecord = match serde_json::from_str(&content) {
+        Ok(record) => record,
+        Err(error) => return Some(format!("{}: {error}", state_path.display())),
+    };
+    let lifecycle_path = dir.join("lifecycle.json");
+    match std::fs::read(&lifecycle_path) {
+        Ok(bytes) => match serde_json::from_slice::<OldLifecycle>(&bytes) {
+            Ok(lifecycle) => {
+                record.supervision_note = lifecycle.supervision_note;
+                record.finish_intent = lifecycle.finish_intent.map(FinishIntent::from);
+                record.storage_rate_per_hr = lifecycle.storage_rate_per_hr;
+                record.storage_rate_note = lifecycle.storage_rate_note;
+                record.external_volume_id = lifecycle.external_volume_id;
+            }
+            Err(error) => {
+                record.spend_unknown = Some(format!("{}: {error}", lifecycle_path.display()));
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            record.spend_unknown = Some(format!("{}: {error}", lifecycle_path.display()));
+        }
+    }
+    let now = now_ms();
+    let imported = ledger::import_machine(project_dir, machine_id, now);
+    record.spend_unknown = record.spend_unknown.or(imported.problem);
+    // One closed interval per owner: an hour at a rate of what they spent.
+    record.meter = imported
+        .owner_totals
+        .iter()
+        .map(|(owner, spent)| MeterInterval {
+            start_ms: now.saturating_sub(3_600_000),
+            end_ms: Some(now),
+            compute_rate: *spent,
+            storage_rate: 0.0,
+            pool: owner_pool(owner),
+        })
+        .collect();
+    let pool = owner_pool(imported.owner.as_deref().unwrap_or(ledger::LEGACY_OWNER));
+    if record.phase == Phase::Stopped {
+        record.meter.push(MeterInterval {
+            start_ms: now,
+            end_ms: None,
+            compute_rate: 0.0,
+            storage_rate: record.storage_rate(),
+            pool,
+        });
+    } else {
+        record.meter.push(MeterInterval {
+            start_ms: now,
+            end_ms: None,
+            compute_rate: record.cost_per_hr.max(0.0),
+            storage_rate: record.storage_rate(),
+            pool,
+        });
+    }
+    match create_record(project_dir, machine_id, &record) {
+        Ok(()) => None,
+        Err(error) => Some(format!("{}: {error}", dir.join(RECORD_FILE).display())),
+    }
+}
+
+/// A create whose outcome the old binary never settled: no `state.json`, and
+/// still possibly a billing machine.
+fn migrate_marker(project_dir: &Path, machine_id: &str, marker_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(marker_path).ok()?;
+    let marker: OldUnconfirmed = match serde_json::from_str(&content) {
+        Ok(marker) => marker,
+        Err(error) => return Some(format!("{}: {error}", marker_path.display())),
+    };
+    let mut record = InstanceRecord::unconfirmed(
+        marker.runtime,
+        marker.cleanup,
+        (marker.jupyter_token, marker.ssh_key_path),
+        CreateAttempt {
+            expected_name: marker.expected_name,
+            created_at_epoch: marker.created_at_epoch,
+            error: Some(marker.error),
+        },
+        owner_pool(&super::resolve_session_owner()),
+    );
+    record.label = marker.label;
+    record.remote_dirs = marker.remote_dirs;
+    create_record(project_dir, machine_id, &record)
+        .err()
+        .map(|error| format!("{}: {error}", marker_path.display()))
+}
+
+/// Old spend belonging to no surviving record goes to the history, once:
+/// closed epochs' rollups and machines terminated in the open epoch.
+fn import_spend_once(project_dir: &Path) -> Vec<String> {
+    let mut problems = Vec::new();
+    let marker = state_dir(project_dir).join("spend-imported");
+    if marker.exists() {
+        return problems;
+    }
+    let mut entries = Vec::new();
+    match ledger::import_rollups(project_dir) {
+        Ok(owners) => {
+            for (owner, spent) in owners {
+                entries.push(SpendHistoryEntry {
+                    machine_id: format!("rollup:{owner}"),
+                    pool: owner_pool(&owner),
+                    spent,
+                });
+            }
+        }
+        Err(problem) => problems.push(problem),
+    }
+    let now = now_ms();
+    for machine_id in ledger::ledger_machine_ids(project_dir) {
+        if instance_dir(project_dir, &machine_id).exists() {
+            continue;
+        }
+        let imported = ledger::import_machine(project_dir, &machine_id, now);
+        problems.extend(imported.problem);
+        for (owner, spent) in imported.owner_totals {
+            entries.push(SpendHistoryEntry {
+                machine_id: machine_id.clone(),
+                pool: owner_pool(&owner),
+                spent,
+            });
+        }
+    }
+    // Written only once it can be trusted: a re-run writes the same lines,
+    // and the last one per machine and pool wins.
+    if let Err(error) = append_spend_history(project_dir, &entries) {
+        problems.push(format!("spend-history.jsonl: {error}"));
+        return problems;
+    }
+    if problems.is_empty()
+        && let Err(error) = std::fs::write(&marker, "")
+    {
+        tracing::warn!(target: "remote_kernels::state", "could not write {}: {error}", marker.display());
+    }
+    problems
 }
 
 impl AppState {
@@ -31,24 +262,7 @@ impl AppState {
     /// in place — another live session may still be using them.
     pub(super) fn migrate_key_locations(&self) {
         let project_state = state_dir(&self.project_dir);
-        for (machine_id, _) in list_instance_records(&self.project_dir) {
-            // The record is reloaded and rewritten UNDER the machine's
-            // operation lock — a concurrent server (e.g. an older binary
-            // finishing a stop, or binding a kernel) may write this record,
-            // and saving a stale snapshot would silently revert its update.
-            // An unavailable lock means a live server is driving the
-            // machine; skip — the next startup migrates it.
-            let Some(_lock) = try_operation_lock(&self.project_dir, &machine_id) else {
-                tracing::warn!(
-                    target: "remote_kernels::state",
-                    instance = machine_id,
-                    "key migration skipped: machine is busy in another session"
-                );
-                continue;
-            };
-            let Some(mut record) = load_instance_record(&self.project_dir, &machine_id) else {
-                continue;
-            };
+        for (machine_id, record) in list_instance_records(&self.project_dir) {
             let Some(old) = record.ssh_key_path.as_ref().map(PathBuf::from) else {
                 continue;
             };
@@ -56,34 +270,19 @@ impl AppState {
                 continue;
             }
             let new_path = self.ssh_key_path(&machine_id);
-            match crate::ssh::copy_key_file(&old, &new_path) {
-                Ok(()) => {
+            let result = crate::ssh::copy_key_file(&old, &new_path).and_then(|()| {
+                with_record(&self.project_dir, &machine_id, |record| {
                     record.ssh_key_path = Some(new_path.display().to_string());
-                    if let Err(error) = self.save_record(&machine_id, &record) {
-                        tracing::warn!(
-                            target: "remote_kernels::state",
-                            instance = machine_id,
-                            "key migrated to {} but the record could not be rewritten: {error:#}",
-                            new_path.display()
-                        );
-                    } else {
-                        tracing::info!(
-                            target: "remote_kernels::state",
-                            instance = machine_id,
-                            "migrated SSH key out of the project dir to {}",
-                            new_path.display()
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "remote_kernels::state",
-                        instance = machine_id,
-                        "could not migrate SSH key {} to {} — record keeps the old path: {error:#}",
-                        old.display(),
-                        new_path.display()
-                    );
-                }
+                })
+            });
+            if let Err(error) = result {
+                tracing::warn!(
+                    target: "remote_kernels::state",
+                    instance = machine_id,
+                    "could not migrate SSH key {} to {} — record keeps the old path: {error:#}",
+                    old.display(),
+                    new_path.display()
+                );
             }
         }
         // The stable (vast) key: same byte-exact copy; the account-registered
@@ -104,253 +303,384 @@ impl AppState {
     }
 }
 
-pub(super) fn migrate_legacy_spend(project_dir: &Path) -> anyhow::Result<()> {
-    let path = state_dir(project_dir).join("spend.json");
-    let Some(content) = std::fs::read_to_string(&path).map(Some).or_else(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            Ok(None)
-        } else {
-            Err(error)
-        }
-    })?
-    else {
-        let _ = crate::ledger::EpochGuard::acquire(project_dir)?;
-        return Ok(());
-    };
-    let spend: PersistedSpend = serde_json::from_str(&content)
-        .map_err(|error| anyhow::anyhow!("legacy spend.json is corrupt: {error}"))?;
-    if !spend.accumulated_spend.is_finite() || spend.accumulated_spend < 0.0 {
-        anyhow::bail!("legacy spend.json contains an invalid accumulated_spend");
-    }
-    let guard = crate::ledger::EpochGuard::acquire(project_dir)?;
-    let manifest = guard.manifest()?;
-    let mut event = crate::ledger::event(
-        crate::ledger::EventKind::RateChanged,
-        0.0,
-        0.0,
-        0,
-        Some("legacy-spend-json-migration".to_string()),
-        Some("migrated from legacy spend.json".to_string()),
-    );
-    event.epoch_id = manifest.epoch_id;
-    event.accrued_spend = spend.accumulated_spend;
-    guard.append("legacy-spend", "legacy-spend-json-migration", event)?;
-    std::fs::remove_file(&path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
-}
+#[cfg(test)]
+mod tests {
+    use super::super::{load_instance_record, scan_records};
+    use super::*;
 
-pub(super) fn migrate_pending_transitions(project_dir: &Path) -> anyhow::Result<()> {
-    let dir = state_dir(project_dir).join("ledger");
-    let guard = crate::ledger::EpochGuard::acquire(project_dir)?;
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let Some(machine_id) = file_name.strip_suffix(".pending-transitions.jsonl") else {
-            continue;
-        };
-        validate_machine_id(machine_id).map_err(anyhow::Error::msg)?;
-        let content = std::fs::read_to_string(&path)?;
-        for (index, line) in content.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let transition: PendingTransition = serde_json::from_str(line).map_err(|error| {
-                anyhow::anyhow!(
-                    "pending transition {} line {} is corrupt: {error}",
-                    path.display(),
-                    index + 1
-                )
-            })?;
-            let mut event = crate::ledger::event(
-                crate::ledger::EventKind::RateChanged,
-                0.0,
-                transition.post_action_rate.unwrap_or(0.0),
-                0,
-                Some(transition.uuid.clone()),
-                Some(format!(
-                    "migrated phase-4 remote {:?} transition",
-                    transition.action
-                )),
+    /// Old-format files, written byte-for-byte the way the previous binary
+    /// wrote them.
+    struct OldProject {
+        dir: tempfile::TempDir,
+    }
+
+    const EPOCH: &str = "01234567-epoch";
+    const HOUR: u64 = 3_600_000;
+
+    impl OldProject {
+        fn new() -> Self {
+            let project = Self {
+                dir: tempfile::tempdir().unwrap(),
+            };
+            std::fs::create_dir_all(project.ledger()).unwrap();
+            std::fs::write(
+                project.ledger().join("epoch.json"),
+                format!(r#"{{"epoch_id":"{EPOCH}","phase":"open"}}"#),
+            )
+            .unwrap();
+            project
+        }
+
+        fn path(&self) -> &Path {
+            self.dir.path()
+        }
+
+        fn ledger(&self) -> PathBuf {
+            state_dir(self.path()).join("ledger")
+        }
+
+        fn machine_dir(&self, id: &str) -> PathBuf {
+            let dir = instance_dir(self.path(), id);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn state_json(&self, id: &str, phase: &str, rate: f64) {
+            std::fs::write(
+                self.machine_dir(id).join("state.json"),
+                format!(
+                    r#"{{
+  "machine_id": "{id}",
+  "label": "train",
+  "runtime": "runpod",
+  "external_id": "pod-{id}",
+  "phase": "{phase}",
+  "cleanup": "terminate",
+  "jupyter_token": "tok",
+  "ssh_key_path": "/keys/{id}",
+  "gpu_name": "RTX 4090",
+  "cost_per_hr": {rate},
+  "proxy_port_mapped": false,
+  "kernels": [{{"kernel_id": "k1", "notebook_path": "/nb/k1.ipynb", "name": "main"}}]
+}}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        fn lifecycle_json(&self, id: &str, content: &str) {
+            std::fs::write(self.machine_dir(id).join("lifecycle.json"), content).unwrap();
+        }
+
+        fn ledger_line(&self, id: &str, line: &str) {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.ledger().join(format!("{id}.jsonl")))
+                .unwrap();
+            writeln!(file, "{line}").unwrap();
+        }
+
+        fn event(&self, id: &str, uuid: &str, ago_ms: u64, kind: &str, rate: f64, owner: &str) {
+            let ts_ms = now_ms() - ago_ms;
+            let owner = if owner.is_empty() {
+                String::new()
+            } else {
+                format!(r#","owner":"{owner}""#)
+            };
+            self.ledger_line(
+                id,
+                &format!(
+                    r#"{{"uuid":"{uuid}","ts_ms":{ts_ms},"event":"{kind}","compute_rate_per_hr":{rate},"storage_rate_per_hr":0.0,"generation":3,"epoch_id":"{EPOCH}"{owner}}}"#
+                ),
             );
-            event.ts_ms = transition.ts.saturating_mul(1_000).saturating_add(999);
-            guard.append(
-                machine_id,
-                &format!("pending-transition-{}", transition.uuid),
-                event,
-            )?;
         }
-        std::fs::remove_file(&path)?;
-        std::fs::File::open(&dir)?.sync_all()?;
-    }
-    Ok(())
-}
 
-pub(super) fn migrate_existing_record_intervals(project_dir: &Path) -> anyhow::Result<()> {
-    let instances = state_dir(project_dir).join("instances");
-    let entries = match std::fs::read_dir(&instances) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let guard = crate::ledger::EpochGuard::acquire(project_dir)?;
-    for entry in entries {
-        let entry = entry?;
-        let machine_id = entry.file_name().to_string_lossy().into_owned();
-        validate_machine_id(&machine_id).map_err(anyhow::Error::msg)?;
-        let record_path = entry.path().join("state.json");
-        let has_record = match std::fs::metadata(&record_path) {
-            Ok(metadata) => metadata.is_file(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error.into()),
-        };
-        if !has_record || guard.has_current_epoch_events(&machine_id)? {
-            continue;
+        fn state_as(&self, session: &str) -> AppState {
+            let keys = self.path().join("keys");
+            let mut state = AppState::new_with_keys_root(self.path().to_path_buf(), keys);
+            state.session_owner = session.to_string();
+            state
         }
-        let record: InstanceRecord = serde_json::from_slice(&std::fs::read(&record_path)?)
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "cannot migrate accounting for {}: invalid record {}: {error}",
-                    machine_id,
-                    record_path.display()
-                )
-            })?;
-        let lifecycle_path = entry.path().join("lifecycle.json");
-        let lifecycle: LifecycleRecord = match std::fs::read(&lifecycle_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
-                anyhow::anyhow!(
-                    "cannot migrate accounting for {}: invalid lifecycle {}: {error}",
-                    machine_id,
-                    lifecycle_path.display()
-                )
-            })?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                LifecycleRecord::default()
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let storage_rate = if lifecycle.external_volume_id.is_some() {
-            0.0
-        } else {
-            lifecycle.storage_rate_per_hr.unwrap_or(0.0).max(0.0)
-        };
-        let (kind, compute_rate) = match record.phase {
-            Phase::Provisioning => (crate::ledger::EventKind::Provisioned, record.cost_per_hr),
-            Phase::Running => (crate::ledger::EventKind::Resumed, record.cost_per_hr),
-            Phase::Stopped => (crate::ledger::EventKind::Stopped, 0.0),
-        };
-        let event = crate::ledger::event(
-            kind,
-            compute_rate.max(0.0),
-            storage_rate,
-            0,
-            Some(format!("migration-{machine_id}")),
-            Some("opened interval for pre-phase-6 durable machine record".to_string()),
+    }
+
+    #[test]
+    fn a_running_machine_migrates_with_one_interval_per_owner_and_an_open_one() {
+        let project = OldProject::new();
+        project.state_json("m1", "running", 2.0);
+        project.lifecycle_json(
+            "m1",
+            r#"{"storage_rate_per_hr":0.25,"finalize_phase":"armed","action":"terminate","finish_intent":{"uuid":"p1","downloads":["out"],"then":"stop"}}"#,
         );
-        guard.append(&machine_id, &format!("migration-{machine_id}"), event)?;
+        project.event("m1", "e1", 2 * HOUR, "provisioned", 2.0, "s1");
+        project.event("m1", "e2", HOUR, "owner-changed", 0.0, "s2");
+
+        let state = project.state_as("s2");
+        let record = load_instance_record(project.path(), "m1").unwrap();
+        assert_eq!(record.provider_id(), "pod-m1");
+        assert_eq!(record.kernels.len(), 1);
+        assert_eq!(record.finish_intent.as_ref().unwrap().uuid, "p1");
+        assert_eq!(record.pool(), Some("session:s2"));
+        // Two owners' closed intervals plus the open one.
+        assert_eq!(record.meter.len(), 3);
+        let open = record.meter.last().unwrap();
+        assert!(open.end_ms.is_none());
+        assert!((open.compute_rate - 2.0).abs() < f64::EPSILON);
+        assert!((open.storage_rate - 0.25).abs() < f64::EPSILON);
+
+        let spend = state.session_spend();
+        assert!((spend.spent - 2.0).abs() < 0.01, "{spend:?}");
+        assert!((spend.other_spend - 2.0).abs() < 0.01, "{spend:?}");
+        assert!((spend.hourly_rate - 2.25).abs() < f64::EPSILON);
+
+        // Copy, never move: an older binary still reads its own files.
+        assert!(
+            instance_dir(project.path(), "m1")
+                .join("state.json")
+                .exists()
+        );
+        assert!(project.ledger().join("m1.jsonl").exists());
     }
-    Ok(())
-}
 
-/// Pre-multi-instance layout: a single `state.json` + `id_ed25519` directly in
-/// the state dir. Migrate it to `instances/main/` so existing machines can
-/// still be reconnected to or terminated.
-pub(super) fn migrate_legacy_state(project_dir: &Path) {
-    #[derive(Deserialize)]
-    struct LegacyState {
-        pod_id: Option<String>,
-        cleanup: Option<String>,
-        #[serde(default)]
-        accumulated_spend: f64,
-        jupyter_token: Option<String>,
-        ssh_key_path: Option<String>,
-        gpu_name: Option<String>,
+    #[test]
+    fn a_stopped_machine_opens_at_its_storage_rate_and_external_volumes_at_zero() {
+        let project = OldProject::new();
+        project.state_json("own", "stopped", 2.0);
+        project.lifecycle_json("own", r#"{"storage_rate_per_hr":0.25}"#);
+        project.state_json("ext", "stopped", 2.0);
+        project.lifecycle_json(
+            "ext",
+            r#"{"storage_rate_per_hr":99.0,"external_volume_id":"vol-1"}"#,
+        );
+        let state = project.state_as("s1");
+        drop(state);
+        let own = load_instance_record(project.path(), "own").unwrap();
+        let open = own.meter.last().unwrap();
+        assert!(open.compute_rate.abs() < f64::EPSILON);
+        assert!((open.storage_rate - 0.25).abs() < f64::EPSILON);
+        let ext = load_instance_record(project.path(), "ext").unwrap();
+        assert!(ext.meter.last().unwrap().storage_rate.abs() < f64::EPSILON);
     }
 
-    let legacy_path = state_dir(project_dir).join("state.json");
-    let Ok(content) = std::fs::read_to_string(&legacy_path) else {
-        return;
-    };
-    // A corrupt legacy file may still be the only record of an already-billing
-    // machine (provider id, cleanup policy, token, key path). Keep it and let a
-    // later start — or the user — recover from it; never delete it.
-    let legacy = match serde_json::from_str::<LegacyState>(&content) {
-        Ok(legacy) => legacy,
-        Err(error) => {
-            tracing::warn!(
-                target: "remote_kernels::state",
-                path = %legacy_path.display(),
-                %error,
-                "Legacy state file is corrupt; leaving it in place. If a machine \
-                 is still running, recover its id from this file and attach to it."
-            );
-            return;
-        }
-    };
+    #[test]
+    fn migration_runs_once_per_machine() {
+        let project = OldProject::new();
+        project.state_json("m1", "running", 2.0);
+        project.event("m1", "e1", HOUR, "provisioned", 2.0, "s1");
+        drop(project.state_as("s1"));
+        with_record(project.path(), "m1", |record| {
+            record.label = Some("edited".to_string());
+        })
+        .unwrap();
+        drop(project.state_as("s1"));
+        let record = load_instance_record(project.path(), "m1").unwrap();
+        assert_eq!(record.label.as_deref(), Some("edited"));
+    }
 
-    let Some(pod_id) = legacy.pod_id else {
-        let _ = std::fs::remove_file(&legacy_path);
-        return;
-    };
+    /// The whole point of the marker: a create with no `state.json` is still a
+    /// machine that may be billing.
+    #[test]
+    fn a_marker_only_directory_becomes_an_unconfirmed_record() {
+        let project = OldProject::new();
+        std::fs::write(
+            project.machine_dir("m1").join("unconfirmed.json"),
+            r#"{
+  "runtime": "runpod",
+  "expected_name": "proj-m1",
+  "created_at_epoch": 1780000000,
+  "error": "API error (502): bad gateway",
+  "self_halt_mins": 45,
+  "cleanup": "stop",
+  "jupyter_token": "tok",
+  "ssh_key_path": "/keys/m1",
+  "label": "train",
+  "last_checked_epoch": 1780000100
+}"#,
+        )
+        .unwrap();
+        drop(project.state_as("s1"));
+        let record = load_instance_record(project.path(), "m1").unwrap();
+        assert_eq!(record.phase, Phase::Unconfirmed);
+        assert_eq!(record.external_id, None);
+        assert_eq!(record.jupyter_token.as_deref(), Some("tok"));
+        assert_eq!(record.cleanup, Cleanup::Stop);
+        let create = record.create.unwrap();
+        assert_eq!(create.expected_name, "proj-m1");
+        assert_eq!(
+            create.error.as_deref(),
+            Some("API error (502): bad gateway")
+        );
+        // Open at nothing: it says whose it is, and costs nothing.
+        assert_eq!(record.meter.len(), 1);
+        assert!(record.meter[0].compute_rate.abs() < f64::EPSILON);
+    }
 
-    tracing::info!(
-        target: "remote_kernels::state",
-        pod_id,
-        "Migrating legacy single-instance state to instances/main"
-    );
+    /// A plan from before plans had tokens gets one, so the guards that check
+    /// a token always have one to check.
+    #[test]
+    fn an_old_plan_without_a_token_gets_one() {
+        let project = OldProject::new();
+        project.state_json("m1", "running", 1.0);
+        project.lifecycle_json(
+            "m1",
+            r#"{"finish_intent":{"downloads":["out"],"then":"stop"}}"#,
+        );
+        drop(project.state_as("s1"));
+        let plan = load_instance_record(project.path(), "m1")
+            .unwrap()
+            .finish_intent
+            .unwrap();
+        assert_ne!(plan.uuid, "");
+        assert_eq!(plan.then, FinishThen::Stop);
+    }
 
-    let cleanup = match legacy.cleanup.as_deref() {
-        Some("stop") => Cleanup::Stop,
-        Some("disabled") => Cleanup::Disabled,
-        _ => Cleanup::Terminate,
-    };
+    #[test]
+    fn a_record_wins_over_a_leftover_marker_and_an_empty_directory_is_skipped() {
+        let project = OldProject::new();
+        project.state_json("m1", "running", 2.0);
+        std::fs::write(project.machine_dir("m1").join("unconfirmed.json"), "{}").unwrap();
+        project.machine_dir("empty");
+        let state = project.state_as("s1");
+        assert_eq!(
+            load_instance_record(project.path(), "m1").unwrap().phase,
+            Phase::Running
+        );
+        assert!(load_instance_record(project.path(), "empty").is_none());
+        assert_eq!(state.session_spend().unreadable, Vec::<String>::new());
+    }
 
-    // Move the SSH key into the instance dir so the per-instance path
-    // convention holds (the record still stores the actual path used).
-    let new_dir = instance_dir(project_dir, "main");
-    let _ = std::fs::create_dir_all(&new_dir);
-    let ssh_key_path = legacy.ssh_key_path.map(|old| {
-        let old_path = PathBuf::from(&old);
-        let new_path = new_dir.join("id_ed25519");
-        if old_path.exists() && std::fs::rename(&old_path, &new_path).is_ok() {
-            new_path.display().to_string()
-        } else {
-            old
-        }
-    });
+    /// Corrupt input keeps the record, marks spend unknown and names the file.
+    #[test]
+    fn corrupt_old_files_never_drop_a_machine() {
+        let project = OldProject::new();
+        project.state_json("bad-lifecycle", "running", 1.0);
+        project.lifecycle_json("bad-lifecycle", "{broken");
+        project.state_json("bad-ledger", "running", 1.0);
+        project.ledger_line("bad-ledger", "not json");
+        project.event("bad-ledger", "e1", HOUR, "provisioned", 1.0, "s1");
+        project.state_json("bad-state", "running", 1.0);
+        std::fs::write(project.machine_dir("bad-state").join("state.json"), "{oops").unwrap();
 
-    let record = InstanceRecord {
-        machine_id: None,
-        label: Some("main".to_string()),
-        runtime: "runpod".to_string(),
-        external_id: pod_id,
-        phase: Phase::Stopped, // conservative: reconnect logic re-queries the provider
-        cleanup,
-        jupyter_token: legacy.jupyter_token,
-        ssh_key_path,
-        gpu_name: legacy.gpu_name,
-        cost_per_hr: 0.0,
-        // Every pre-tunnel RunPod pod was created with the public mapping.
-        proxy_port_mapped: true,
-        // Legacy pods keep the directory layout they were created with.
-        remote_dirs: None,
-        kernels: Vec::new(),
-    };
+        let state = project.state_as("s1");
+        let lifecycle = load_instance_record(project.path(), "bad-lifecycle").unwrap();
+        assert!(lifecycle.spend_unknown.unwrap().contains("lifecycle.json"));
+        let ledger = load_instance_record(project.path(), "bad-ledger").unwrap();
+        assert!(ledger.spend_unknown.unwrap().contains("bad-ledger.jsonl"));
+        // No machine.json can be made, so its old file stays and is named.
+        assert!(load_instance_record(project.path(), "bad-state").is_none());
+        assert!(
+            instance_dir(project.path(), "bad-state")
+                .join("state.json")
+                .exists()
+        );
+        let unreadable = state.session_spend().unreadable.join(" ");
+        assert!(unreadable.contains("lifecycle.json"), "{unreadable}");
+        assert!(unreadable.contains("bad-ledger.jsonl"), "{unreadable}");
+        assert!(unreadable.contains("bad-state"), "{unreadable}");
+        assert_eq!(scan_records(project.path()).1, Vec::new());
+    }
 
-    if let Ok(json) = serde_json::to_string_pretty(&record)
-        && std::fs::write(new_dir.join("state.json"), json).is_ok()
-    {
-        let spend = PersistedSpend {
-            accumulated_spend: legacy.accumulated_spend,
-        };
-        if let Ok(spend_json) = serde_json::to_string_pretty(&spend) {
-            let _ = std::fs::write(state_dir(project_dir).join("spend.json"), spend_json);
-        }
-        let _ = std::fs::remove_file(&legacy_path);
+    #[test]
+    fn rollups_and_terminated_machines_import_once() {
+        let project = OldProject::new();
+        std::fs::write(
+            project.ledger().join("owner-rollups.json"),
+            r#"{"owners":{"s1":1.5,"s2":4.0},"merged_epochs":["older"]}"#,
+        )
+        .unwrap();
+        // Terminated in the still-open epoch: only its ledger file is left.
+        project.event("gone", "e1", 3 * HOUR, "provisioned", 1.0, "s1");
+        project.event("gone", "e2", HOUR, "terminated", 0.0, "");
+
+        let state = project.state_as("s1");
+        let spend = state.session_spend();
+        assert!((spend.spent - 3.5).abs() < 0.01, "{spend:?}");
+        assert!((spend.other_spend - 4.0).abs() < 0.01, "{spend:?}");
+        let history = state_dir(project.path()).join("spend-history.jsonl");
+        let lines = std::fs::read_to_string(&history).unwrap().lines().count();
+
+        // The next startup changes nothing, even with new rollups on disk.
+        std::fs::write(
+            project.ledger().join("owner-rollups.json"),
+            r#"{"owners":{"s1":100.0},"merged_epochs":["older"]}"#,
+        )
+        .unwrap();
+        let state = project.state_as("s1");
+        assert!((state.session_spend().spent - 3.5).abs() < 0.01);
+        assert_eq!(
+            std::fs::read_to_string(&history).unwrap().lines().count(),
+            lines
+        );
+    }
+
+    /// A machine the new binary ended is not brought back by its old files:
+    /// ending deletes the whole directory.
+    #[test]
+    fn an_ended_machine_stays_ended_across_restarts() {
+        let project = OldProject::new();
+        project.state_json("m1", "running", 1.0);
+        project.event("m1", "e1", HOUR, "provisioned", 1.0, "s1");
+        let state = project.state_as("s1");
+        state.end_machine("m1").unwrap();
+        let state = project.state_as("s1");
+        assert!(load_instance_record(project.path(), "m1").is_none());
+        assert!((state.session_spend().spent - 1.0).abs() < 0.01);
+    }
+
+    /// Records written before the key relocation point at keys inside the
+    /// project dir (unusable on WSL /mnt/c). Startup must copy the exact bytes
+    /// out and rewrite the record, never regenerate (the public half is in the
+    /// machine's `authorized_keys`).
+    #[test]
+    fn startup_migrates_in_project_keys_byte_exact() {
+        let project = OldProject::new();
+        let old_key = project.machine_dir("m1").join("id_ed25519");
+        std::fs::write(&old_key, "exact-key-bytes").unwrap();
+        let state_path = project.machine_dir("m1").join("state.json");
+        project.state_json("m1", "running", 0.5);
+        let rewritten = std::fs::read_to_string(&state_path)
+            .unwrap()
+            .replace("/keys/m1", old_key.to_str().unwrap());
+        std::fs::write(&state_path, rewritten).unwrap();
+
+        let state = project.state_as("s1");
+        let new_key = state.ssh_key_path("m1");
+        let record = load_instance_record(project.path(), "m1").unwrap();
+        assert_eq!(record.ssh_key_path.as_deref(), new_key.to_str());
+        assert_eq!(std::fs::read(&new_key).unwrap(), b"exact-key-bytes");
+        // The old file stays: another live session may still be using it.
+        assert!(old_key.exists());
+
+        // An external, hand-managed key path is never touched.
+        let external = project.path().join("my-own-key");
+        std::fs::write(&external, "user-key").unwrap();
+        with_record(project.path(), "m1", |record| {
+            record.ssh_key_path = Some(external.display().to_string());
+        })
+        .unwrap();
+        drop(project.state_as("s1"));
+        let untouched = load_instance_record(project.path(), "m1").unwrap();
+        assert_eq!(untouched.ssh_key_path.as_deref(), external.to_str());
+    }
+
+    #[test]
+    fn a_stale_write_of_a_recorded_ledger_event_is_not_a_second_interval() {
+        let project = OldProject::new();
+        project.state_json("m1", "running", 1.0);
+        project.event("m1", "e1", HOUR, "provisioned", 1.0, "s1");
+        let wal_dir = project.ledger().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let line = std::fs::read_to_string(project.ledger().join("m1.jsonl")).unwrap();
+        std::fs::write(
+            wal_dir.join("m1.provisioned.json"),
+            format!(
+                r#"{{"machine_id":"m1","operation":"provisioned","event":{}}}"#,
+                line.trim()
+            ),
+        )
+        .unwrap();
+        let state = project.state_as("s1");
+        assert!((state.session_spend().spent - 1.0).abs() < 0.01);
     }
 }

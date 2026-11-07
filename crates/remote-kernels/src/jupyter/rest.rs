@@ -68,7 +68,7 @@ impl JupyterClient {
             }
 
             if attempts > 60 {
-                anyhow::bail!("Jupyter server did not become ready after 3 minutes");
+                anyhow::bail!("Jupyter server did not become ready after several minutes");
             }
 
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;

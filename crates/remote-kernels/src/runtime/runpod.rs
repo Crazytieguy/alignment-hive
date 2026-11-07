@@ -8,7 +8,7 @@
 //! `jupyter-access = "tunnel"` pods are created without the public 8888
 //! mapping (never internet-reachable, no fallback). Infra
 //! commands and file sync go over SSH to the pod's public IP, discovered
-//! from the pod's own `ssh.direct` block. The on-pod watchdog and the
+//! from the pod's own `ssh.direct` block. The on-pod supervisor and the
 //! pre-SSH orphan guard self-clean via `runpodctl` / the v2 REST API,
 //! authorized by the pod-scoped `RUNPOD_API_KEY` that `RunPod` injects into
 //! every pod.
@@ -43,13 +43,14 @@ use std::time::Duration;
 
 use crate::config::{Cleanup, Config};
 use crate::runpod::client::{CreateDisposition, RunPodClient, RunPodError};
+use crate::runpod::pricing::StoragePrices;
 use crate::runpod::types::{
     CreateGpuConfig, CreatePodRequest, Mounts, NetworkMount, PersistentMount, Pod, UNKNOWN_STATUS,
 };
 
 use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
-    ProvisionRequest, RemoteDirs, Runtime, StopSupport, WatchdogPolicy,
+    ProvisionRequest, RemoteDirs, Runtime, StopSupport,
 };
 
 /// The Jupyter access path chosen for one `open()` — see
@@ -83,6 +84,8 @@ pub struct RunPodRuntime {
     /// A field, not a constant, so the unit tests can exercise the whole
     /// bounded window without wall-clock cost.
     adopt_probe_interval: Duration,
+    /// Read from `RunPod`'s pricing page at most once per server run.
+    storage_prices: tokio::sync::OnceCell<StoragePrices>,
 }
 
 /// How many times a create failure's name probe is repeated before the
@@ -106,26 +109,40 @@ impl RunPodRuntime {
             orphan_halt_mins: config.orphan_halt_mins,
             config_path: config.config_path(),
             adopt_probe_interval: ADOPT_PROBE_INTERVAL,
+            storage_prices: tokio::sync::OnceCell::new(),
         }
     }
 
     /// A handle carrying the provisioning note (e.g. "the orphan guard is
     /// OFF for this pod"), which only [`Runtime::provision`] sets.
-    fn handle_with_note(pod: &Pod, note: Option<&String>) -> InstanceHandle {
-        let mut handle = Self::handle_from_pod(pod);
+    fn handle_with_note(
+        pod: &Pod,
+        prices: &StoragePrices,
+        note: Option<&String>,
+    ) -> InstanceHandle {
+        let mut handle = Self::handle_from_pod(pod, prices);
         handle.note = note.cloned();
         handle
     }
 
-    fn handle_from_pod(pod: &Pod) -> InstanceHandle {
+    async fn prices(&self) -> StoragePrices {
+        *self.storage_prices.get_or_init(StoragePrices::fetch).await
+    }
+
+    /// A pod's cost covers its GPU only; its own disks bill on top, and a
+    /// stopped pod keeps billing for its volume. A network volume outlives the
+    /// pod and isn't the pod's to pay for.
+    fn handle_from_pod(pod: &Pod, prices: &StoragePrices) -> InstanceHandle {
+        let container_gb = pod.disk.unwrap_or(0);
+        let volume_gb = pod.pod_volume_gb();
         InstanceHandle {
             external_id: pod.id.clone(),
             gpu_name: pod.gpu_display_name().to_string(),
-            cost_per_hr: pod.hourly_cost(),
-            storage_rate_per_hr: 0.0,
-            storage_rate_note: Some(
-                "RunPod pod responses expose no normalized storage-only price".to_string(),
-            ),
+            cost_per_hr: pod
+                .hourly_cost()
+                .map(|gpu| gpu + prices.running_per_hr(container_gb, volume_gb)),
+            storage_rate_per_hr: prices.stopped_per_hr(volume_gb),
+            storage_rate_note: None,
             note: None,
             // The creation-time fact open() consults (a tunnel-only pod must
             // never be handed a proxy URL).
@@ -197,7 +214,7 @@ impl RunPodRuntime {
 
         Ok((
             CreatePodRequest {
-                name: format!("{}-{}", self.name, req.machine_id),
+                name: self.machine_name(&req.machine_id),
                 image,
                 args,
                 disk: Some(self.runpod.container_disk_gb),
@@ -418,7 +435,8 @@ impl RunPodRuntime {
             }
             _ => format!(
                 " No pod was created. The reason above is RunPod's; fix what it names (the \
-                 [runpod] settings live in {}) and retry start().",
+                 [runpod] settings live in {}; reload this MCP server after editing them) and \
+                 retry start().",
                 self.config_path
             ),
         }
@@ -432,7 +450,7 @@ impl RunPodRuntime {
     /// `GET /v2/pods`, so "not listed" is never "not created", and v2 has no
     /// idempotency key that would make a second create safe.
     ///
-    /// The server keeps a durable marker under the machine id from here, so
+    /// The server keeps the record it wrote before the create, so
     /// `status()` can settle it later (see
     /// [`crate::runtime::UnconfirmedCreate`]).
     /// The message must never say "retry start()": a second `start()` mints a
@@ -447,7 +465,7 @@ impl RunPodRuntime {
     ) -> anyhow::Error {
         let outlook = if guard_armed {
             format!(
-                "if it was created it shuts itself down within {} minutes",
+                "if it was created it tries to shut itself down {} minutes after its startup command runs",
                 self.orphan_halt_mins
             )
         } else {
@@ -461,10 +479,6 @@ impl RunPodRuntime {
                  machine {machine_id}: status() adopts it if it appears, and {outlook}. \
                  Call status() before starting another machine."
             ),
-            expected_name: name.to_string(),
-            self_halt_mins: guard_armed.then_some(self.orphan_halt_mins),
-            noun: "pod",
-            provider: "RunPod",
         })
     }
 
@@ -482,7 +496,7 @@ impl RunPodRuntime {
     ///   pod's own stop (container disk does not); without a volume it can
     ///   only follow the workdir. A network volume can be mounted by several
     ///   pods at once, so there each machine gets its own state dir: one
-    ///   pod's lease and markers must never fence or steer another.
+    ///   pod's `alive` and plan must never detach or steer another.
     /// - kernel path: the workdir, relative to the Jupyter root `/` of the
     ///   built-in image's own server; other images keep their server's
     ///   default, since their root is not known.
@@ -580,8 +594,8 @@ impl RunPodRuntime {
         }
         anyhow::anyhow!(
             "No direct SSH endpoint appeared for machine {} within {}. Retry \
-             attach(\"{}\"). If it keeps happening, stop() the machine (it keeps its data) \
-             and tell the user.",
+             attach(\"{}\"). If it keeps happening, stop() the machine (its volume survives, \
+             its container disk and kernels don't) and tell the user.",
             ctx.machine_id,
             describe_wait(waited),
             ctx.machine_id
@@ -757,6 +771,40 @@ impl RunPodRuntime {
         (Some(vec!["sh".to_string(), "-c".to_string(), script]), None)
     }
 
+    /// Wait for sshd, re-reading the pod's SSH port between attempts: after a
+    /// resume `RunPod` keeps reporting the port from before the stop and only
+    /// later the new one (seen live: about 19 s), so a port read once can be
+    /// wrong for good.
+    async fn reach_following_port(
+        &self,
+        pod_id: &str,
+        ssh: &mut crate::ssh_exec::SshEndpoint,
+        attempts: u32,
+    ) -> anyhow::Result<()> {
+        let diagnostics = crate::ssh_exec::SetupDiagnostics::default();
+        let mut last_error = None;
+        for attempt in 1..=attempts {
+            match ssh.wait_reachable(1, &diagnostics).await {
+                Ok(()) => return Ok(()),
+                Err(error) if crate::ssh_exec::is_host_key_mismatch(&error) => return Err(error),
+                Err(error) => last_error = Some(error),
+            }
+            if attempt < attempts {
+                tokio::time::sleep(SSH_REACH_INTERVAL).await;
+                if let Ok(pod) = self.client.get_pod(pod_id).await
+                    && let Some((host, port)) = pod.direct_ssh()
+                    && (host != ssh.host || port != ssh.port)
+                {
+                    tracing::info!(%host, port, "The pod's SSH endpoint moved");
+                    ssh.host = host;
+                    ssh.port = port;
+                }
+            }
+        }
+        let cause = last_error.map_or_else(String::new, |error| format!(": {error:#}"));
+        anyhow::bail!("SSH did not become reachable after {attempts} attempts{cause}")
+    }
+
     /// Poll `GET /v2/pods/{id}` for one [`SSH_WAIT_WINDOW`] until the pod
     /// reports a direct SSH endpoint. `ssh.direct` appears only once the
     /// published `22/tcp` mapping has a public port, which can lag RUNNING
@@ -794,6 +842,7 @@ impl RunPodRuntime {
 /// [`RunPodRuntime::ssh_expectation_unmet`]).
 const SSH_WAIT_WINDOW: Duration = Duration::from_mins(2);
 const SSH_WAIT_INTERVAL: Duration = Duration::from_secs(3);
+const SSH_REACH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A measured wait as a reader takes it: whole minutes (rounded), or
 /// seconds under a minute.
@@ -981,10 +1030,10 @@ pub(crate) fn validate_storage_and_cloud(
             && !path_within(&workdir, &runpod.volume_mount_path)
         {
             return Err(format!(
-                "[runpod] workdir {workdir:?} contains volume-mount-path {:?}: sync() mirrors \
-                 the project into the workdir and deletes what the project lacks, the volume \
-                 included. Use a workdir beside the mount (e.g. \"/root/work\") or inside it \
-                 — edit {config_path}",
+                "[runpod] workdir {workdir:?} is a parent of volume-mount-path {:?}: sync() \
+                 mirrors the project into the workdir and deletes what the project lacks, the \
+                 volume included. Use a directory beside the mount (e.g. \"/root/work\") or \
+                 inside it — edit {config_path}",
                 runpod.volume_mount_path
             ));
         }
@@ -1050,10 +1099,6 @@ fn is_pod_not_found(err: &anyhow::Error) -> bool {
 impl Runtime for RunPodRuntime {
     type Conn = RunPodConnection;
 
-    fn name(&self) -> &'static str {
-        "runpod"
-    }
-
     fn capabilities(&self) -> Capabilities {
         capabilities(&self.runpod)
     }
@@ -1099,6 +1144,7 @@ impl Runtime for RunPodRuntime {
         let (mut input, note) = self.pod_create_request(req, first)?;
         let name = input.name.clone();
         let guard_armed = input.args.is_some();
+        let prices = self.prices().await;
 
         for gpu_type in &gpu_type_ids {
             input.gpu.id.clone_from(gpu_type);
@@ -1114,7 +1160,7 @@ impl Runtime for RunPodRuntime {
                             orphan_guard = guard_armed,
                             "Pod created"
                         );
-                        return Ok(Self::handle_with_note(&pod, note.as_ref()));
+                        return Ok(Self::handle_with_note(&pod, &prices, note.as_ref()));
                     }
                     Err(e) => e,
                 };
@@ -1146,7 +1192,7 @@ impl Runtime for RunPodRuntime {
                         match self.adopt_existing(&name).await {
                             Ok(Some(pod)) => {
                                 tracing::warn!(pod_id = %pod.id, "create reported an error but the pod exists — adopting it");
-                                return Ok(Self::handle_with_note(&pod, note.as_ref()));
+                                return Ok(Self::handle_with_note(&pod, &prices, note.as_ref()));
                             }
                             Ok(None) => {}
                             Err(probe) => {
@@ -1187,7 +1233,7 @@ impl Runtime for RunPodRuntime {
                         };
                         if let Some(pod) = existing {
                             tracing::warn!(pod_id = %pod.id, "create outcome unknown; adopted the pod it created");
-                            return Ok(Self::handle_with_note(&pod, note.as_ref()));
+                            return Ok(Self::handle_with_note(&pod, &prices, note.as_ref()));
                         }
                         return Err(self.unconfirmed_create(
                             &error,
@@ -1209,14 +1255,14 @@ impl Runtime for RunPodRuntime {
                 msg,
                 "\nEvery GPU type was refused by RunPod (400). Last reason from RunPod: {}. \
                  If it names capacity, retry start() later; otherwise tell the user the \
-                 reason and ask them to fix [runpod] in {}.\n",
+                 reason and ask them to fix [runpod] in {} and reload this MCP server.\n",
                 last_detail.as_deref().unwrap_or("(none given)"),
                 self.config_path
             );
         } else {
             let _ = write!(
                 msg,
-                "\nRetry later, or add other GPU types to [runpod] gpu-type-ids in {}.",
+                "\nRetry later, try start(gpu_type=...), or add other GPU types to [runpod] gpu-type-ids in {} and reload this MCP server.",
                 self.config_path
             );
         }
@@ -1224,9 +1270,15 @@ impl Runtime for RunPodRuntime {
     }
 
     async fn get_handle(&self, external_id: &str) -> anyhow::Result<InstanceHandle> {
+        let prices = self.prices().await;
         Ok(Self::handle_from_pod(
             &self.client.get_pod(external_id).await?,
+            &prices,
         ))
+    }
+
+    fn machine_name(&self, machine_id: &str) -> String {
+        format!("{}-{machine_id}", self.name)
     }
 
     async fn find_by_name(&self, name: &str) -> anyhow::Result<Vec<String>> {
@@ -1269,7 +1321,7 @@ impl Runtime for RunPodRuntime {
                 Ok(pod) => {
                     tracing::debug!(external_id, status = ?pod.status, attempts, "Polling pod status");
                     if pod.is_running() {
-                        return Ok(Self::handle_from_pod(&pod));
+                        return Ok(Self::handle_from_pod(&pod, &self.prices().await));
                     }
                 }
                 Err(e) => {
@@ -1308,19 +1360,19 @@ impl Runtime for RunPodRuntime {
         // SSH is best-effort ONLY where config doesn't promise it (community
         // cloud without support-public-ip): Jupyter rides RunPod's HTTPS
         // proxy, so such a machine is still usable for kernels — only
-        // sync/download/watchdog need SSH and error clearly, and the orphan
+        // sync/download/supervisor need SSH and error clearly, and the orphan
         // guard is never armed there.
         //
         // Where config DOES promise SSH — the exact predicate that arms the
         // guard — a pod without it must never open as a degraded
         // Jupyter-only session: the armed guard is disarmed only by the SSH
         // heartbeat, so that session would be self-cleaned under the user
-        // after orphan-halt-mins. (Sync and the watchdog would be silently
+        // after orphan-halt-mins. (Sync and the supervisor would be silently
         // broken too.) A fresh pod keeps waiting in the background until
         // provision-timeout-mins; an existing one fails the attach (see
         // ssh_expectation_unmet).
         let ssh_wait_started = std::time::Instant::now();
-        let ssh = match self.wait_for_ssh_info(external_id).await {
+        let mut ssh = match self.wait_for_ssh_info(external_id).await {
             Some((host, port)) => Some(crate::ssh_exec::SshEndpoint {
                 key_path: ctx.ssh_key_path.clone(),
                 known_hosts_path: ctx.known_hosts_path.clone(),
@@ -1356,7 +1408,7 @@ impl Runtime for RunPodRuntime {
         let mut degraded = false;
         let decision = self.access_path(ctx.proxy_port_mapped, ssh.clone())?;
         if let AccessDecision::Tunnel {
-            ssh: tunnel_ssh,
+            ssh: mut tunnel_ssh,
             proxy_fallback,
         } = decision
         {
@@ -1367,10 +1419,12 @@ impl Runtime for RunPodRuntime {
             // short window (~90s) before degrading; without one, wait the
             // full window (24 attempts ≈ up to 6 minutes).
             let attempts = if proxy_fallback { 6 } else { 24 };
-            match tunnel_ssh
-                .wait_reachable(attempts, &crate::ssh_exec::SetupDiagnostics::default())
-                .await
-            {
+            let reached = self
+                .reach_following_port(external_id, &mut tunnel_ssh, attempts)
+                .await;
+            // Even if it isn't answering yet, this is the port to retry.
+            ssh = Some(tunnel_ssh.clone());
+            match reached {
                 Ok(()) => {
                     let tunnel =
                         crate::ssh_exec::SshTunnel::open(&tunnel_ssh, RUNPOD_JUPYTER_PORT).await?;
@@ -1438,7 +1492,7 @@ const RUNPOD_JUPYTER_PORT: u16 = 8888;
 pub struct RunPodConnection {
     jupyter: JupyterEndpoint,
     /// `None` when the machine has no public IP — possible only when config
-    /// doesn't promise SSH (kernels still work via the proxy; sync/watchdog
+    /// doesn't promise SSH (kernels still work via the proxy; sync/supervisor
     /// don't, and the orphan guard is not armed).
     ssh: Option<crate::ssh_exec::SshEndpoint>,
     /// Present in tunnel mode ([`RunPodRuntime::tunnel_preferred`]);
@@ -1461,8 +1515,7 @@ pub struct RunPodConnection {
 /// it ends); volume storage keeps billing until termination.
 ///
 /// No single quotes anywhere in these commands — they get embedded in
-/// single-quote-wrapped scripts ([`crate::ssh_exec::watchdog_script`],
-/// [`crate::ssh_exec::orphan_guard_line`]).
+/// the single-quote-wrapped [`crate::ssh_exec::orphan_guard_line`].
 const STOP_SELF: &str = concat!(
     "runpodctl stop pod \"$RUNPOD_POD_ID\"",
     " || runpodctl pod stop \"$RUNPOD_POD_ID\"",
@@ -1472,7 +1525,7 @@ const STOP_SELF: &str = concat!(
 );
 
 /// Env prelude for the self-cleanup chains. They run in two different
-/// environments — the watchdog inherits an SSH-session env (which may lack
+/// environments — the supervisor inherits an SSH-session env (which may lack
 /// the `RunPod`-injected vars on images that don't export them to
 /// non-interactive shells), while the orphan guard is a child of PID 1 — so
 /// fall back to PID 1's environ for the vars, and only (re)prime `runpodctl`
@@ -1487,8 +1540,8 @@ const ENV_PRELUDE: &str = concat!(
     ">/dev/null 2>&1; "
 );
 
-/// Self-cleanup command for the on-pod watchdog and orphan guard; `None`
-/// when cleanup is disabled (neither the watchdog nor the guard is placed on
+/// Self-cleanup command for the on-pod supervisor and orphan guard; `None`
+/// when cleanup is disabled (neither the supervisor nor the guard is placed on
 /// the pod — "disabled" means nothing automatic, ever). Terminate falls back
 /// to stop: a permission gap on self-delete (reported in the wild for
 /// pod-scoped keys) must still end GPU billing — the pod is then left
@@ -1515,7 +1568,7 @@ pub fn self_cleanup_command(cleanup: Cleanup) -> Option<String> {
 }
 
 #[doc(hidden)]
-pub fn watchdog_action_command() -> String {
+pub fn supervisor_action_command() -> String {
     format!(
         "case \"$1\" in stop) {stop} ;; terminate) {terminate} ;; *) exit 11 ;; esac",
         stop = self_cleanup_command(Cleanup::Stop).expect("stop command"),
@@ -1528,8 +1581,8 @@ impl RunPodConnection {
         self.ssh.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "This machine has no SSH endpoint. Kernels still work, but sync/download \
-                 and the on-machine watchdog do not. For a machine that has one, set \
-                 [runpod] cloud-type = \"SECURE\" in {}, then terminate() this machine \
+                 and self-cleanup do not. For a machine that has one, set [runpod] cloud-type \
+                 = \"SECURE\" in {}, reload this MCP server, then terminate() this machine \
                  and start() again.",
                 self.config_path
             )
@@ -1566,14 +1619,21 @@ impl Connection for RunPodConnection {
         self.dirs.stage_dir.as_deref()
     }
 
+    fn action_command(&self) -> Option<String> {
+        Some(supervisor_action_command())
+    }
+
+    async fn keep_transport_alive(&self) {
+        self.ensure_tunnel_alive().await;
+    }
+
     fn startup_note(&self) -> Option<String> {
         self.degraded.then(|| {
             "SSH was unreachable when this session connected, so Jupyter is served \
              over RunPod's public proxy (token-protected) instead of the SSH tunnel. \
-             The endpoint is sticky for this session — live kernels cannot migrate — \
-             so stop() and attach() again to get the tunnel back. If no SSH transport \
-             exists, this machine has NO automatic shutdown: always stop() or terminate() \
-             it explicitly, or it bills until you stop() or terminate() it."
+             Live kernels stay on that endpoint for this session; stop() and attach() \
+             again to get the tunnel back. Self-cleanup needs SSH, so while status() \
+             shows a caveat about it, stop or terminate this machine explicitly."
                 .to_string()
         })
     }
@@ -1614,32 +1674,6 @@ impl Connection for RunPodConnection {
             &self.dirs.workdir,
         )
         .await
-    }
-
-    /// Install the fenced drain/finalize watchdog in the persistent workdir.
-    async fn install_watchdog(&self, policy: WatchdogPolicy) -> anyhow::Result<()> {
-        if policy.cleanup == Cleanup::Disabled {
-            tracing::info!("Cleanup disabled, skipping watchdog installation");
-            return Ok(());
-        }
-
-        crate::machine_scripts::install_watchdog(self, &policy, &watchdog_action_command()).await?;
-        tracing::info!("Fenced finalize watchdog installed on pod");
-        Ok(())
-    }
-
-    async fn heartbeat(&self) -> anyhow::Result<()> {
-        self.ensure_tunnel_alive().await;
-        // `/tmp/heartbeat` disarms the boot-scoped orphan guard for the
-        // current container life; /tmp is cleared by a stop, so a fresh boot
-        // always starts armed until a session actually reaches the pod.
-        self.exec("touch /tmp/heartbeat", Duration::from_secs(10))
-            .await
-            .map(|_| ())
-    }
-
-    async fn set_budget_deadline(&self, secs_from_now: u64) -> anyhow::Result<()> {
-        crate::machine_scripts::set_budget_deadline(self, secs_from_now).await
     }
 }
 
@@ -1757,11 +1791,11 @@ mod tests {
         assert!(terminate.contains("runpodctl stop pod"));
         assert!(self_cleanup_command(Cleanup::Disabled).is_none());
         // Both chains must survive embedding in the single-quote-wrapped
-        // watchdog/guard scripts — same invariant the production validator
+        // supervisor/guard scripts — same invariant the production validator
         // enforces for config values.
         crate::ssh_exec::validate_shell_safe("stop chain", &stop).unwrap();
         crate::ssh_exec::validate_shell_safe("terminate chain", &terminate).unwrap();
-        // Env-poor shells (watchdog runs in an SSH session env): the prelude
+        // Env-poor shells (supervisor runs in an SSH session env): the prelude
         // must backfill from PID 1 and never prime runpodctl with an empty
         // key. Both chains need it — the terminate chain runs in exactly the
         // same environments, and its curl fallback carries the API key too.
@@ -2079,7 +2113,7 @@ mod tests {
         };
         let err =
             check("[runpod]\nvolume-mount-path = \"/root/vol/\"\nworkdir = \"/root\"").unwrap_err();
-        assert!(err.contains("contains volume-mount-path"), "{err}");
+        assert!(err.contains("is a parent of volume-mount-path"), "{err}");
         assert!(
             check("[runpod]\nnetwork-volume-id = \"v\"\nvolume-mount-path = \"/workspace/data\"\nworkdir = \"/workspace\"")
                 .is_err()
@@ -2105,17 +2139,6 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(record.remote_dirs, None);
-        let marker: crate::state::UnconfirmedRecord = serde_json::from_value(serde_json::json!({
-            "runtime": "runpod",
-            "expected_name": "n",
-            "created_at_epoch": 1,
-            "error": "e",
-            "cleanup": "terminate",
-            "jupyter_token": "t",
-            "ssh_key_path": "k",
-        }))
-        .unwrap();
-        assert_eq!(marker.remote_dirs, None);
     }
 
     #[test]
@@ -2305,22 +2328,47 @@ mod tests {
     fn handle_from_pod_maps_v2_fields() {
         let example = spec_pod_example();
         let pod: Pod = serde_json::from_value(example.clone()).unwrap();
-        let handle = RunPodRuntime::handle_from_pod(&pod);
+        let handle = RunPodRuntime::handle_from_pod(&pod, &StoragePrices::LISTED);
         assert_eq!(handle.gpu_name, "NVIDIA GeForce RTX 4090");
-        assert_eq!(handle.cost_per_hr, Some(0.44));
+        let disks = StoragePrices::LISTED.running_per_hr(pod.disk.unwrap(), pod.pod_volume_gb());
+        assert!((handle.cost_per_hr.unwrap() - (0.44 + disks)).abs() < 1e-9);
+        assert!(disks > 0.0);
         assert!(handle.proxy_port_mapped);
+        // The GPU's price, plus its disks while running; the volume once stopped.
+        let disks = StoragePrices::LISTED.running_per_hr(pod.disk.unwrap(), pod.pod_volume_gb());
+        assert!(disks > 0.0);
+        assert!((handle.cost_per_hr.unwrap() - (0.44 + disks)).abs() < 1e-9);
+        assert!(
+            (handle.storage_rate_per_hr
+                - StoragePrices::LISTED.stopped_per_hr(pod.pod_volume_gb()))
+            .abs()
+                < 1e-9
+        );
+
+        // A network volume outlives the pod, and isn't this pod's to pay for.
+        let mut shared = example.clone();
+        shared["mounts"] = serde_json::json!({"network": [{"id": "vol", "path": "/workspace"}]});
+        let pod: Pod = serde_json::from_value(shared).unwrap();
+        assert_eq!(pod.pod_volume_gb(), 0);
+        assert_eq!(
+            RunPodRuntime::handle_from_pod(&pod, &StoragePrices::LISTED).storage_rate_per_hr,
+            0.0
+        );
 
         // A tunnel-only pod (no public 8888 mapping).
         let mut tunneled = example.clone();
         tunneled["ports"] = serde_json::json!(["22/tcp"]);
         let pod: Pod = serde_json::from_value(tunneled).unwrap();
-        assert!(!RunPodRuntime::handle_from_pod(&pod).proxy_port_mapped);
+        assert!(!RunPodRuntime::handle_from_pod(&pod, &StoragePrices::LISTED).proxy_port_mapped);
 
-        // A stopped pod reports 0.0; that must not erase the ledger's rate.
+        // A stopped pod reports 0.0; that must not erase the meter's rate.
         let mut stopped = example;
         stopped["cost"] = serde_json::json!(0.0);
         let pod: Pod = serde_json::from_value(stopped).unwrap();
-        assert_eq!(RunPodRuntime::handle_from_pod(&pod).cost_per_hr, None);
+        assert_eq!(
+            RunPodRuntime::handle_from_pod(&pod, &StoragePrices::LISTED).cost_per_hr,
+            None
+        );
     }
 
     /// The wrapper's applicability rules, asserted through the function
@@ -2653,7 +2701,38 @@ mod tests {
             orphan_halt_mins: config.orphan_halt_mins,
             config_path: config.config_path(),
             adopt_probe_interval: Duration::from_millis(1),
+            storage_prices: tokio::sync::OnceCell::new_with(Some(StoragePrices::LISTED)),
         }
+    }
+
+    /// After a resume `RunPod` reports the old port first, so one read can't
+    /// be trusted: the retry must move to whatever the pod reports next.
+    #[tokio::test]
+    async fn reaching_ssh_follows_the_port_the_pod_reports() {
+        let closed_port = || {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let (stale, moved) = (closed_port(), closed_port());
+        let fake = FakeRunPod::spawn(vec![(
+            "GET /v2/pods/pod-1",
+            200,
+            format!(r#"{{"id":"pod-1","ssh":{{"direct":{{"host":"127.0.0.1","port":{moved}}}}}}}"#),
+        )]);
+        let runtime = runtime_against(&fake, "");
+        let dir = tempfile::tempdir().unwrap();
+        let mut ssh = crate::ssh_exec::SshEndpoint {
+            key_path: dir.path().join("missing_key"),
+            known_hosts_path: dir.path().join("known_hosts"),
+            user: "root".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: stale,
+        };
+
+        let reached = runtime.reach_following_port("pod-1", &mut ssh, 2).await;
+
+        assert!(reached.is_err());
+        assert_eq!(ssh.port, moved);
     }
 
     fn probe_replies(status: u16, body: &str) -> Vec<(&'static str, u16, String)> {
@@ -2756,7 +2835,7 @@ mod tests {
         let unconfirmed = error
             .downcast_ref::<crate::runtime::UnconfirmedCreate>()
             .expect("an unsettled create must carry its marker payload");
-        assert_eq!(unconfirmed.expected_name, "remote-kernels-m1");
+        assert!(unconfirmed.summary.contains("remote-kernels-m1"));
         let error = error.to_string();
         assert!(error.contains("No second pod was created"), "{error}");
         assert_eq!(
@@ -2799,7 +2878,7 @@ mod tests {
         let handle = rt.provision(&provision_req()).await.unwrap();
         assert_eq!(handle.external_id, "late-1");
         assert_eq!(handle.gpu_name, "NVIDIA GeForce RTX 4090");
-        assert_eq!(handle.cost_per_hr, Some(0.44));
+        assert!(handle.cost_per_hr.unwrap() >= 0.44);
         assert_eq!(fake.count("POST /v2/pods "), 1);
     }
 
@@ -2889,12 +2968,12 @@ mod tests {
         assert_eq!(
             error
                 .downcast_ref::<crate::runtime::UnconfirmedCreate>()
-                .and_then(|unconfirmed| unconfirmed.self_halt_mins),
-            Some(30)
+                .map(|unconfirmed| unconfirmed.summary.contains("shut itself down")),
+            Some(true)
         );
         let message = error.to_string();
         assert!(
-            message.contains("shuts itself down within 30 minutes"),
+            message.contains("tries to shut itself down 30 minutes after"),
             "{message}"
         );
 
@@ -2913,8 +2992,8 @@ mod tests {
         assert_eq!(
             error
                 .downcast_ref::<crate::runtime::UnconfirmedCreate>()
-                .and_then(|unconfirmed| unconfirmed.self_halt_mins),
-            None
+                .map(|unconfirmed| unconfirmed.summary.contains("shuts itself down")),
+            Some(false)
         );
         let message = error.to_string();
         assert!(
@@ -2942,80 +3021,6 @@ mod tests {
         assert!(error.contains("remote-kernels.toml"), "{error}");
         assert!(!error.contains("exhausted"), "{error}");
         assert_eq!(fake.count("POST /v2/pods "), 0, "no candidate, no create");
-    }
-
-    /// When even the durable marker cannot be written, the message must not
-    /// be the tracked summary plus a correction: that summary promises
-    /// `status()` will adopt the machine, and the failed write is exactly what
-    /// makes the promise false. It is replaced by an escalation to the user
-    /// — the only party who can still act — and an escalation may name where
-    /// the user would look, which no agent-facing next action does.
-    #[tokio::test]
-    async fn an_untrackable_create_escalates_instead_of_promising_status() {
-        let mut script = vec![(
-            "POST /v2/pods ",
-            502,
-            "{\"detail\":\"bad gateway\"}".to_string(),
-        )];
-        script.extend(probe_replies(200, "{\"pods\": []}"));
-        let fake = FakeRunPod::spawn(script);
-        let error = runtime_against(&fake, "")
-            .provision(&provision_req())
-            .await
-            .unwrap_err();
-        let unconfirmed = error
-            .downcast_ref::<crate::runtime::UnconfirmedCreate>()
-            .expect("an unsettled create must carry its marker payload");
-        let message = unconfirmed.untracked(&"disk full");
-
-        assert!(
-            message.starts_with(
-                "Creating the pod failed with an unclear outcome (RunPod API error (502): bad \
-                 gateway). No second pod was created. A pod named remote-kernels-m1 may exist \
-                 at RunPod, but local tracking failed (disk full), so this session cannot \
-                 manage it: tell the user that a pod named remote-kernels-m1 may exist at \
-                 RunPod and may need to be terminated there."
-            ),
-            "{message}"
-        );
-        // The guard is armed by default, so the exposure is bounded and the
-        // message says so.
-        assert!(
-            message.contains("If it was created it shuts itself down within 45 minutes."),
-            "{message}"
-        );
-        assert!(
-            message.ends_with("Do not start another machine until that is settled."),
-            "{message}"
-        );
-        // Nothing may survive from the tracked summary: no promise that
-        // status() adopts it, and never a second start().
-        for gone in [
-            "is tracked as machine",
-            "status() adopts it",
-            "Retry start()",
-        ] {
-            assert!(!message.contains(gone), "{gone} survives: {message}");
-        }
-
-        // Guard off: no self-halt sentence, and the rest is unchanged.
-        let unbounded = crate::runtime::UnconfirmedCreate {
-            self_halt_mins: None,
-            summary: unconfirmed.summary.clone(),
-            cause: unconfirmed.cause.clone(),
-            expected_name: unconfirmed.expected_name.clone(),
-            noun: unconfirmed.noun,
-            provider: unconfirmed.provider,
-        };
-        let message = unbounded.untracked(&"disk full");
-        assert!(!message.contains("shuts itself down"), "{message}");
-        assert!(
-            message.ends_with(
-                "may need to be terminated there. Do not start another machine until that is \
-                 settled."
-            ),
-            "{message}"
-        );
     }
 
     /// 429 is the one failure that provably created nothing (the provider

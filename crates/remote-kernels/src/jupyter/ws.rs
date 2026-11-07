@@ -107,6 +107,18 @@ impl KernelConnection {
         self.in_flight.load(Ordering::Relaxed) > 0
     }
 
+    /// Check if the socket has died. Nothing on this connection can run or
+    /// finish from then on: see `RemoteKernelsServer::reconnect_closed_kernels`.
+    pub fn is_closed(&self) -> bool {
+        self.request_tx.is_closed()
+    }
+
+    /// Kill the socket, as a tunnel dropping would.
+    #[cfg(feature = "fake-runtime")]
+    pub fn sever(&self) {
+        self.reader_handle.abort();
+    }
+
     /// Start an execution without waiting for the result.
     /// Returns a receiver that will yield the final `ExecutionOutput` when complete.
     #[allow(clippy::unused_async)] // callers treat submission as async; keep the signature stable
@@ -299,20 +311,17 @@ impl KernelConnection {
 
         request_rx.close();
 
-        // If we exit with a pending execution, complete it with what we have.
+        // A cell that hasn't ended is still running on the machine: dropping
+        // its sender tells the waiter, and the recorder has its output.
         is_busy.store(false, Ordering::Relaxed);
-        if let Some(mut pending) = pending.take() {
-            if pending.output.status == ExecutionStatus::Running {
-                pending.output.status = ExecutionStatus::Errored;
-                pending
-                    .output
-                    .push_stream(true, "\nWebSocket connection closed unexpectedly.");
-            }
+        if let Some(pending) = pending.take()
+            && pending.output.status != ExecutionStatus::Running
+        {
             let _ = pending.result_tx.send(pending.output);
         }
         while let Ok(cmd) = request_rx.try_recv() {
             let _ = cmd.result_tx.send(ExecutionOutput::error(
-                "WebSocket connection closed before execution started.",
+                "The connection to the machine dropped before this cell started, so it did not run. Run it again.",
             ));
         }
     }
@@ -484,19 +493,12 @@ mod tests {
         drop(incoming_tx);
         wait_for_reader_exit(&connection).await;
 
-        let first_output = first.result_rx.await.unwrap();
-        assert!(
-            first_output
-                .stream_text(true)
-                .contains("connection closed unexpectedly")
-        );
+        assert!(connection.is_closed());
+        // Running when the socket died: no answer, because it isn't over.
+        assert!(first.result_rx.await.is_err());
         for queued in [second, third] {
             let output = queued.result_rx.await.unwrap();
-            assert!(
-                output
-                    .stream_text(true)
-                    .contains("connection closed before execution started")
-            );
+            assert!(output.stream_text(true).contains("so it did not run"));
         }
         assert!(!connection.has_pending_work());
     }

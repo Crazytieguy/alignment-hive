@@ -289,6 +289,7 @@ dph_total = { gte = 0.268, lte = 0.45 }
 
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
+            force: None,
             label: None,
             runtime: None,
             gpu_type: None,
@@ -437,6 +438,7 @@ geolocation = { notin = ["CN"] }
     // VM boot can exceed the wait window (StillProvisioning) — poll status.
     let result = server
         .start(Parameters(remote_kernels::server::StartParams {
+            force: None,
             label: None,
             runtime: None,
             gpu_type: None,

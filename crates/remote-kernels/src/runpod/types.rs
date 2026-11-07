@@ -356,6 +356,17 @@ impl Pod {
         self.cost.filter(|c| *c > 0.0)
     }
 
+    /// The size of the volume that is this pod's own: not a network volume,
+    /// which outlives it.
+    pub fn pod_volume_gb(&self) -> u32 {
+        self.mounts
+            .as_ref()
+            .filter(|mounts| mounts.network.is_empty())
+            .and_then(|mounts| mounts.persistent.as_ref())
+            .and_then(|persistent| persistent.size)
+            .unwrap_or(0)
+    }
+
     /// Whether the pod carries `RunPod`'s public 8888 proxy mapping.
     /// Missing data conservatively reads as "mapping exists" — every
     /// pre-tunnel pod had it.

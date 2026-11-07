@@ -32,7 +32,7 @@ use crate::config::KubernetesConfig;
 
 use super::{
     Capabilities, Connection, ConnectionContext, InstanceHandle, InstanceStatus, JupyterEndpoint,
-    ProvisionRequest, RemoteDirs, Runtime, StopSupport, WatchdogPolicy,
+    ProvisionRequest, RemoteDirs, Runtime, StopSupport,
 };
 
 pub struct KubernetesRuntime {
@@ -276,10 +276,6 @@ pub(crate) fn capabilities() -> Capabilities {
 impl Runtime for KubernetesRuntime {
     type Conn = K8sConnection;
 
-    fn name(&self) -> &'static str {
-        "kubernetes"
-    }
-
     fn capabilities(&self) -> Capabilities {
         capabilities()
     }
@@ -287,6 +283,21 @@ impl Runtime for KubernetesRuntime {
     /// Derived from config on every connect; nothing to record.
     fn remote_dirs(&self, _machine_id: &str, _image: Option<&str>) -> Option<RemoteDirs> {
         None
+    }
+
+    fn machine_name(&self, machine_id: &str) -> String {
+        pod_name(&self.name_prefix, machine_id)
+    }
+
+    async fn find_by_name(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        let (client, namespace) = self.client_ns().await?;
+        let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+        Ok(pods
+            .get_opt(name)
+            .await?
+            .and_then(|pod| pod.metadata.name)
+            .into_iter()
+            .collect())
     }
 
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
@@ -301,18 +312,32 @@ impl Runtime for KubernetesRuntime {
         let (client, namespace) = self.client_ns().await?;
         let namespace = namespace.clone();
         let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+        let name = pod.metadata.name.clone().unwrap_or_default();
         let created = pods
             .create(&PostParams::default(), &pod)
             .await
             .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to create pod {:?} in namespace {namespace:?}: {e}",
-                    pod.metadata.name.as_deref().unwrap_or("?"),
-                )
+                let message =
+                    format!("Failed to create pod {name:?} in namespace {namespace:?}: {e}");
+                // The API server answering at all settles it. Anything else may
+                // have created the pod.
+                if matches!(e, kube::Error::Api(_)) {
+                    anyhow::anyhow!(message)
+                } else {
+                    anyhow::Error::new(super::UnconfirmedCreate {
+                        summary: format!(
+                            "{message}. The outcome is unclear, so no second pod was created. A \
+                         pod named {name} may exist and is tracked as machine {}: status() \
+                         adopts it if it appears. Call status() before starting another machine.",
+                            req.machine_id
+                        ),
+                        cause: e.to_string(),
+                    })
+                }
             })?;
         tracing::info!(pod = %created.metadata.name.as_deref().unwrap_or("?"), namespace = %namespace, "Pod created");
         let mut handle = handle_for(&created, self.config.container_name.as_deref());
-        // Kubernetes has no meter, no watchdog, and (here) no deadline — say
+        // Kubernetes has no meter, no supervisor, and (here) no deadline — say
         // so at start() rather than letting the pod outlive a crashed session
         // silently. max-lifetime-secs = 0 is a legitimate template-owns-
         // lifecycle choice; the note is for when the template doesn't either.
@@ -640,10 +665,6 @@ impl Connection for K8sConnection {
         None
     }
 
-    fn supports_watchdog(&self) -> bool {
-        false
-    }
-
     async fn exec(&self, command: &str, timeout: Duration) -> anyhow::Result<String> {
         exec_capture(
             &self.pods,
@@ -855,11 +876,18 @@ impl Connection for K8sConnection {
         if let Some(parent) = local_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Rename fails across filesystems; fall back to a copy via `cp -R`.
+        // Rename fails across filesystems or onto a directory with files in it;
+        // fall back to `cp -R`. Its "/." merges a directory's contents, where
+        // the bare name would nest it inside an existing destination.
         if std::fs::rename(&extracted, local_path).is_err() {
+            let source = if extracted.is_dir() {
+                extracted.join(".")
+            } else {
+                extracted.clone()
+            };
             let cp = tokio::process::Command::new("cp")
                 .arg("-R")
-                .arg(&extracted)
+                .arg(&source)
                 .arg(local_path)
                 .output()
                 .await?;
@@ -869,23 +897,6 @@ impl Connection for K8sConnection {
         }
 
         Ok(format!("Downloaded to {}", local_path.display()))
-    }
-
-    /// The pod's `activeDeadlineSeconds` (set at provision) is the safety net;
-    /// there is no additional on-machine watchdog to install.
-    async fn install_watchdog(&self, _policy: WatchdogPolicy) -> anyhow::Result<()> {
-        tracing::info!(
-            "kubernetes: activeDeadlineSeconds is the safety net; no watchdog to install"
-        );
-        Ok(())
-    }
-
-    async fn heartbeat(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn set_budget_deadline(&self, _secs_from_now: u64) -> anyhow::Result<()> {
-        Ok(())
     }
 }
 

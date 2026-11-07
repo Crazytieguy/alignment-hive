@@ -3,7 +3,7 @@
 //! A [`Runtime`] provisions and manages machine lifecycles for one provider
 //! (`RunPod`, vast.ai, Kubernetes, and the test-only fake). A [`Connection`]
 //! is the live transport to one machine: how to reach its Jupyter server, run
-//! infra commands, sync files, and install the on-machine watchdog.
+//! infra commands, sync files, and what its own stop or terminate call is.
 //!
 //! The Jupyter kernel execution model is shared across all runtimes — only
 //! Claude's `execute()` code runs in kernels; infrastructure runs through
@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::config::{BudgetSource, Cleanup, Config};
+use crate::config::{Cleanup, Config};
 
 /// How reliably a runtime supports stop/resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +44,7 @@ pub struct Capabilities {
     pub metered: bool,
     /// Give up on a machine that still isn't running after this long since
     /// start, and terminate it. Metered runtimes bill during provisioning,
-    /// and the on-machine watchdog can only be installed once the machine is
+    /// and the on-machine supervisor can only be installed once the machine is
     /// reachable — without a deadline, a machine stuck "loading" bills until
     /// a human notices. `None` = wait indefinitely (Kubernetes: queued pods
     /// can legitimately wait hours for cluster capacity).
@@ -81,10 +81,15 @@ impl Capabilities {
 /// "disabled"). The deprecated global `cleanup` is only validated per-runtime
 /// lazily at `start()`: a global value may be a leftover that never applies
 /// to the runtime it would conflict with.
-pub fn validate_config_with_budget_source(
-    config: &Config,
-    budget_source: Option<BudgetSource>,
-) -> Result<(), String> {
+fn provision_windows(config: &Config) -> Vec<(&'static str, u64)> {
+    let mut windows = vec![("[runpod]", config.runpod.provision_timeout_mins)];
+    if let Some(vast) = &config.vast {
+        windows.push(("[vast]", vast.provision_timeout().as_secs() / 60));
+    }
+    windows
+}
+
+pub fn validate_config(config: &Config, has_budget: bool) -> Result<(), String> {
     // Money-window sanity: zero windows would self-clean or terminate healthy
     // machines instantly, and a staleness threshold under ~1.5 heartbeat
     // ticks (60s each) kills machines on a single delayed beat.
@@ -97,10 +102,9 @@ pub fn validate_config_with_budget_source(
     }
     if config.watchdog_stale_secs < 150 {
         return Err(format!(
-            "watchdog-stale-secs must be at least 150 (got {}): the server heartbeats \
-             every 60s and a single transient miss is non-fatal by design, so one \
-             missed beat means a 120s gap — plus the watchdog's 30s check \
-             granularity. Lower values self-clean healthy machines on one blip",
+            "watchdog-stale-secs must be at least 150 (got {}): the server beats every \
+             60s and a single transient miss is non-fatal by design, so one missed beat \
+             means a 120s gap. Lower values self-clean healthy machines on one blip",
             config.watchdog_stale_secs
         ));
     }
@@ -137,17 +141,30 @@ pub fn validate_config_with_budget_source(
                 .to_string(),
         );
     }
+    // A machine's orphan guard must not end a start the server would still wait
+    // for: the server, which knows more, should be the one to give up.
+    for (section, provision_mins) in provision_windows(config) {
+        if config.orphan_halt_mins < provision_mins.saturating_add(5) {
+            return Err(format!(
+                "orphan-halt-mins ({}) must exceed {section} provision-timeout-mins ({provision_mins}) \
+                 by at least 5 minutes, or the orphan guard halts a machine the server is still \
+                 waiting for",
+                config.orphan_halt_mins
+            ));
+        }
+    }
     // Both RunPod preflight checks follow ONE rule. Failing at startup beats
     // discovering the same thing in a 422 that costs a create round trip —
     // but a [runpod] value left over from earlier use must not stop a vast-
     // or Kubernetes-only server from booting, and every one of these is
     // re-validated when a pod is actually created (the create body's own
-    // validation, and the BudgetUnenforceable gate), where it fails closed.
+    // validation, and start()'s check that a budget can be enforced), where
+    // it fails closed.
     // So: fatal where RunPod is the runtime this server reaches for by
     // default, a startup warning everywhere else.
     let runpod_preflight = [
         runpod::validate_storage_and_cloud(&config.runpod, &config.config_path()).err(),
-        runpod_budget_enforceable(config, budget_source).err(),
+        runpod_budget_enforceable(config, has_budget).err(),
     ];
     for message in runpod_preflight.into_iter().flatten() {
         if config.default_runtime == "runpod" {
@@ -173,13 +190,12 @@ pub fn validate_config_with_budget_source(
             caps.validate_cleanup(explicit)
                 .map_err(|msg| format!("[{name}] cleanup: {msg}"))?;
         }
-        if budget_source.is_some() && caps.metered && config.cleanup_for(name) == Cleanup::Disabled
-        {
+        if has_budget && caps.metered && config.cleanup_for(name) == Cleanup::Disabled {
             return Err(format!(
                 "budget-cap (or REMOTE_KERNELS_BUDGET) cannot be used while cleanup resolves \
-                 to \"disabled\" for the metered runtime {name:?} — budget enforcement \
+                 to \"disabled\" for the paid runtime {name:?} — budget enforcement \
                  requires the ability to stop/terminate machines. Set cleanup = \"stop\" or \
-                 \"terminate\" under [{name}]. (Unmetered runtimes like kubernetes may keep \
+                 \"terminate\" under [{name}]. (Kubernetes, which isn't billed, may keep \
                  \"disabled\".)"
             ));
         }
@@ -189,25 +205,17 @@ pub fn validate_config_with_budget_source(
 
 /// Whether a budgeted `[runpod]` config could enforce that budget at all: a
 /// proxy-only pod has nothing on it that can end the run when the money is
-/// spent. Checked again per machine at provision (`BudgetUnenforceable`),
-/// where it fails closed regardless of which runtime is the default.
-fn runpod_budget_enforceable(
-    config: &Config,
-    budget_source: Option<BudgetSource>,
-) -> Result<(), String> {
-    let Some(source) = budget_source else {
-        return Ok(());
-    };
-    if config.runpod.jupyter_access == crate::config::JupyterAccess::Proxy
+/// spent. Checked again per machine at start, where it fails closed regardless
+/// of which runtime is the default.
+fn runpod_budget_enforceable(config: &Config, has_budget: bool) -> Result<(), String> {
+    if has_budget
+        && config.runpod.jupyter_access == crate::config::JupyterAccess::Proxy
         && !config.runpod_ssh_expected()
-        && !(source == BudgetSource::Toml && config.runpod.allow_unenforced_budget)
     {
         return Err(format!(
             "budget cannot be enforced for [runpod] jupyter-access = \"proxy\" without SSH \
              (nothing on the machine can end the run when the budget is spent). In {}, set \
-             [runpod] cloud-type = \"SECURE\", or [runpod] allow-unenforced-budget = true — \
-             which is accepted only for a budget-cap set in that same file, never for \
-             REMOTE_KERNELS_BUDGET",
+             [runpod] cloud-type = \"SECURE\", or remove the budget",
             config.config_path()
         ));
     }
@@ -238,9 +246,9 @@ pub struct ProvisionRequest {
     /// Token the machine's Jupyter server must require.
     pub jupyter_token: String,
     /// Cleanup policy for this machine — the same server-computed value that
-    /// is persisted in the instance record and later handed to
-    /// `install_watchdog`, so provision-time guards (`RunPod`'s orphan
-    /// guard) can't diverge from the watchdog's policy.
+    /// is persisted in the instance record and later handed to the
+    /// supervisor install, so provision-time guards (`RunPod`'s orphan
+    /// guard) can't diverge from the supervisor's policy.
     pub cleanup: crate::config::Cleanup,
     /// [`Runtime::remote_dirs`] for this machine, computed once by the server
     /// before the create and persisted with it, so the create body (`RunPod`'s
@@ -256,7 +264,7 @@ pub struct ProvisionRequest {
 pub struct RemoteDirs {
     /// Where `sync()` lands files, downloads resolve, and kernels run.
     pub workdir: String,
-    /// The lifecycle state dir (lease, watchdog, markers, kernel output). It
+    /// The lifecycle state dir (supervisor, its files, kernel output). It
     /// has to survive the machine's own stop and belong to this machine
     /// alone.
     pub state_dir: String,
@@ -276,10 +284,11 @@ pub struct RemoteDirs {
 pub struct InstanceHandle {
     pub external_id: String,
     pub gpu_name: String,
-    /// Hourly cost in dollars. `None` for unmetered runtimes.
+    /// What it bills per hour while running, disks included, in dollars.
+    /// `None` for unmetered runtimes.
     pub cost_per_hr: Option<f64>,
-    /// Provider-reported storage-only rate after stop, normalized to $/hr.
-    /// Providers that expose no usable price record zero with an explanation.
+    /// What it still bills per hour once stopped, normalized to $/hr. Providers
+    /// with no usable price record zero with an explanation.
     pub storage_rate_per_hr: f64,
     pub storage_rate_note: Option<String>,
     /// Provisioning caveat to surface in the `start()` result (e.g. a
@@ -309,55 +318,16 @@ pub fn error_requires_user_action(err: &anyhow::Error) -> bool {
 /// A create the provider never confirmed either way: it may or may not have
 /// made a machine, and no second create may be issued to find out (no
 /// provider here offers an idempotency key). Runtimes return this instead of
-/// a plain error so the server can keep a durable marker under the machine
-/// id it already minted — the only thing that lets a later `status()` settle
-/// the question by asking the provider for `expected_name`.
+/// a plain error so the server keeps the record it wrote before the create,
+/// which is what lets a later `status()` settle the question by name.
 #[derive(Debug, thiserror::Error)]
 #[error("{summary}")]
 pub struct UnconfirmedCreate {
-    /// What the caller is told when the durable marker WAS written; the
-    /// runtime composes it because only it knows what bounds the exposure.
+    /// What the caller is told; the runtime composes it because only it knows
+    /// what bounds the exposure.
     pub summary: String,
-    /// The provider failure alone, for the durable marker's own row.
+    /// The provider failure alone, for the record's own row.
     pub cause: String,
-    /// The provider-side name the create asked for — how the machine is
-    /// found again if it does exist.
-    pub expected_name: String,
-    /// `Some(minutes)` when the machine, if it exists, ends itself that long
-    /// after creation with no action here; `None` when nothing bounds it.
-    pub self_halt_mins: Option<u64>,
-    /// What this provider calls one machine ("pod"), and what to call the
-    /// provider itself (`"RunPod"`), so the escalation below reads in the same
-    /// terms as the rest of that provider's messages.
-    pub noun: &'static str,
-    pub provider: &'static str,
-}
-
-impl UnconfirmedCreate {
-    /// What the caller is told when even the durable marker could not be
-    /// written. This REPLACES [`Self::summary`] rather than correcting it:
-    /// the summary's promise is that the machine is tracked and `status()`
-    /// will adopt it, and a failed write is exactly what makes that untrue.
-    ///
-    /// Nothing local can settle the question now, so the whole message
-    /// escalates — and an escalation addressed to the user may say where the
-    /// user would look, which no agent-facing next action ever does.
-    pub fn untracked(&self, write_error: &dyn std::fmt::Display) -> String {
-        let outlook = self.self_halt_mins.map_or_else(String::new, |mins| {
-            format!(" If it was created it shuts itself down within {mins} minutes.")
-        });
-        format!(
-            "Creating the {noun} failed with an unclear outcome ({cause}). No second {noun} \
-             was created. A {noun} named {name} may exist at {provider}, but local tracking \
-             failed ({write_error}), so this session cannot manage it: tell the user that a \
-             {noun} named {name} may exist at {provider} and may need to be terminated \
-             there.{outlook} Do not start another machine until that is settled.",
-            noun = self.noun,
-            cause = self.cause,
-            name = self.expected_name,
-            provider = self.provider,
-        )
-    }
 }
 
 /// Marker error: the machine is still legitimately coming up (e.g. a
@@ -394,7 +364,7 @@ impl InstanceStatus {
     /// interval opened a minute early over-reports spend, while one opened
     /// late lets a machine bill untracked. So a durable record that still
     /// says stopped, against a provider reporting either of these, means
-    /// billing has resumed and the ledger interval must reopen at the full
+    /// billing has resumed and the meter must reopen at the full
     /// rate.
     pub fn is_billing(&self) -> bool {
         matches!(self, Self::Running | Self::Provisioning)
@@ -465,14 +435,11 @@ pub struct ConnectionContext {
     pub remote_dirs: Option<RemoteDirs>,
 }
 
-/// On-machine self-cleanup policy, installed via [`Connection::install_watchdog`].
+/// How the on-machine supervisor cleans up when no server is there to.
 #[derive(Debug, Clone)]
-pub struct WatchdogPolicy {
+pub struct SupervisorPolicy {
     pub cleanup: Cleanup,
-    /// Initial budget deadline in seconds from now (refreshed via
-    /// [`Connection::set_budget_deadline`]). `None` = no budget.
-    pub initial_budget_secs: Option<u64>,
-    /// Heartbeat staleness that triggers self-cleanup (config
+    /// How old `alive` gets before self-cleanup starts (config
     /// `watchdog-stale-secs`).
     pub stale_secs: u64,
     pub budget_grace_secs: u64,
@@ -480,7 +447,6 @@ pub struct WatchdogPolicy {
     pub finalize_wait_secs: Option<u64>,
     pub finalize_timeout_secs: u64,
     pub finalize_command: Option<String>,
-    pub storage_rate_per_hr: Option<f64>,
 }
 
 /// Live transport to one machine.
@@ -493,8 +459,8 @@ pub trait Connection: Send + Sync {
     /// Where `sync()` lands files and relative download paths resolve.
     fn workdir(&self) -> &str;
 
-    /// The lifecycle state dir: lease, watchdog, finish and outcome markers,
-    /// kernel-output logs. Persistent across the machine's own stop.
+    /// The lifecycle state dir: the supervisor and its files, kernel-output
+    /// logs. Persistent across the machine's own stop.
     fn state_dir(&self) -> String;
 
     /// The Jupyter API path new kernels start in (see
@@ -504,33 +470,32 @@ pub trait Connection: Send + Sync {
     /// See [`RemoteDirs::stage_dir`].
     fn stage_dir(&self) -> Option<&str>;
 
-    /// Loopback WebSocket endpoint as seen from the machine itself. Production
-    /// Jupyter servers use port 8888; the fake runtime overrides its random
-    /// local test port.
-    fn recorder_ws_url(&self) -> String {
-        "ws://127.0.0.1:8888".to_string()
+    /// Jupyter's port as seen from the machine itself, for the output recorder
+    /// and the supervisor.
+    fn machine_jupyter_port(&self) -> u16 {
+        8888
     }
 
-    /// Jupyter port as seen from the machine-side watchdog.
-    fn watchdog_port(&self) -> u16 {
-        8888
+    /// How often a server beats.
+    fn beat_interval(&self) -> Duration {
+        Duration::from_mins(1)
+    }
+
+    /// The shell command by which this machine ends itself, given `stop` or
+    /// `terminate` in `$1`. `None` means no supervisor runs here.
+    fn action_command(&self) -> Option<String> {
+        None
+    }
+
+    /// Bring back a dropped tunnel; called on every beat.
+    fn keep_transport_alive(&self) -> impl Future<Output = ()> + Send {
+        async {}
     }
 
     /// A caveat about this connection worth surfacing in the `start()`
     /// result (e.g. a degraded access path). `None` when all is normal.
     fn startup_note(&self) -> Option<String> {
         None
-    }
-
-    /// Whether this connection can host the fenced lease/watchdog machinery.
-    fn supports_watchdog(&self) -> bool {
-        true
-    }
-
-    /// Whether this transport can host the fenced lease. Kubernetes supports
-    /// leases through exec even though it cannot run a detached watchdog.
-    fn supports_lease(&self) -> bool {
-        true
     }
 
     /// Run an infrastructure command on the machine (never user/Claude code —
@@ -543,7 +508,7 @@ pub trait Connection: Send + Sync {
 
     /// Wait until the machine's command transport is reachable. Failed
     /// attempts are published to `diagnostics` as they happen, so callers
-    /// with their own deadlines (the server's budget-enforceability gate)
+    /// with their own deadlines (the provision timeout under a budget)
     /// can report the underlying cause while this is still retrying.
     fn wait_reachable(
         &self,
@@ -563,36 +528,21 @@ pub trait Connection: Send + Sync {
         remote_path: &str,
         local_path: &std::path::Path,
     ) -> impl Future<Output = anyhow::Result<String>> + Send;
-
-    /// Install the on-machine watchdog: self-cleanup if the heartbeat file goes
-    /// stale (server died) or the budget deadline passes. Best-effort — some
-    /// runtimes may not support one.
-    fn install_watchdog(
-        &self,
-        policy: WatchdogPolicy,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send;
-
-    /// Signal liveness to the watchdog.
-    fn heartbeat(&self) -> impl Future<Output = anyhow::Result<()>> + Send;
-
-    /// Refresh the on-machine budget deadline (seconds from now at the current
-    /// aggregate burn rate). No-op when no watchdog/budget is installed.
-    fn set_budget_deadline(
-        &self,
-        secs_from_now: u64,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
 /// One machine provider.
 pub trait Runtime: Send + Sync {
     type Conn: Connection;
 
-    fn name(&self) -> &'static str;
     fn capabilities(&self) -> Capabilities;
 
     /// The directories a machine created now with `image` (the `start()`
     /// override, if any) would use; see [`RemoteDirs`].
     fn remote_dirs(&self, machine_id: &str, image: Option<&str>) -> Option<RemoteDirs>;
+
+    /// The provider-side name a create for this machine asks for, and
+    /// [`Self::find_by_name`] finds it under. Unique per machine id.
+    fn machine_name(&self, machine_id: &str) -> String;
 
     /// Create a new machine. Implementations handle provider-specific
     /// selection/retry policy (e.g. `RunPod`'s GPU-type fallback list).
@@ -618,14 +568,7 @@ pub trait Runtime: Send + Sync {
     /// means the ambiguity has to reach the user, and none is only "not
     /// listed", never proof that none was made.
     ///
-    /// Only providers whose machine names are unique per machine can answer;
-    /// the rest report the lookup unsupported, and a marker of theirs waits
-    /// for the user. (Today only `RunPod` ever produces one.)
-    fn find_by_name(&self, name: &str) -> impl Future<Output = anyhow::Result<Vec<String>>> + Send {
-        let runtime = self.name();
-        let _ = name;
-        async move { anyhow::bail!("the {runtime} runtime cannot look up machines by name") }
-    }
+    fn find_by_name(&self, name: &str) -> impl Future<Output = anyhow::Result<Vec<String>>> + Send;
 
     /// Poll until the machine is running. Returns the refreshed handle.
     fn wait_running(
@@ -760,16 +703,16 @@ impl AnyRuntime {
 impl Runtime for AnyRuntime {
     type Conn = AnyConnection;
 
-    fn name(&self) -> &'static str {
-        dispatch!(self, r => r.name())
-    }
-
     fn capabilities(&self) -> Capabilities {
         dispatch!(self, r => r.capabilities())
     }
 
     fn remote_dirs(&self, machine_id: &str, image: Option<&str>) -> Option<RemoteDirs> {
         dispatch!(self, r => r.remote_dirs(machine_id, image))
+    }
+
+    fn machine_name(&self, machine_id: &str) -> String {
+        dispatch!(self, r => r.machine_name(machine_id))
     }
 
     async fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<InstanceHandle> {
@@ -848,8 +791,20 @@ impl Connection for AnyConnection {
         dispatch!(self, c => c.stage_dir())
     }
 
-    fn recorder_ws_url(&self) -> String {
-        dispatch!(self, c => c.recorder_ws_url())
+    fn machine_jupyter_port(&self) -> u16 {
+        dispatch!(self, c => c.machine_jupyter_port())
+    }
+
+    fn beat_interval(&self) -> Duration {
+        dispatch!(self, c => c.beat_interval())
+    }
+
+    fn action_command(&self) -> Option<String> {
+        dispatch!(self, c => c.action_command())
+    }
+
+    async fn keep_transport_alive(&self) {
+        dispatch!(self, c => c.keep_transport_alive().await);
     }
 
     fn startup_note(&self) -> Option<String> {
@@ -882,18 +837,6 @@ impl Connection for AnyConnection {
     ) -> anyhow::Result<String> {
         dispatch!(self, c => c.download(remote_path, local_path).await)
     }
-
-    async fn install_watchdog(&self, policy: WatchdogPolicy) -> anyhow::Result<()> {
-        dispatch!(self, c => c.install_watchdog(policy).await)
-    }
-
-    async fn heartbeat(&self) -> anyhow::Result<()> {
-        dispatch!(self, c => c.heartbeat().await)
-    }
-
-    async fn set_budget_deadline(&self, secs_from_now: u64) -> anyhow::Result<()> {
-        dispatch!(self, c => c.set_budget_deadline(secs_from_now).await)
-    }
 }
 
 #[cfg(test)]
@@ -902,10 +845,6 @@ mod tests {
 
     fn config(toml: &str) -> Config {
         toml::from_str(toml).unwrap()
-    }
-
-    fn validate_config(config: &Config, has_budget: bool) -> Result<(), String> {
-        validate_config_with_budget_source(config, has_budget.then_some(BudgetSource::Environment))
     }
 
     #[test]
@@ -1011,11 +950,19 @@ mod tests {
         // Aggressive-but-sane custom values pass.
         assert!(
             validate_config(
-                &config("orphan-halt-mins = 5\n[runpod]\nprovision-timeout-mins = 5"),
+                &config("orphan-halt-mins = 10\n[runpod]\nprovision-timeout-mins = 5"),
                 false
             )
             .is_ok()
         );
+
+        // The orphan guard mustn't end a start the server would still wait for.
+        let err = validate_config(
+            &config("orphan-halt-mins = 30\n[runpod]\nprovision-timeout-mins = 30"),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("orphan-halt-mins"), "{err}");
 
         // The vast orphan guard arms before onstart and is disarmed only
         // after it — the halt window must outlast the onstart ceiling.
@@ -1037,6 +984,9 @@ mod tests {
 
         for key in ["finalize-command-timeout-secs", "budget-grace-secs"] {
             for runtime in ["runpod", "vast", "kubernetes"] {
+                if runtime == "kubernetes" && key == "budget-grace-secs" {
+                    continue; // nothing on a pod counts one down
+                }
                 let required = if runtime == "kubernetes" {
                     "pod-template = \"pod.yaml\"\n"
                 } else {
@@ -1054,7 +1004,11 @@ mod tests {
         // Global disabled: every metered runtime resolves to disabled → error
         // (matches the old global check's behavior).
         let cfg = config("cleanup = \"disabled\"");
-        assert!(validate_config(&cfg, true).unwrap_err().contains("metered"));
+        assert!(
+            validate_config(&cfg, true)
+                .unwrap_err()
+                .contains("paid runtime")
+        );
         // ... but without a budget it's fine.
         assert!(validate_config(&cfg, false).is_ok());
 
@@ -1075,15 +1029,12 @@ mod tests {
     }
 
     #[test]
-    fn unenforced_budget_waiver_is_toml_only() {
+    fn a_budget_needs_a_way_to_end_the_run() {
         let cfg = config(
-            "budget-cap = 5\n[runpod]\njupyter-access = \"proxy\"\ncloud-type = \"COMMUNITY\"\nallow-unenforced-budget = true",
+            "budget-cap = 5\n[runpod]\njupyter-access = \"proxy\"\ncloud-type = \"COMMUNITY\"",
         );
-        assert!(validate_config_with_budget_source(&cfg, Some(BudgetSource::Toml)).is_ok());
-        let error =
-            validate_config_with_budget_source(&cfg, Some(BudgetSource::Environment)).unwrap_err();
-        assert!(error.contains("never for REMOTE_KERNELS_BUDGET"), "{error}");
+        let error = validate_config(&cfg, true).unwrap_err();
         assert!(error.contains("remote-kernels.toml"), "{error}");
-        assert!(!error.contains("support-public-ip"), "{error}");
+        assert!(validate_config(&cfg, false).is_ok());
     }
 }

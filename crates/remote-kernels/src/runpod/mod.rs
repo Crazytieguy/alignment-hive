@@ -2,4 +2,5 @@
 //! the orphan guard, access paths) lives in [`crate::runtime::runpod`].
 
 pub mod client;
+pub mod pricing;
 pub mod types;

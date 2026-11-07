@@ -1,236 +1,235 @@
-//! Embedded machine-side lifecycle scripts and their server-side client.
-//!
-//! The scripts in `scripts/machine/` are compiled in and run over the
-//! runtime's command transport: `rk-lease.sh` is the fenced lease state
-//! machine (active, armed, finalizing), `rk-watchdog.sh` the detached
-//! supervisor that cleans the machine up when the server goes quiet or the
-//! budget runs out. Everything they share lives under [`state_dir`] on the
-//! machine.
+//! The machine-side lifecycle script and the short commands the server runs
+//! against it. Install and each beat are one exec, so one SSH connection.
+//! Everything they share lives under [`state_dir`] on the machine.
 
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use serde::Deserialize;
+use crate::config::Cleanup;
+use crate::runtime::{Connection, SupervisorPolicy};
+use crate::state::{FinishIntent, FinishThen};
 
-use crate::runtime::{AnyConnection, Connection};
-
-/// Fenced lease state-machine script.
-pub const LEASE: &str = include_str!("../scripts/machine/rk-lease.sh");
-
-/// Detached Jupyter drain and finalize supervisor script.
-pub const WATCHDOG: &str = include_str!("../scripts/machine/rk-watchdog.sh");
+/// The on-machine supervisor (see the script's header).
+pub const SUPERVISOR: &str = include_str!("../scripts/machine/rk-supervisor.sh");
 
 /// Per-kernel machine-side `IOPub` recorder.
 pub const OUTPUT_RECORDER: &str = include_str!("../scripts/machine/rk-output-recorder.py");
 
-/// The caller no longer owns the lease generation or operation.
-pub const EXIT_FENCED: i32 = 9;
-/// The terminal `finalizing` state refuses the requested operation.
-pub const EXIT_REFUSED: i32 = 10;
-
-const EXIT_SENTINEL: &str = "__RK_LEASE_EXIT__=";
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LeaseState {
-    pub generation: u64,
-    pub owner_uuid: String,
-    pub state: String,
-    pub ts: u64,
-    /// Machine epoch paired with `ts` by the lease script under its lock.
-    pub now: u64,
-    #[serde(default)]
-    pub arm_reason: String,
-    #[serde(default)]
-    pub arm_deadline: u64,
-    #[serde(default)]
-    pub op_id: String,
-    #[serde(default)]
-    pub action: String,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum LeaseError {
-    #[error("another session took over the machine")]
-    Fenced,
-    #[error("machine is running its automatic cleanup; wait and call status()")]
-    Finalizing,
-    #[error("on-machine supervision unavailable: flock is required")]
-    NoFlock,
-    #[error("on-machine supervision unavailable: persistent state directory is not writable")]
-    BadStateDir,
-    #[error("lease command failed: {0}")]
-    Invalid(String),
-    #[error("lease transport failed: {0}")]
-    Transport(#[source] anyhow::Error),
-}
-
-/// The one persistent lifecycle directory shared by leases and later marker
-/// phases. Runtime workdirs are validated before reaching this helper.
+/// The one persistent lifecycle directory. Runtime workdirs are validated
+/// before reaching this helper.
 pub fn state_dir(workdir: &str) -> String {
     format!("{}/.remote-kernels", workdir.trim_end_matches('/'))
 }
 
-pub async fn read(conn: &AnyConnection) -> Result<LeaseState, LeaseError> {
-    parse_json(&invoke(conn, &["read"]).await?)
+/// One whitespace-free word: `alive` is split on whitespace on the machine.
+fn owner_word(owner: &str) -> String {
+    owner.replace(char::is_whitespace, "_")
 }
 
-pub async fn acquire(conn: &AnyConnection, owner_uuid: &str) -> Result<LeaseState, LeaseError> {
-    parse_json(&invoke(conn, &["acquire", owner_uuid]).await?)
+/// What an install found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Installed {
+    Ok,
+    /// Another session's `alive` is this many seconds old, so nothing was changed.
+    Foreign(u64),
+    /// The machine cannot run this; the reason is a short phrase.
+    Unsupervisable(String),
 }
 
-fn parse_json<T: serde::de::DeserializeOwned>(output: &str) -> Result<T, LeaseError> {
-    serde_json::from_str(output.trim()).map_err(|error| LeaseError::Invalid(error.to_string()))
+/// Parameters of one install. It overwrites `alive`, `deadline` and
+/// `intent.json`, replaces any older supervisor or legacy watchdog, disarms
+/// the orphan guard and starts the supervisor, in one command.
+pub struct Install<'a> {
+    pub owner: &'a str,
+    /// Refuse if another owner's `alive` is younger than this.
+    pub refuse_foreign_within: Option<u64>,
+    /// Budget deadline, seconds from now on the machine's clock.
+    pub deadline_secs: Option<u64>,
+    pub policy: &'a SupervisorPolicy,
+    pub intent: Option<&'a FinishIntent>,
 }
 
-/// Lease age computed entirely from the machine clock. Local clock skew must
-/// never influence takeover authority.
-pub fn age_secs(lease: &LeaseState) -> u64 {
-    lease.now.saturating_sub(lease.ts)
-}
-
-pub async fn refresh(
-    conn: &AnyConnection,
-    generation: u64,
-    owner_uuid: &str,
-) -> Result<(), LeaseError> {
-    invoke(conn, &["refresh", &generation.to_string(), owner_uuid])
-        .await
-        .map(|_| ())
-}
-
-pub async fn arm_disconnect(
-    conn: &AnyConnection,
-    generation: u64,
-    deadline: Option<u64>,
-) -> Result<(), LeaseError> {
-    let generation = generation.to_string();
-    let mut args = vec!["arm", generation.as_str(), "disconnect"];
-    let deadline = deadline.map(|value| value.to_string());
-    if let Some(deadline) = deadline.as_deref() {
-        args.push(deadline);
-    }
-    invoke(conn, &args).await.map(|_| ())
-}
-
-pub async fn enter_finalizing(
-    conn: &AnyConnection,
-    generation: u64,
-    op_id: &str,
-    action: crate::config::Cleanup,
-) -> Result<(), LeaseError> {
-    let generation = generation.to_string();
-    let action = cleanup_name(action);
-    invoke(conn, &["enter-finalizing", &generation, op_id, action])
-        .await
-        .map(|_| ())
-}
-
-pub async fn revert_to_armed(conn: &AnyConnection, op_id: &str) -> Result<(), LeaseError> {
-    invoke(conn, &["revert-to-armed", op_id]).await.map(|_| ())
-}
-
-pub async fn complete_stop(conn: &AnyConnection, op_id: &str) -> Result<(), LeaseError> {
-    invoke(conn, &["complete-stop", op_id]).await.map(|_| ())
-}
-
-/// Remove a self-cleanup's outcome marker. Its only remaining effect is to
-/// block the machine's NEXT finalize (the watchdog refuses a new provider
-/// action while an unresolved outcome exists) — so a resumed machine must shed
-/// it.
-pub async fn clear_outcome<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
-    remove_state_files(conn, &["outcome.json"]).await
-}
-
-pub async fn install_watchdog<C: Connection + ?Sized>(
+pub async fn install<C: Connection + ?Sized>(
     conn: &C,
-    policy: &crate::runtime::WatchdogPolicy,
-    action_command: &str,
-) -> anyhow::Result<()> {
+    plan: &Install<'_>,
+) -> anyhow::Result<Installed> {
     let dir = conn.state_dir();
-    let lease_path = format!("{dir}/rk-lease.sh");
-    let watchdog_path = format!("{dir}/rk-watchdog.sh");
-    let finalize_wait = policy.finalize_wait_secs.unwrap_or(0).to_string();
-    let storage_rate = policy
-        .storage_rate_per_hr
-        .map_or_else(|| "null".to_string(), |rate| rate.to_string());
+    let script_path = format!("{dir}/rk-supervisor.sh");
+    let action = if plan.policy.cleanup == Cleanup::Disabled {
+        None
+    } else {
+        conn.action_command()
+    };
+    let default_action = match plan.policy.cleanup {
+        Cleanup::Stop => "stop",
+        Cleanup::Terminate | Cleanup::Disabled => "terminate",
+    };
     let arguments = [
         shell_quote(&dir),
         "install".to_string(),
-        shell_quote(&lease_path),
-        policy.stale_secs.to_string(),
-        policy.budget_grace_secs.to_string(),
-        finalize_wait,
-        policy.finalize_timeout_secs.to_string(),
-        conn.watchdog_port().to_string(),
+        shell_quote(&owner_word(plan.owner)),
+        optional_number(plan.refuse_foreign_within),
+        optional_number(plan.deadline_secs),
+        plan.policy.stale_secs.to_string(),
+        plan.policy.budget_grace_secs.to_string(),
+        plan.policy.finalize_wait_secs.unwrap_or(0).to_string(),
+        plan.policy.finalize_timeout_secs.to_string(),
+        conn.machine_jupyter_port().to_string(),
         shell_quote(&conn.jupyter().token),
-        cleanup_name(policy.cleanup).to_string(),
-        shell_quote(policy.finalize_command.as_deref().unwrap_or("-")),
-        shell_quote(action_command),
-        storage_rate,
+        default_action.to_string(),
+        shell_quote(plan.policy.finalize_command.as_deref().unwrap_or("-")),
+        shell_quote(action.as_deref().unwrap_or("-")),
     ]
     .join(" ");
-    // The initial budget deadline travels in the same command: each exec is a
-    // full SSH handshake, inside the budget gate's window. A deadline that
-    // can't be written fails the install, as a separate command would have.
-    let deadline = policy.initial_budget_secs.map_or_else(String::new, |secs| {
-        format!("{} || exit 1; ", budget_deadline_command(&dir, secs))
-    });
-    let command = format!(
-        "{deadline}umask 077; mkdir -p {dir}; printf %s {lease} > {lease_path}; chmod 700 {lease_path}; printf %s {watchdog} > {watchdog_path}; chmod 700 {watchdog_path}; bash {watchdog_path} {arguments}",
-        dir = shell_quote(&dir),
-        lease = shell_quote(LEASE),
-        lease_path = shell_quote(&lease_path),
-        watchdog = shell_quote(WATCHDOG),
-        watchdog_path = shell_quote(&watchdog_path),
-    );
-    conn.exec(&command, Duration::from_secs(30)).await?;
-    Ok(())
+    let intent = intent_script(conn, plan.intent);
+    let command = install_command(&dir, &script_path, &intent, &arguments);
+    let output = conn.exec(&command, Duration::from_secs(30)).await?;
+    Ok(parse_install_output(&output))
 }
 
-/// Serialize a `finish()` intent for the machine-visible marker. The
-/// watchdog's finalizer downgrades `terminate` to `stop` while
-/// `downloads_pending` is true, so queued data is preserved until a server
-/// collects it.
-pub fn intent_marker_json(downloads_pending: bool, then: crate::state::FinishThen) -> String {
+/// A reachable machine is one a server is looking after, whatever else turns
+/// out to be wrong with it, so the orphan guard is disarmed before anything can
+/// fail. Getting the script onto the machine is the one writability check.
+fn install_command(dir: &str, script_path: &str, intent: &str, arguments: &str) -> String {
+    let path = shell_quote(script_path);
+    format!(
+        "touch /tmp/heartbeat 2>/dev/null; umask 077; \
+         if ! {{ mkdir -p {dir_q} && printf %s {script} > {path} && chmod 700 {path}; }} 2>/dev/null; then \
+         echo 'unsupervisable no writable state directory'; exit 0; fi; \
+         {intent}; bash {path} {arguments}",
+        dir_q = shell_quote(dir),
+        script = shell_quote(SUPERVISOR),
+    )
+}
+
+fn parse_install_output(output: &str) -> Installed {
+    let last = output.lines().last().unwrap_or_default().trim();
+    if let Some(age_secs) = parse_foreign(last) {
+        return Installed::Foreign(age_secs);
+    }
+    if let Some(reason) = last.strip_prefix("unsupervisable ") {
+        return Installed::Unsupervisable(reason.to_string());
+    }
+    if last == "installed" {
+        Installed::Ok
+    } else {
+        // A shell that could not even run the script (no bash, a full disk).
+        Installed::Unsupervisable(format!(
+            "self-cleanup could not be installed ({})",
+            if last.is_empty() { "no output" } else { last }
+        ))
+    }
+}
+
+/// The age from a `foreign <owner> <age>` line.
+fn parse_foreign(line: &str) -> Option<u64> {
+    line.strip_prefix("foreign ")?
+        .rsplit(' ')
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn optional_number(value: Option<u64>) -> String {
+    value.map_or_else(|| "-".to_string(), |value| value.to_string())
+}
+
+/// The one short command behind every beat: refuse to overwrite another
+/// session's `alive`, otherwise refresh it and the budget deadline, and keep
+/// the orphan guard disarmed. Returns the age of the foreign `alive`, if that is
+/// what it found. Transport errors are the caller's to retry.
+pub async fn beat<C: Connection + ?Sized>(
+    conn: &C,
+    owner: &str,
+    deadline_secs: Option<u64>,
+) -> anyhow::Result<Option<u64>> {
+    let dir = shell_quote(&conn.state_dir());
+    let owner = shell_quote(&owner_word(owner));
+    let deadline = deadline_secs.map_or_else(String::new, |secs| {
+        format!(
+            "printf '%s\\n' \"$((now + {secs}))\" > \"$d/.deadline.$$\" && mv -f \"$d/.deadline.$$\" \"$d/deadline\" || exit 1; "
+        )
+    });
+    // A failed write has to fail the command: unnoticed, the machine would
+    // see this server as gone.
+    let command = format!(
+        "d={dir}; o={owner}; read -r cur ts rest < \"$d/alive\" 2>/dev/null; now=$(date +%s); \
+         if [ -n \"$cur\" ] && [ \"$cur\" != \"$o\" ]; then echo \"foreign $cur $((now - ${{ts:-0}}))\"; exit 0; fi; \
+         printf '%s %s\\n' \"$o\" \"$now\" > \"$d/.alive.$$\" && mv -f \"$d/.alive.$$\" \"$d/alive\" || exit 1; \
+         {deadline}touch /tmp/heartbeat; echo ok"
+    );
+    let output = conn.exec(&command, Duration::from_secs(10)).await?;
+    Ok(output.trim().lines().last().and_then(parse_foreign))
+}
+
+/// `(owner, age_secs)` from the machine's `alive`, bounded to a few seconds.
+/// `None` when it cannot be read, which never blocks anything.
+pub async fn read_alive<C: Connection + ?Sized>(conn: &C) -> Option<(String, u64)> {
+    let command = format!("cat {}/alive; date +%s", shell_quote(&conn.state_dir()));
+    let output = conn.exec(&command, Duration::from_secs(5)).await.ok()?;
+    let mut lines = output.lines();
+    let (owner, ts) = lines.next()?.trim().rsplit_once(' ')?;
+    let now: u64 = lines.next()?.trim().parse().ok()?;
+    Some((owner.to_string(), now.saturating_sub(ts.parse().ok()?)))
+}
+
+/// Whether `alive` names another session recently enough that it is driving
+/// the machine. Three missed beats and it is no longer "fresh".
+pub const FOREIGN_FRESH_SECS: u64 = 180;
+
+pub fn alive_is_foreign(alive: &(String, u64), owner: &str) -> bool {
+    alive.0 != owner_word(owner) && alive.1 < FOREIGN_FRESH_SECS
+}
+
+/// Serialize a `finish()` plan for the machine. The supervisor downgrades
+/// `terminate` to `stop` while `downloads_pending` is true, so queued data is
+/// preserved until a server collects it.
+pub fn intent_marker_json(downloads_pending: bool, then: FinishThen) -> String {
     format!(
         "{{\"downloads_pending\":{downloads_pending},\"then\":\"{}\"}}",
         then.as_str()
     )
 }
 
-/// Write the intent marker atomically on the machine (command transport).
-/// `downloads` are plan `plan`'s workdir-relative paths still to download.
-/// Where the workdir doesn't survive a stop (see [`Connection::stage_dir`]),
-/// it also writes `stage.sh`, which the watchdog runs before stopping the
-/// machine itself, so the files wait on the volume instead.
-pub async fn write_intent<C: Connection + ?Sized>(
-    conn: &C,
-    plan: &str,
-    downloads: &[String],
-    then: crate::state::FinishThen,
-) -> anyhow::Result<()> {
+/// Shell text leaving the machine's `intent.json` and `stage.sh` matching
+/// `intent`: absent without one, so a stale marker cannot survive an install.
+fn intent_script<C: Connection + ?Sized>(conn: &C, intent: Option<&FinishIntent>) -> String {
     let dir = conn.state_dir();
-    let destination = format!("{dir}/intent.json");
-    let temporary = format!("{dir}/.intent.{}.tmp", uuid::Uuid::new_v4());
-    let payload = intent_marker_json(!downloads.is_empty(), then);
+    let path = shell_quote(&format!("{dir}/intent.json"));
+    let temporary = shell_quote(&format!("{dir}/.intent.{}.tmp", uuid::Uuid::new_v4()));
     let stage_path = shell_quote(&format!("{dir}/stage.sh"));
+    let Some(intent) = intent else {
+        return format!("rm -f {path} {stage_path}");
+    };
+    let payload = intent_marker_json(!intent.downloads.is_empty(), intent.then);
     let stage = match conn.stage_dir() {
-        Some(stage_dir) if !downloads.is_empty() && !plan.is_empty() => format!(
-            "; printf '%s\\n' {script} > {stage_path}",
+        Some(stage_dir) if !intent.downloads.is_empty() => format!(
+            "printf '%s\\n' {script} > {stage_path}",
             script = shell_quote(&stage_script(
                 conn.workdir(),
-                &plan_stage_dir(stage_dir, plan),
-                downloads
+                &plan_stage_dir(stage_dir, &intent.uuid),
+                &intent.downloads
             )),
         ),
-        _ => format!("; rm -f {stage_path}"),
+        _ => format!("rm -f {stage_path}"),
     };
-    let command = format!(
-        "mkdir -p {dir}; printf '%s\\n' {payload} > {temporary} && mv -f {temporary} {destination}{stage}",
-        dir = shell_quote(&dir),
+    format!(
+        "printf '%s\\n' {payload} > {temporary} && mv -f {temporary} {path}; {stage}",
         payload = shell_quote(&payload),
-        temporary = shell_quote(&temporary),
-        destination = shell_quote(&destination),
+    )
+}
+
+/// Write the plan on the machine, for a supervisor acting with no server there.
+/// Where the workdir doesn't survive a stop (see [`Connection::stage_dir`]),
+/// this also writes `stage.sh`, so the files wait on the volume instead.
+pub async fn write_intent<C: Connection + ?Sized>(
+    conn: &C,
+    intent: &FinishIntent,
+) -> anyhow::Result<()> {
+    let command = format!(
+        "mkdir -p {dir}; {script}",
+        dir = shell_quote(&conn.state_dir()),
+        script = intent_script(conn, Some(intent)),
     );
     conn.exec(&command, Duration::from_secs(10)).await?;
     Ok(())
@@ -245,7 +244,7 @@ pub fn plan_stage_dir(stage_dir: &str, plan: &str) -> String {
 /// The commands that copy each of `downloads` (relative to `workdir`) to
 /// the same relative path under `stage_dir`, replacing an earlier copy.
 /// Each copy goes to a `.partial` name first and is renamed into place only
-/// once complete, so a copy cut short (the watchdog's time bound, a full
+/// once complete, so a copy cut short (the supervisor's time bound, a full
 /// volume) never shows up where `attach()` would collect it.
 pub fn stage_script(workdir: &str, stage_dir: &str, downloads: &[String]) -> String {
     let mut script = format!("cd {} || exit 1", shell_quote(workdir));
@@ -269,79 +268,30 @@ pub fn stage_script(workdir: &str, stage_dir: &str, downloads: &[String]) -> Str
     script
 }
 
-/// Remove the intent marker (queued finish completed or cancelled).
-/// Staged copies go only for the plan whose downloads were `collected`: a
-/// cancelled plan's may be the only copy left.
+/// Remove the plan from the machine (completed or cancelled). Staged copies
+/// go only for the plan whose downloads were `collected`: a cancelled plan's
+/// may be the only copy left.
 pub async fn clear_intent<C: Connection + ?Sized>(
     conn: &C,
     collected: Option<&str>,
 ) -> anyhow::Result<()> {
-    remove_state_files(conn, &["intent.json", "stage.sh"]).await?;
-    if let Some(plan) = collected.filter(|plan| !plan.is_empty())
+    let dir = conn.state_dir();
+    let mut command = format!(
+        "rm -f {} {}",
+        shell_quote(&format!("{dir}/intent.json")),
+        shell_quote(&format!("{dir}/stage.sh"))
+    );
+    if let Some(plan) = collected
         && let Some(stage_dir) = conn.stage_dir()
     {
-        conn.exec(
-            &format!("rm -rf {}", shell_quote(&plan_stage_dir(stage_dir, plan))),
-            Duration::from_secs(60),
-        )
-        .await?;
+        let _ = write!(
+            command,
+            "; rm -rf {}",
+            shell_quote(&plan_stage_dir(stage_dir, plan))
+        );
     }
+    conn.exec(&command, Duration::from_mins(1)).await?;
     Ok(())
-}
-
-/// Remove the persisted budget deadline (a session with no budget must not
-/// run under a previous owner's window).
-pub async fn clear_budget_deadline<C: Connection + ?Sized>(conn: &C) -> anyhow::Result<()> {
-    remove_state_files(conn, &["budget_deadline"]).await
-}
-
-/// One command however many files: each exec is a full SSH handshake.
-async fn remove_state_files<C: Connection + ?Sized>(
-    conn: &C,
-    names: &[&str],
-) -> anyhow::Result<()> {
-    let dir = conn.state_dir();
-    let paths = names
-        .iter()
-        .map(|name| shell_quote(&format!("{dir}/{name}")))
-        .collect::<Vec<_>>()
-        .join(" ");
-    conn.exec(&format!("rm -f {paths}"), Duration::from_secs(10))
-        .await?;
-    Ok(())
-}
-
-pub async fn set_budget_deadline<C: Connection + ?Sized>(
-    conn: &C,
-    secs_from_now: u64,
-) -> anyhow::Result<()> {
-    conn.exec(
-        &budget_deadline_command(&conn.state_dir(), secs_from_now),
-        Duration::from_secs(10),
-    )
-    .await?;
-    Ok(())
-}
-
-fn budget_deadline_command(dir: &str, secs_from_now: u64) -> String {
-    let destination = format!("{dir}/budget_deadline");
-    // The temp name is quoted on the machine, so "$$" would be literal —
-    // use a locally unique suffix instead.
-    let temporary = format!("{dir}/.budget_deadline.{}.tmp", uuid::Uuid::new_v4());
-    format!(
-        "mkdir -p {dir}; value=$(($(date +%s) + {secs_from_now})); printf '%s\\n' \"$value\" > {temporary} && mv -f {temporary} {destination}",
-        dir = shell_quote(dir),
-        temporary = shell_quote(&temporary),
-        destination = shell_quote(&destination),
-    )
-}
-
-fn cleanup_name(cleanup: crate::config::Cleanup) -> &'static str {
-    match cleanup {
-        crate::config::Cleanup::Stop => "stop",
-        crate::config::Cleanup::Terminate => "terminate",
-        crate::config::Cleanup::Disabled => "disabled",
-    }
 }
 
 /// The one shell-quoting implementation for commands sent to machines.
@@ -355,54 +305,8 @@ pub fn shell_quote(value: &str) -> String {
     )
 }
 
-async fn invoke(conn: &AnyConnection, args: &[&str]) -> Result<String, LeaseError> {
-    let state_dir = conn.state_dir();
-    let arguments = args
-        .iter()
-        .map(|arg| shell_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    // rk-lease.sh deliberately contains no single quotes, so it can be sent
-    // through the existing SSH shell transport without an upload step. The
-    // child exit is captured in-band so Connection::exec can retain its
-    // simple stdout-or-error contract while lease exit 9/10 stay observable.
-    let command = format!(
-        "bash -c '{LEASE}' -- {} {arguments} 2>&1; code=$?; printf '\n{EXIT_SENTINEL}%s\n' \"$code\"; exit 0",
-        shell_quote(&state_dir)
-    );
-    let raw = conn
-        .exec(&command, Duration::from_secs(10))
-        .await
-        .map_err(LeaseError::Transport)?;
-    let Some((body, code)) = raw.rsplit_once(EXIT_SENTINEL) else {
-        return Err(LeaseError::Invalid(
-            "lease command returned no exit status".to_string(),
-        ));
-    };
-    let code = code
-        .trim()
-        .parse::<i32>()
-        .map_err(|error| LeaseError::Invalid(error.to_string()))?;
-    match code {
-        0 => Ok(body.trim().to_string()),
-        EXIT_FENCED => Err(LeaseError::Fenced),
-        EXIT_REFUSED => Err(LeaseError::Finalizing),
-        _ if body.contains("flock is required") => Err(LeaseError::NoFlock),
-        _ if body.contains("cannot create state directory")
-            || body.contains("cannot write lease")
-            || body.contains("cannot replace lease")
-            || body.contains("cannot open lease lock") =>
-        {
-            Err(LeaseError::BadStateDir)
-        }
-        _ => Err(LeaseError::Invalid(body.trim().to_string())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{LeaseState, age_secs};
-
     /// The staging script copies each queued download, as its workdir
     /// relative path, under the stage dir, and runs in a real shell.
     #[test]
@@ -474,44 +378,71 @@ mod tests {
         assert!(!stage.join("ckpt").exists());
     }
 
-    /// The lease/watchdog scripts travel inside single-quote-wrapped SSH
-    /// commands — a single quote anywhere in them breaks the transport.
-    /// The invariant is load-bearing; enforce it, don't just comment it.
     #[test]
-    fn machine_scripts_contain_no_single_quotes() {
-        assert!(!super::LEASE.contains('\''), "rk-lease.sh");
-        assert!(!super::WATCHDOG.contains('\''), "rk-watchdog.sh");
+    fn install_output_is_read_from_its_last_line() {
+        use super::{Installed, parse_install_output};
+        assert_eq!(parse_install_output("noise\ninstalled\n"), Installed::Ok);
+        assert_eq!(
+            parse_install_output("foreign session-a 12\n"),
+            Installed::Foreign(12)
+        );
+        assert_eq!(
+            parse_install_output("unsupervisable the machine lacks curl\n"),
+            Installed::Unsupervisable("the machine lacks curl".to_string())
+        );
+        assert!(matches!(
+            parse_install_output(""),
+            Installed::Unsupervisable(_)
+        ));
     }
 
+    /// Disarmed before anything can fail: a machine reported as having no
+    /// automatic shutdown must not then be halted by the orphan guard.
     #[test]
-    fn machine_clock_skew_freshness_uses_paired_remote_now() {
-        let lease = LeaseState {
-            generation: 4,
-            owner_uuid: "owner".to_string(),
-            state: "active".to_string(),
-            ts: 10_000_000,
-            now: 10_000_075,
-            arm_reason: String::new(),
-            arm_deadline: 0,
-            op_id: String::new(),
-            action: String::new(),
-        };
-        assert_eq!(age_secs(&lease), 75);
+    fn install_disarms_the_guard_first() {
+        let command = super::install_command("/d", "/d/s.sh", "true", "args");
+        assert!(command.starts_with("touch /tmp/heartbeat"), "{command}");
     }
 
-    #[test]
-    fn future_lease_timestamp_saturates_to_fresh() {
-        let lease = LeaseState {
-            generation: 4,
-            owner_uuid: "owner".to_string(),
-            state: "active".to_string(),
-            ts: 200,
-            now: 100,
-            arm_reason: String::new(),
-            arm_deadline: 0,
-            op_id: String::new(),
-            action: String::new(),
+    #[cfg(feature = "fake-runtime")]
+    #[tokio::test]
+    async fn an_unwritable_state_dir_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the state directory should be.
+        std::fs::write(dir.path().join(".remote-kernels"), "").unwrap();
+        let conn = crate::runtime::fake::FakeConnection::for_test(dir.path());
+        let policy = crate::runtime::SupervisorPolicy {
+            cleanup: crate::config::Cleanup::Stop,
+            stale_secs: 100,
+            budget_grace_secs: 1,
+            finalize_wait_secs: None,
+            finalize_timeout_secs: 1,
+            finalize_command: None,
         };
-        assert_eq!(age_secs(&lease), 0);
+        let installed = super::install(
+            &conn,
+            &super::Install {
+                owner: "me",
+                refuse_foreign_within: None,
+                deadline_secs: None,
+                policy: &policy,
+                intent: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            installed,
+            super::Installed::Unsupervisable("no writable state directory".to_string())
+        );
+    }
+
+    /// Clock skew must never decide takeover: freshness is the machine's own.
+    #[test]
+    fn foreign_means_another_owner_and_recent() {
+        use super::alive_is_foreign;
+        assert!(alive_is_foreign(&("other".to_string(), 5), "me"));
+        assert!(!alive_is_foreign(&("me".to_string(), 5), "me"));
+        assert!(!alive_is_foreign(&("other".to_string(), 500), "me"));
     }
 }

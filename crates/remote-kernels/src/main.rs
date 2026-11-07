@@ -93,16 +93,12 @@ async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // Cleanup modes are validated against each runtime's capabilities:
     // explicit per-runtime keys eagerly, plus the budget/"disabled"
     // incompatibility on metered runtimes.
-    if let Err(msg) = remote_kernels::runtime::validate_config_with_budget_source(
-        &config,
-        budget.map(|value| value.source),
-    ) {
+    if let Err(msg) = remote_kernels::runtime::validate_config(&config, budget.is_some()) {
         return Err(format!("Configuration error: {msg}").into());
     }
 
     let app_state = state::AppState::new(project_dir);
-    let server = server::RemoteKernelsServer::new_with_budget(config, app_state, budget);
-    let shutdown_server = server.clone();
+    let server = server::RemoteKernelsServer::new(config, app_state, budget);
 
     tracing::info!("Starting remote-kernels MCP server");
 
@@ -113,17 +109,14 @@ async fn serve(project_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .inspect_err(|e| tracing::error!("Failed to start MCP server: {e}"))?;
 
     // Only after the handshake: the startup reconcile makes a provider round
-    // trip per durable record and can wait on a machine's oplock, and Claude
-    // Code gives up on a server that hasn't answered within 30 s. Its
+    // trip per durable record, and Claude Code gives up on a server that hasn't answered within 30 s. Its
     // findings surface via status(); this session's running machines are
     // reattached once it is done.
     server.spawn_startup_check();
 
+    // A disconnect does nothing: beats stop, and each machine's stale window
+    // starts. A respawned server reattaches inside it.
     running.waiting().await?;
-
-    // A transport disconnect only arms remote finalization and preserves records.
-    tracing::info!("MCP server disconnected, arming finalization...");
-    shutdown_server.shutdown_cleanup().await;
 
     Ok(())
 }

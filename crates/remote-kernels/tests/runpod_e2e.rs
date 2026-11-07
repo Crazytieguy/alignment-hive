@@ -95,6 +95,7 @@ impl Drop for TerminateGuard {
 async fn start_machine(server: &RemoteKernelsServer) -> CallToolResult {
     server
         .start(Parameters(remote_kernels::server::StartParams {
+            force: None,
             label: None,
             runtime: None,
             gpu_type: None,
@@ -264,8 +265,8 @@ volume-gb = 0
     let pinned = std::fs::read_to_string(&known_hosts).expect("known_hosts must exist after start");
     assert!(!pinned.trim().is_empty(), "host key must be pinned");
     eprintln!("started: {text}");
-    guard.pod_id =
-        remote_kernels::state::load_instance_record(dir.path(), &machine_id).map(|r| r.external_id);
+    guard.pod_id = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
+        .and_then(|r| r.external_id);
 
     // What the v2 GET must report for a pod we just started: the status
     // enum, a billing rate (D8's premise), the direct SSH endpoint that
@@ -405,7 +406,7 @@ volume-gb = 0
         .await
         .unwrap();
     assert!(
-        text_of(&result).contains("No durable machine records"),
+        text_of(&result).contains("No machines on record"),
         "{}",
         text_of(&result)
     );
@@ -506,7 +507,8 @@ jupyter-access = "proxy"
 
     let pod_id = remote_kernels::state::load_instance_record(dir.path(), &machine_id)
         .expect("instance record")
-        .external_id;
+        .provider_id()
+        .to_string();
     guard.pod_id = Some(pod_id.clone());
     eprintln!("pod: {pod_id}");
 
@@ -773,22 +775,14 @@ print(r.stderr[-1500:])
         Err(error) => (true, error.message.to_string()),
     };
     if refused {
-        // One refusal is legitimate and is exactly what a pod that deleted
-        // ITSELF produces: this session still held a watchdog lease, so the
-        // pre-mutation lease refresh could not reach the (already deleted)
-        // machine, and the server declines to mutate a machine it can no
-        // longer prove it controls. Money-safe — the pod is already gone —
-        // but only in that precise combination, so both halves are asserted.
+        // One refusal is legitimate: the provider saying it has no such pod,
+        // which is what a pod that deleted ITSELF produces. Money-safe, but
+        // only in that combination.
         assert_eq!(
             outcome, "terminated",
             "terminate was refused while the pod still exists: {message}"
         );
-        assert!(
-            message.contains("could not confirm this session still controls machine"),
-            "terminate failed for a reason other than the documented \
-             authority-unknown fence: {message}"
-        );
-        eprintln!("terminate fenced as AuthorityUnknown (pod had already self-deleted): {message}");
+        eprintln!("terminate refused (pod had already self-deleted): {message}");
     }
     guard.done = true;
 
@@ -825,7 +819,7 @@ async fn start_guarded(
         .expect("machine id")
         .to_string();
     guard.pod_id =
-        remote_kernels::state::load_instance_record(dir, &machine_id).map(|r| r.external_id);
+        remote_kernels::state::load_instance_record(dir, &machine_id).and_then(|r| r.external_id);
     guard.done = false;
     machine_id
 }
@@ -854,7 +848,7 @@ async fn assert_supervised(server: &RemoteKernelsServer) {
         .await
         .unwrap();
     let text = text_of(&result);
-    assert!(!text.contains("fenced"), "{text}");
+    assert!(!text.contains("detached"), "{text}");
     eprintln!("status: {text}");
 }
 
@@ -1041,8 +1035,7 @@ data-center-ids = ["{data_center}"]
     assert!(out.contains("cwd /workspace"), "{out}");
     assert!(out.contains("weights"), "{out}");
     assert_supervised(&server_b).await;
-    // A's lease refreshes every minute: past one refresh, A must still own
-    // its machine.
+    // A beats every minute: past one beat, A must still own its machine.
     tokio::time::sleep(std::time::Duration::from_secs(90)).await;
     assert_supervised(&server_a).await;
     run(&server_a, &kernel_a, "print('a alive')").await;

@@ -181,7 +181,7 @@ impl VastClient {
     /// server-side even though we never saw the contract id. Filters
     /// client-side — accounts have few instances and label filtering
     /// server-side is not documented.
-    pub async fn find_instance_by_label(&self, label: &str) -> anyhow::Result<Option<i64>> {
+    pub async fn find_instances_by_label(&self, label: &str) -> anyhow::Result<Vec<i64>> {
         let body = Self::check(
             crate::send_429_retry(
                 self.client
@@ -196,8 +196,9 @@ impl VastClient {
         Ok(parsed
             .instances
             .into_iter()
-            .find(|i| i.label.as_deref() == Some(label))
-            .map(|i| i.id))
+            .filter(|i| i.label.as_deref() == Some(label))
+            .map(|i| i.id)
+            .collect())
     }
 
     /// `PUT /api/v0/instances/{id}/` — drive the instance to a state

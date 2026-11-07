@@ -29,10 +29,9 @@ pub fn rsync_upload_args(extra_includes: &[String]) -> Vec<String> {
         "--exclude=.claude".to_string(),
         "--exclude=target".to_string(),
         "--exclude=node_modules".to_string(),
-        // The machine-side supervision state (lease, intent/outcome markers,
-        // kernel-output logs) may live in <workdir>/.remote-kernels.
-        // `--delete` MUST NOT touch it: wiping the lease mid-session unfences
-        // the machine and destroys finalize/recovery state.
+        // The machine-side state (who is driving it, the finish plan, kernel
+        // output) is not the project's. `--delete` MUST NOT touch it: wiping `alive`
+        // mid-session would look like a dead server to the machine.
         "--exclude=.remote-kernels".to_string(),
     ]);
     args
@@ -275,25 +274,33 @@ pub async fn download_over_ssh(
 
     tracing::info!(%source, %destination, "Downloading from pod");
 
-    let output = Command::new("rsync")
-        .args([
-            "-az",
-            "--no-owner",
-            "--no-group",
-            // Never materialize a symlink that points outside what we
-            // downloaded: it would become a way out of the project root for
-            // the next download (see `resolve_project_destination`).
-            "--safe-links",
-            "-e",
-            &ssh_cmd,
-            &source,
-            &destination,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let rsync = |source: String| {
+        Command::new("rsync")
+            .args([
+                "-az",
+                "--no-owner",
+                "--no-group",
+                // Never materialize a symlink that points outside what we
+                // downloaded: it would become a way out of the project root for
+                // the next download (see `resolve_project_destination`).
+                "--safe-links",
+                "-e",
+                &ssh_cmd,
+                &source,
+                &destination,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    };
+    // The trailing slash puts a directory's contents at the destination; without
+    // it rsync nests the directory inside (results/results). A file refuses the
+    // slash, and so does a path that isn't there, whose error the second try gives.
+    let mut output = rsync(format!("{source}/")).await?;
+    if !output.status.success() {
+        output = rsync(source.clone()).await?;
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

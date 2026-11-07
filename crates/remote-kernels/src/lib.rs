@@ -2,10 +2,10 @@
 //!
 //! `server` holds the MCP tools. `runtime` abstracts the machine providers
 //! (`RunPod`, vast.ai, Kubernetes, and a local fake for tests) over the raw API
-//! clients in `runpod` and `vast`. `state` and `ledger` are the durable
-//! per-machine records and spend accounting; `heartbeat` and
-//! `machine_scripts` supervise each machine from the server and from the
-//! machine itself. This file also holds the provider-HTTP helpers every
+//! clients in `runpod` and `vast`. `state` holds the durable per-machine
+//! records and derives spend from them; `ledger` reads the old spend format for
+//! the upgrade from it. `heartbeat` and `machine_scripts` supervise each machine
+//! from the server and from the machine itself. This file also holds the provider-HTTP helpers every
 //! client shares.
 
 #![warn(clippy::pedantic)]

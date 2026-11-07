@@ -32,14 +32,16 @@ volume, deleting everything there the project doesn't have (gitignored
 paths excepted), and venvs and imports run on network storage, many times
 slower than the pod's own disk.
 
-For a volume already in use (the session-start row "files sync onto your
+For a volume already in use (the session-start notice "files sync onto your
 RunPod network volume"), keep `volume-mount-path` where it is so the data's
 paths don't move, and set `workdir` to a directory on the pod's disk such as
-`/root/work`. Code that reaches project files by absolute paths under the
-mount needs updating. The pod's disk is wiped on stop, so the tree and venv
-come back with the next sync and install. A user who would rather keep the
-project on the volume sets `workdir` to the mount path explicitly, which
-also clears the row.
+`/root/work`. A machine keeps the layout it was created with, so this applies
+to machines started after the MCP server reloads; replace a running pod to move
+it. Code that reaches project files by absolute paths under the mount needs
+updating. The pod's disk is wiped on stop, so the tree and venv come back with
+the next sync and install. A user who would rather keep the project on the
+volume sets `workdir` to the mount path explicitly, which also clears the
+notice.
 
 ## Advanced: custom images (`image-start-cmd`)
 
@@ -60,9 +62,9 @@ Edge cases:
 - **CMD can't be determined confidently**: set `image-start-cmd = ""` and
   warn the user explicitly what that costs: a crash during the first
   minutes of provisioning leaves the pod billing until stopped by hand
-  (a later session can `stop(instance=...)` or `terminate(instance=...)`
-  it, or `attach()`/`status()` to supervise it — `start()` always creates a
-  fresh machine).
+  (a later session can `stop(instance=...)` or `terminate(instance=...)` it;
+  `status()` finds it, and only `attach()` connects to it and sets up its
+  self-cleanup. `start()` always creates a fresh machine).
 - `docker-start-cmd` is not a field RunPod's API has, and `start()` rejects
   it. Put the image's start command in `image-start-cmd` (the guard wraps
   it), or set `image-start-cmd = ""` to run the image unwrapped.

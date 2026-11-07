@@ -6,7 +6,7 @@
 https://cloud.vast.ai/manage-keys/ (plain keys never expire).
 
 The plugin does not support 2FA-enabled vast accounts: with 2FA on, API
-writes (instance creation) fail with a 401 mentioning Two Factor
+writes (creating a machine) fail with a 401 mentioning Two Factor
 Authentication. If the user hits that, have them disable 2FA on the vast
 account (cloud.vast.ai → Account → Security) — warn that the vast UI makes
 it easy to enable 2FA accidentally. A user who insists on keeping 2FA can
@@ -19,7 +19,7 @@ choose.
 
 Stop is unreliable on vast: the GPU can be re-rented to someone else while
 stopped (resume may hang forever), and storage keeps billing until the
-instance is terminated. Prefer `cleanup = "terminate"` and make the
+machine is terminated. Prefer `cleanup = "terminate"` and make the
 data-persistence plan (see the skill) load-bearing — anything not brought
 back is lost.
 
@@ -46,17 +46,17 @@ Ask what the user tends to care about when picking GPUs and write that into
 
 ## VM mode (Docker-in-Docker)
 
-Set `vm = true` for anything that needs Docker inside (e.g. Inspect's
-sandboxed evals) — vast bans Docker-in-Docker on container instances. VM
-images ship Docker and CUDA preinstalled; `onstart` installs anything else.
+Set `vm = true` and a VM `image` such as `vastai/kvm:ubuntu_terminal` for
+anything that needs Docker inside (e.g. Inspect's sandboxed evals) — vast bans
+Docker-in-Docker on containers. `vm = true` doesn't change the image by itself.
+VM images ship Docker and CUDA preinstalled; `onstart` installs anything else.
 For Docker-dependent workloads add a guard onstart line:
 `docker info >/dev/null 2>&1 || (curl -fsSL https://get.docker.com | sh)`.
 
 ## Advanced: images, filters, vendor traps
 
-- Container default is `vastai/base-image`; VMs default to
-  `vastai/kvm:ubuntu_terminal`. Two vendor traps the runtime handles
-  automatically (relevant only when creating VMs by hand): the image must
+- The default image is `vastai/base-image`, for containers. Two vendor traps
+  the runtime handles automatically (relevant only when creating VMs by hand): the image must
   be registry-qualified (`docker.io/vastai/kvm:...`) or vast silently
   creates a container instead of a VM, and vast's SSH proxy can't reach
   VMs — only direct-port hosts work.

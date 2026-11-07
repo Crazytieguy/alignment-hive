@@ -1,23 +1,17 @@
-//! Behavior tests for the machine-side lease and watchdog scripts, run
-//! locally under bash. The helpers in `scripts/machine/test-support` stand in
-//! for `flock`, Jupyter's kernel list, finalize commands, and the provider
-//! action.
+//! Behavior tests for the machine-side supervisor, run locally under bash. The
+//! helpers in `scripts/machine/test-support` stand in for Jupyter's kernel list
+//! and save commands, and the "provider" is a log file.
 
 use std::ffi::OsString;
 use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
 use tempfile::TempDir;
-
-const FENCED: i32 = 9;
-const REFUSED: i32 = 10;
-const NO_FLOCK: i32 = 12;
 
 fn machine_script(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -29,97 +23,6 @@ fn support_script(name: &str) -> PathBuf {
     machine_script("test-support").join(name)
 }
 
-fn python_available() -> bool {
-    Command::new("python3")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-struct Harness {
-    temp: TempDir,
-    path: OsString,
-    bash_env: PathBuf,
-}
-
-impl Harness {
-    fn new(test_name: &str) -> Option<Self> {
-        if !python_available() {
-            eprintln!("skipping {test_name}: python3 is unavailable (needed by test support)");
-            return None;
-        }
-        let temp = tempfile::tempdir().expect("tempdir");
-        let bin = temp.path().join("bin");
-        fs::create_dir(&bin).expect("create test bin");
-        let flock = bin.join("flock");
-        fs::copy(support_script("flock.py"), &flock).expect("install flock test helper");
-        fs::set_permissions(&flock, fs::Permissions::from_mode(0o755)).expect("chmod flock helper");
-        let mut path = OsString::from(bin.as_os_str());
-        path.push(":");
-        path.push(std::env::var_os("PATH").unwrap_or_default());
-        let bash_env = temp.path().join("bash-env");
-        fs::write(&bash_env, format!("export PATH={}:$PATH\n", bin.display()))
-            .expect("write bash environment");
-        Some(Self {
-            temp,
-            path,
-            bash_env,
-        })
-    }
-
-    fn state_dir(&self) -> PathBuf {
-        self.temp.path().join("state")
-    }
-
-    fn command(&self, program: impl AsRef<Path>) -> Command {
-        let mut command = Command::new(program.as_ref());
-        command.env("PATH", &self.path);
-        command
-    }
-
-    fn install_command(&self, name: &str, body: &str) {
-        let path = self.temp.path().join("bin").join(name);
-        fs::write(&path, body).expect("write command stub");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod command stub");
-    }
-
-    fn lease(&self, args: &[&str]) -> Output {
-        let mut command = self.command("bash");
-        command.arg(machine_script("rk-lease.sh"));
-        command.arg(self.state_dir());
-        command.args(args);
-        command.output().expect("run lease script")
-    }
-
-    fn lease_ok(&self, args: &[&str]) {
-        let output = self.lease(args);
-        assert!(
-            output.status.success(),
-            "lease command failed: status={:?}, stderr={}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn lease_json(&self, args: &[&str]) -> Value {
-        let output = self.lease(args);
-        assert!(
-            output.status.success(),
-            "lease command failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice(&output.stdout).expect("valid lease JSON output")
-    }
-
-    fn read_lease(&self) -> Value {
-        let output = self.lease(&["read"]);
-        assert!(output.status.success());
-        serde_json::from_slice(&output.stdout).expect("valid lease JSON")
-    }
-}
-
 fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -127,1001 +30,922 @@ fn now_epoch() -> u64 {
         .as_secs()
 }
 
-fn wait_for(path: &Path, timeout: Duration) {
+fn eventually(what: &str, timeout: Duration, mut check: impl FnMut() -> bool) {
     let start = Instant::now();
-    while !path.exists() {
-        assert!(
-            start.elapsed() < timeout,
-            "timed out waiting for {}",
-            path.display()
-        );
+    while !check() {
+        assert!(start.elapsed() < timeout, "timed out waiting for {what}");
         thread::sleep(Duration::from_millis(25));
     }
 }
 
-fn wait_for_log_lines(path: &Path, count: usize, timeout: Duration) -> String {
-    let start = Instant::now();
-    loop {
-        let contents = fs::read_to_string(path).unwrap_or_default();
-        if contents.lines().count() >= count {
-            return contents;
+/// One simulated machine: a state dir, a Jupyter kernel list and a provider log.
+struct Machine {
+    temp: TempDir,
+    path: OsString,
+    jupyter: Child,
+    kernel_state_file: PathBuf,
+    port: u16,
+    settings: Settings,
+    env: Vec<(&'static str, &'static str)>,
+}
+
+#[derive(Clone)]
+struct Settings {
+    stale_secs: u64,
+    grace_secs: u64,
+    wait_secs: u64,
+    save_timeout_secs: u64,
+    policy: &'static str,
+    save: Option<String>,
+    action: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            stale_secs: 1,
+            grace_secs: 2,
+            wait_secs: 0,
+            save_timeout_secs: 5,
+            policy: "terminate",
+            save: None,
+            action: None,
         }
-        assert!(
-            start.elapsed() < timeout,
-            "timed out waiting for action log; watchdog log: {}",
-            fs::read_to_string(
-                path.parent()
-                    .expect("action log parent")
-                    .join("state/watchdog.log")
-            )
-            .unwrap_or_else(|error| format!("<unavailable: {error}>"))
-        );
-        thread::sleep(Duration::from_millis(50));
     }
 }
 
-struct FakeJupyter {
-    child: Option<Child>,
-    state_file: PathBuf,
-    port: u16,
-}
-
-impl FakeJupyter {
-    fn start(harness: &Harness, state: &str, test_name: &str) -> Self {
-        let state_file = harness.temp.path().join("kernel-state");
-        fs::write(&state_file, state).expect("write kernel state");
-        let listener = match TcpListener::bind("127.0.0.1:0") {
-            Ok(listener) => listener,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!(
-                    "{test_name}: loopback bind forbidden; using the local curl test transport"
-                );
-                let curl = harness.temp.path().join("bin/curl");
-                fs::copy(support_script("curl.py"), &curl).expect("install curl test helper");
-                fs::set_permissions(&curl, fs::Permissions::from_mode(0o755))
-                    .expect("chmod curl helper");
-                return Self {
-                    child: None,
-                    state_file,
-                    port: 1,
-                };
-            }
-            Err(error) => panic!("reserve local port: {error}"),
-        };
+impl Machine {
+    fn new(kernel_state: &str, settings: Settings) -> Self {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).expect("create test bin");
+        let mut path = OsString::from(bin.as_os_str());
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        let kernel_state_file = temp.path().join("kernel-state");
+        fs::write(&kernel_state_file, kernel_state).expect("write kernel state");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve local port");
         let port = listener.local_addr().expect("local address").port();
         drop(listener);
-        let child = harness
-            .command("python3")
+        let jupyter = Command::new("python3")
             .arg(support_script("fake-jupyter.py"))
             .arg(port.to_string())
-            .arg(&state_file)
+            .arg(&kernel_state_file)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("start fake Jupyter");
-        let start = Instant::now();
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(
-                start.elapsed() < Duration::from_secs(3),
-                "fake Jupyter did not start"
-            );
-            thread::sleep(Duration::from_millis(25));
-        }
+        eventually("fake Jupyter", Duration::from_secs(30), || {
+            TcpStream::connect(("127.0.0.1", port)).is_ok()
+        });
         Self {
-            child: Some(child),
-            state_file,
+            temp,
+            path,
+            jupyter,
+            kernel_state_file,
             port,
+            settings,
+            env: Vec::new(),
         }
     }
 
-    fn set_state(&self, state: &str) {
-        fs::write(&self.state_file, state).expect("update kernel state");
+    fn dir(&self) -> PathBuf {
+        self.temp.path().join("state")
     }
-}
 
-impl Drop for FakeJupyter {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.child {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+    fn set_kernel_state(&self, state: &str) {
+        fs::write(&self.kernel_state_file, state).expect("update kernel state");
     }
-}
 
-struct WatchdogGuard {
-    state_dir: PathBuf,
-}
-
-impl Drop for WatchdogGuard {
-    fn drop(&mut self) {
-        let Ok(pid) = fs::read_to_string(self.state_dir.join("watchdog.pid")) else {
-            return;
-        };
-        let _ = Command::new("kill")
-            .arg(pid.trim())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    fn stub_command(&self, name: &str, body: &str) {
+        let path = self.temp.path().join("bin").join(name);
+        fs::write(&path, body).expect("write command stub");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod command stub");
     }
-}
 
-struct WatchdogConfig<'a> {
-    stale_secs: u64,
-    grace_secs: u64,
-    finalize_wait_secs: u64,
-    finalize_timeout_secs: u64,
-    default_action: &'a str,
-    finalize_cmd: &'a Path,
-}
-
-#[derive(Default)]
-struct InstallOptions<'a> {
-    storage_rate: Option<&'a str>,
-    enter_pause: Option<(u64, &'a Path)>,
-    action_command: Option<&'a str>,
-}
-
-fn install_watchdog(
-    harness: &Harness,
-    jupyter: &FakeJupyter,
-    action_log: &Path,
-    config: &WatchdogConfig<'_>,
-) -> WatchdogGuard {
-    install_watchdog_with_options(
-        harness,
-        jupyter,
-        action_log,
-        config,
-        &InstallOptions::default(),
-    )
-}
-
-fn install_watchdog_with_options(
-    harness: &Harness,
-    jupyter: &FakeJupyter,
-    action_log: &Path,
-    config: &WatchdogConfig<'_>,
-    options: &InstallOptions<'_>,
-) -> WatchdogGuard {
-    let state_dir = harness.state_dir();
-    let mut command = harness.command("bash");
-    command
-        .arg(machine_script("rk-watchdog.sh"))
-        .arg(&state_dir)
-        .arg("install")
-        .arg(machine_script("rk-lease.sh"))
-        .arg(config.stale_secs.to_string())
-        .arg(config.grace_secs.to_string())
-        .arg(config.finalize_wait_secs.to_string())
-        .arg(config.finalize_timeout_secs.to_string())
-        .arg(jupyter.port.to_string())
-        .arg("test-token")
-        .arg(config.default_action)
-        .arg(config.finalize_cmd)
-        .arg(options.action_command.map_or_else(
-            || format!("{} \"$1\"", support_script("provider-action.sh").display()),
-            ToString::to_string,
-        ))
-        .env("RK_WATCHDOG_POLL_SECS", "1")
-        .env("RK_ACTION_LOG", action_log)
-        .env("RK_STATE_DIR", &state_dir)
-        .env("BASH_ENV", &harness.bash_env)
-        .env("RUNPOD_POD_ID", "test-pod")
-        .env("RUNPOD_API_KEY", "test-key")
-        .env("RK_FAKE_JUPYTER_STATE", &jupyter.state_file);
-    if let Some(storage_rate) = options.storage_rate {
-        command.arg(storage_rate);
+    fn log_path(&self) -> PathBuf {
+        self.temp.path().join("actions.log")
     }
-    if let Some((seconds, marker)) = options.enter_pause {
-        command
-            .env(
-                "RK_WATCHDOG_TEST_PAUSE_AFTER_ENTER_SECS",
-                seconds.to_string(),
-            )
-            .env("RK_WATCHDOG_TEST_PAUSE_AFTER_ENTER_MARKER", marker);
+
+    fn actions(&self) -> Vec<String> {
+        fs::read_to_string(self.log_path())
+            .unwrap_or_default()
+            .lines()
+            .map(ToString::to_string)
+            .collect()
     }
-    let output = command.output().expect("install watchdog");
-    assert!(
-        output.status.success(),
-        "watchdog install failed: status={:?}, stderr={}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    wait_for(&state_dir.join("watchdog.pid"), Duration::from_secs(2));
-    WatchdogGuard { state_dir }
-}
 
-fn stale_heartbeat(harness: &Harness, generation: u64) {
-    fs::write(
-        harness.state_dir().join("heartbeat"),
-        format!("{generation} {}\n", now_epoch().saturating_sub(30)),
-    )
-    .expect("write heartbeat");
-}
+    /// What the install prints, with `refuse_within` and a deadline.
+    fn install_full(
+        &self,
+        owner: &str,
+        refuse_within: Option<u64>,
+        deadline_secs: Option<u64>,
+        no_supervisor: bool,
+    ) -> String {
+        fs::create_dir_all(self.dir()).expect("state dir");
+        let settings = &self.settings;
+        let action = settings
+            .action
+            .clone()
+            .unwrap_or_else(|| format!("printf \"%s\\n\" \"$1\" >> {}", self.log_path().display()));
+        let output = Command::new("bash")
+            .arg(machine_script("rk-supervisor.sh"))
+            .arg(self.dir())
+            .arg("install")
+            .arg(owner)
+            .arg(refuse_within.map_or("-".to_string(), |secs| secs.to_string()))
+            .arg(deadline_secs.map_or("-".to_string(), |secs| secs.to_string()))
+            .arg(settings.stale_secs.to_string())
+            .arg(settings.grace_secs.to_string())
+            .arg(settings.wait_secs.to_string())
+            .arg(settings.save_timeout_secs.to_string())
+            .arg(self.port.to_string())
+            .arg("test-token")
+            .arg(settings.policy)
+            .arg(settings.save.as_deref().unwrap_or("-"))
+            .arg(if no_supervisor { "-" } else { action.as_str() })
+            .env("PATH", &self.path)
+            .env("BASH_ENV", self.temp.path().join("bash-env"))
+            .env("RK_SUPERVISOR_POLL_SECS", "0.2")
+            .env("RK_SUPERVISOR_RETRY_SECS", "1")
+            .env("RK_SUPERVISOR_PARENT", std::process::id().to_string())
+            .env("RK_FAKE_JUPYTER_STATE", &self.kernel_state_file)
+            .env("RUNPOD_POD_ID", "test-pod")
+            .env("RUNPOD_API_KEY", "test-key")
+            .envs(self.env.iter().copied())
+            .output()
+            .expect("run install");
+        assert!(
+            output.status.success(),
+            "install failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
 
-#[test]
-fn acquire_refresh_and_stale_writer_is_fenced_without_mutation() {
-    let Some(harness) = Harness::new("acquire_refresh_and_stale_writer_is_fenced_without_mutation")
-    else {
-        return;
-    };
-    harness.lease_ok(&["acquire", "owner-a"]);
-    harness.lease_ok(&["refresh", "1", "owner-a"]);
-    harness.lease_ok(&["acquire", "owner-b"]);
-    let before = fs::read(harness.state_dir().join("lease.json")).expect("lease before fence");
-    let fenced = harness.lease(&["refresh", "1", "owner-a"]);
-    assert_eq!(fenced.status.code(), Some(FENCED));
-    let after = fs::read(harness.state_dir().join("lease.json")).expect("lease after fence");
-    assert_eq!(before, after);
-}
-
-#[test]
-fn acquire_returns_owned_lease_from_the_same_critical_section() {
-    let Some(harness) = Harness::new("acquire_returns_owned_lease_from_the_same_critical_section")
-    else {
-        return;
-    };
-    let before = now_epoch();
-    let lease = harness.lease_json(&["acquire", "owner-a"]);
-    let after = now_epoch();
-    assert_eq!(lease["generation"], 1);
-    assert_eq!(lease["owner_uuid"], "owner-a");
-    assert!(
-        lease["now"]
-            .as_u64()
-            .is_some_and(|now| now >= before && now <= after)
-    );
-    let ts = lease["ts"].as_u64().unwrap();
-    let now = lease["now"].as_u64().unwrap();
-    assert!(now.saturating_sub(ts) <= 1);
-}
-
-#[test]
-fn read_reports_machine_now_without_changing_stored_shape() {
-    let Some(harness) = Harness::new("read_reports_machine_now_without_changing_stored_shape")
-    else {
-        return;
-    };
-    harness.lease_ok(&["acquire", "owner-a"]);
-    let read = harness.read_lease();
-    assert!(read["now"].as_u64().is_some());
-    let stored: Value = serde_json::from_slice(
-        &fs::read(harness.state_dir().join("lease.json")).expect("stored lease"),
-    )
-    .expect("stored lease JSON");
-    assert!(stored.get("now").is_none(), "machine now is response-only");
-}
-
-#[test]
-fn acquire_during_disconnect_arm_cancels_finalize() {
-    let Some(harness) = Harness::new("acquire_during_disconnect_arm_cancels_finalize") else {
-        return;
-    };
-    harness.lease_ok(&["acquire", "owner-a"]);
-    harness.lease_ok(&["arm", "1", "disconnect"]);
-    harness.lease_ok(&["acquire", "owner-b"]);
-    let lease = harness.read_lease();
-    assert_eq!(lease["generation"], 2);
-    assert_eq!(lease["owner_uuid"], "owner-b");
-    assert_eq!(lease["state"], "active");
-    assert_eq!(lease["arm_reason"], "");
-}
-
-#[test]
-fn acquire_during_budget_arm_preserves_deadline_and_action() {
-    let Some(harness) = Harness::new("acquire_during_budget_arm_preserves_deadline_and_action")
-    else {
-        return;
-    };
-    let deadline = now_epoch().saturating_sub(1).to_string();
-    let extended_deadline = (now_epoch() + 300).to_string();
-    harness.lease_ok(&["acquire", "owner-a"]);
-    harness.lease_ok(&["arm", "1", "budget", &deadline]);
-    harness.lease_ok(&["refresh", "1", "owner-a"]);
-    assert_eq!(harness.read_lease()["state"], "armed");
-    harness.lease_ok(&["arm", "1", "disconnect"]);
-    harness.lease_ok(&["arm", "1", "budget", &extended_deadline]);
-    harness.lease_ok(&["enter-finalizing", "budget", "op-a", "terminate"]);
-    harness.lease_ok(&["revert-to-armed", "op-a"]);
-    harness.lease_ok(&["acquire", "owner-b"]);
-    let lease = harness.read_lease();
-    assert_eq!(lease["generation"], 2);
-    assert_eq!(lease["state"], "armed");
-    assert_eq!(lease["arm_reason"], "budget");
-    assert_eq!(lease["arm_deadline"], deadline.parse::<u64>().unwrap());
-    assert_eq!(lease["action"], "");
-}
-
-#[test]
-fn enter_finalizing_is_fenced_after_generation_rotation() {
-    let Some(harness) = Harness::new("enter_finalizing_is_fenced_after_generation_rotation") else {
-        return;
-    };
-    harness.lease_ok(&["acquire", "owner-a"]);
-    harness.lease_ok(&["arm", "1", "disconnect"]);
-    harness.lease_ok(&["acquire", "owner-b"]);
-    let output = harness.lease(&["enter-finalizing", "1", "op-a", "terminate"]);
-    assert_eq!(output.status.code(), Some(FENCED));
-    assert_eq!(harness.read_lease()["state"], "active");
-}
-
-#[test]
-fn acquire_refuses_a_finalizing_lease() {
-    let Some(harness) = Harness::new("acquire_refuses_a_finalizing_lease") else {
-        return;
-    };
-    harness.lease_ok(&["acquire", "owner-a"]);
-    harness.lease_ok(&["arm", "1", "disconnect"]);
-    harness.lease_ok(&["enter-finalizing", "1", "op-a", "stop"]);
-    let output = harness.lease(&["acquire", "owner-b"]);
-    assert_eq!(output.status.code(), Some(REFUSED));
-    assert_eq!(harness.read_lease()["state"], "finalizing");
-}
-
-#[test]
-fn critical_section_pause_blocks_concurrent_acquire() {
-    let Some(harness) = Harness::new("critical_section_pause_blocks_concurrent_acquire") else {
-        return;
-    };
-    harness.lease_ok(&["acquire", "owner-a"]);
-    let marker = harness.temp.path().join("paused");
-    let mut refresh = harness
-        .command("bash")
-        .arg(machine_script("rk-lease.sh"))
-        .arg(harness.state_dir())
-        .args(["refresh", "1", "owner-a"])
-        .env("RK_LEASE_TEST_PAUSE_AFTER_READ_SECS", "2")
-        .env("RK_LEASE_TEST_PAUSE_MARKER", &marker)
-        .spawn()
-        .expect("spawn paused refresh");
-    wait_for(&marker, Duration::from_secs(2));
-    let mut acquire = harness
-        .command("bash")
-        .arg(machine_script("rk-lease.sh"))
-        .arg(harness.state_dir())
-        .args(["acquire", "owner-b"])
-        .stdout(Stdio::null())
-        .spawn()
-        .expect("spawn concurrent acquire");
-    thread::sleep(Duration::from_millis(250));
-    assert!(acquire.try_wait().expect("poll acquire").is_none());
-    assert!(refresh.wait().expect("wait refresh").success());
-    assert!(acquire.wait().expect("wait acquire").success());
-    let lease = harness.read_lease();
-    assert_eq!(lease["generation"], 2);
-    assert_eq!(lease["owner_uuid"], "owner-b");
-}
-
-#[test]
-fn watchdog_waits_for_busy_kernel_to_become_idle() {
-    let Some(harness) = Harness::new("watchdog_waits_for_busy_kernel_to_become_idle") else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "busy",
-        "watchdog_waits_for_busy_kernel_to_become_idle",
-    );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    stale_heartbeat(&harness, 1);
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 3,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    thread::sleep(Duration::from_secs(3));
-    assert!(
-        !action_log.exists(),
-        "provider action ran while the kernel was busy"
-    );
-    jupyter.set_state("idle");
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
-    assert!(log.contains("action=terminate"));
-}
-
-#[test]
-fn watchdog_executes_real_runpod_action_command_with_action_in_dollar_one() {
-    let Some(harness) =
-        Harness::new("watchdog_executes_real_runpod_action_command_with_action_in_dollar_one")
-    else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(&harness, "idle", "real_runpod_action_command");
-    let action_log = harness.temp.path().join("runpod-actions.log");
-    harness.install_command(
-        "runpodctl",
-        "#!/bin/sh\n[ \"$1\" = config ] && exit 0\nprintf '%s\\n' \"$*\" >> \"$RK_ACTION_LOG\"\n",
-    );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    stale_heartbeat(&harness, 1);
-    let action_command = remote_kernels::runtime::runpod::watchdog_action_command();
-    let options = InstallOptions {
-        action_command: Some(&action_command),
-        ..InstallOptions::default()
-    };
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog =
-        install_watchdog_with_options(&harness, &jupyter, &action_log, &config, &options);
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
-    assert!(log.contains("remove pod test-pod"), "{log}");
-}
-
-#[test]
-fn watchdog_executes_real_vast_compound_halt_command() {
-    let Some(harness) = Harness::new("watchdog_executes_real_vast_compound_halt_command") else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(&harness, "idle", "real_vast_halt_command");
-    let action_log = harness.temp.path().join("vast-actions.log");
-    harness.install_command(
-        "shutdown",
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RK_ACTION_LOG\"\n",
-    );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    stale_heartbeat(&harness, 1);
-    let action_command = remote_kernels::runtime::vast::VastRuntime::halt_command("root");
-    let options = InstallOptions {
-        action_command: Some(&action_command),
-        ..InstallOptions::default()
-    };
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "stop",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog =
-        install_watchdog_with_options(&harness, &jupyter, &action_log, &config, &options);
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
-    assert!(log.contains("-h now"), "{log}");
-}
-
-#[test]
-fn stale_generation_heartbeat_cannot_keep_new_owner_alive() {
-    let Some(harness) = Harness::new("stale_generation_heartbeat_cannot_keep_new_owner_alive")
-    else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "idle",
-        "stale_generation_heartbeat_cannot_keep_new_owner_alive",
-    );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    harness.lease_ok(&["acquire", "owner-b"]);
-    fs::write(
-        harness.state_dir().join("heartbeat"),
-        format!("1 {}\n", now_epoch()),
-    )
-    .expect("write stale-generation heartbeat");
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    let _ = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
-    assert_eq!(harness.read_lease()["state"], "finalizing");
-}
-
-#[test]
-fn finalize_failure_downgrades_terminate_to_stop_in_outcome() {
-    let Some(harness) = Harness::new("finalize_failure_downgrades_terminate_to_stop_in_outcome")
-    else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "idle",
-        "finalize_failure_downgrades_terminate_to_stop_in_outcome",
-    );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    stale_heartbeat(&harness, 1);
-    let action_log = harness.temp.path().join("actions.log");
-    let finalize = support_script("finalize-fail.sh");
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 3,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: &finalize,
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
-    assert!(log.contains("action=stop"));
-    let outcome: Value = serde_json::from_slice(
-        &fs::read(harness.state_dir().join("outcome.json")).expect("read outcome"),
-    )
-    .expect("valid outcome JSON");
-    assert_eq!(outcome["action"], "stop");
-    assert_eq!(outcome["finalize_exit"], 42);
-}
-
-#[test]
-fn pending_downloads_downgrade_terminate_intent_to_stop() {
-    let Some(harness) = Harness::new("pending_downloads_downgrade_terminate_intent_to_stop") else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "idle",
-        "pending_downloads_downgrade_terminate_intent_to_stop",
-    );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    stale_heartbeat(&harness, 1);
-    fs::write(
-        harness.state_dir().join("intent.json"),
-        b"{\"downloads_pending\":true,\"then\":\"terminate\"}\n",
-    )
-    .expect("write intent");
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
-    assert!(log.contains("action=stop"));
-}
-
-/// Where the workdir doesn't survive a stop, the server leaves `stage.sh`
-/// beside the intent: the watchdog runs it before stopping, and only then.
-#[test]
-fn pending_downloads_are_staged_before_the_stop() {
-    for (intent, staged) in [
-        (
-            "{\"downloads_pending\":true,\"then\":\"terminate\"}\n",
-            true,
-        ),
-        (
-            "{\"downloads_pending\":false,\"then\":\"terminate\"}\n",
-            false,
-        ),
-    ] {
-        let name = "pending_downloads_are_staged_before_the_stop";
-        let Some(harness) = Harness::new(name) else {
-            return;
-        };
-        let jupyter = FakeJupyter::start(&harness, "idle", name);
-        harness.lease_ok(&["acquire", "owner-a"]);
-        stale_heartbeat(&harness, 1);
-        fs::write(harness.state_dir().join("intent.json"), intent).expect("write intent");
-        let marker = harness.temp.path().join("staged");
+    fn install(&self) {
+        // Non-interactive shells on the machine find the same stubs.
         fs::write(
-            harness.state_dir().join("stage.sh"),
-            format!("touch {}\n", marker.display()),
+            self.temp.path().join("bash-env"),
+            format!("export PATH={}/bin:$PATH\n", self.temp.path().display()),
         )
-        .expect("write stage.sh");
-        let action_log = harness.temp.path().join("actions.log");
-        let config = WatchdogConfig {
-            stale_secs: 1,
-            grace_secs: 2,
-            finalize_wait_secs: 0,
-            finalize_timeout_secs: 3,
-            default_action: "terminate",
-            finalize_cmd: Path::new("-"),
-        };
-        let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-        let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
-        assert_eq!(log.contains("action=stop"), staged, "{log}");
-        assert_eq!(marker.exists(), staged);
+        .expect("write bash environment");
+        assert_eq!(self.install_full("me", None, None, false), "installed");
+    }
+
+    fn beat(&self) {
+        let path = self.dir().join("alive");
+        fs::write(&path, format!("me {}\n", now_epoch())).expect("write alive");
+    }
+
+    fn set_deadline(&self, epoch: u64) {
+        fs::write(self.dir().join("deadline"), format!("{epoch}\n")).expect("write deadline");
+    }
+
+    fn write_intent(&self, downloads_pending: bool, then: &str) {
+        fs::write(
+            self.dir().join("intent.json"),
+            format!("{{\"downloads_pending\":{downloads_pending},\"then\":\"{then}\"}}\n"),
+        )
+        .expect("write intent");
+    }
+
+    fn supervisor_pid(&self) -> String {
+        fs::read_to_string(self.dir().join("supervisor.pid"))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    fn log(&self) -> String {
+        fs::read_to_string(self.dir().join("supervisor.log")).unwrap_or_default()
+    }
+
+    fn wait_for_action(&self, expected: &str) {
+        let log = self.log_path();
+        eventually(
+            &format!("action {expected}"),
+            Duration::from_secs(20),
+            || fs::read_to_string(&log).is_ok_and(|content| content.lines().next().is_some()),
+        );
+        assert_eq!(
+            self.actions()[0],
+            expected,
+            "supervisor log: {}",
+            self.log()
+        );
+    }
+
+    /// Nothing acts for this long.
+    fn assert_no_action_for(&self, duration: Duration) {
+        thread::sleep(duration);
+        assert!(
+            self.actions().is_empty(),
+            "unexpected actions {:?}; supervisor log: {}",
+            self.actions(),
+            self.log()
+        );
+    }
+
+    fn save_command(&self, script: &str) -> String {
+        script.replace(
+            "$MARK",
+            &self.temp.path().join("save-ran").display().to_string(),
+        )
+    }
+
+    fn save_ran(&self) -> bool {
+        self.temp.path().join("save-ran").exists()
     }
 }
 
+impl Drop for Machine {
+    fn drop(&mut self) {
+        let pid = self.supervisor_pid();
+        if !pid.is_empty() {
+            let _ = Command::new("kill")
+                .arg(&pid)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = self.jupyter.kill();
+        let _ = self.jupyter.wait();
+    }
+}
+
+fn is_alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+const SETTLE: Duration = Duration::from_millis(1500);
+
+fn with(settings: impl FnOnce(&mut Settings)) -> Settings {
+    let mut result = Settings::default();
+    settings(&mut result);
+    result
+}
+
+// ---- the stale path
+
 #[test]
-fn budget_grace_expiry_stops_even_while_kernel_is_busy() {
-    let Some(harness) = Harness::new("budget_grace_expiry_stops_even_while_kernel_is_busy") else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "busy",
-        "budget_grace_expiry_stops_even_while_kernel_is_busy",
-    );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    fs::write(
-        harness.state_dir().join("budget_deadline"),
-        format!("{}\n", now_epoch().saturating_sub(1)),
-    )
-    .expect("write budget deadline");
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 300,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 5,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(8));
-    assert!(log.contains("action=stop"));
-    let lease = harness.read_lease();
-    assert_eq!(lease["state"], "finalizing");
-    assert_eq!(lease["arm_reason"], "budget");
+fn a_quiet_idle_machine_cleans_itself_up_per_its_policy() {
+    let machine = Machine::new("idle", Settings::default());
+    machine.install();
+    machine.wait_for_action("terminate");
+
+    let stopping = Machine::new("idle", with(|s| s.policy = "stop"));
+    stopping.install();
+    stopping.wait_for_action("stop");
 }
 
 #[test]
-fn outcome_marker_exists_before_provider_action_runs() {
-    let Some(harness) = Harness::new("outcome_marker_exists_before_provider_action_runs") else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
+fn beats_keep_it_from_doing_anything() {
+    let machine = Machine::new("idle", with(|s| s.stale_secs = 2));
+    machine.install();
+    let end = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < end {
+        machine.beat();
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(machine.actions().is_empty(), "{}", machine.log());
+}
+
+#[test]
+fn a_busy_kernel_holds_the_drain_until_it_goes_idle() {
+    let machine = Machine::new("busy", Settings::default());
+    machine.install();
+    machine.assert_no_action_for(Duration::from_secs(2));
+    machine.set_kernel_state("idle");
+    machine.wait_for_action("terminate");
+}
+
+#[test]
+fn a_drain_gives_up_after_its_wait() {
+    let machine = Machine::new("busy", with(|s| s.wait_secs = 2));
+    machine.install();
+    machine.wait_for_action("terminate");
+}
+
+/// The core promise to a laptop that closes and opens again.
+#[test]
+fn a_fresh_alive_during_the_drain_cancels_everything() {
+    let machine = Machine::new("busy", with(|s| s.stale_secs = 2));
+    machine.install();
+    eventually("the drain", Duration::from_secs(10), || {
+        machine.log().contains("no server")
+    });
+    machine.beat();
+    machine.set_kernel_state("idle");
+    for _ in 0..10 {
+        machine.beat();
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(machine.actions().len(), 0, "{}", machine.log());
+}
+
+#[test]
+fn a_fresh_alive_after_the_save_cancels_the_action() {
+    let machine = Machine::new(
         "idle",
-        "outcome_marker_exists_before_provider_action_runs",
+        with(|s| {
+            s.stale_secs = 2;
+            s.save = Some("sleep 2".to_string());
+        }),
     );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    stale_heartbeat(&harness, 1);
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
-    assert!(log.contains("outcome=present action=terminate"));
-}
-
-#[test]
-fn watchdog_reinstall_keeps_one_supervisor_and_one_action() {
-    let Some(harness) = Harness::new("watchdog_reinstall_keeps_one_supervisor_and_one_action")
-    else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "busy",
-        "watchdog_reinstall_keeps_one_supervisor_and_one_action",
-    );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    stale_heartbeat(&harness, 1);
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let _first = install_watchdog(&harness, &jupyter, &action_log, &config);
-    let _second = install_watchdog(&harness, &jupyter, &action_log, &config);
-    thread::sleep(Duration::from_secs(2));
-    jupyter.set_state("idle");
-    let _ = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
-    thread::sleep(Duration::from_secs(2));
-    let log = fs::read_to_string(&action_log).expect("action log");
-    assert_eq!(
-        log.lines().count(),
-        1,
-        "reinstall launched a duplicate actor"
-    );
-}
-
-#[test]
-fn refresh_cancels_disconnect_arm_and_prevents_finalize() {
-    let Some(harness) = Harness::new("refresh_cancels_disconnect_arm_and_prevents_finalize") else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "busy",
-        "refresh_cancels_disconnect_arm_and_prevents_finalize",
-    );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    harness.lease_ok(&["arm", "1", "disconnect"]);
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 3,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    thread::sleep(Duration::from_millis(1_200));
-    harness.lease_ok(&["refresh", "1", "owner-a"]);
-    assert_eq!(harness.read_lease()["state"], "active");
-    jupyter.set_state("idle");
-    for _ in 0..4 {
-        harness.lease_ok(&["refresh", "1", "owner-a"]);
-        thread::sleep(Duration::from_millis(800));
+    machine.install();
+    eventually("the save", Duration::from_secs(10), || {
+        machine.log().contains("save starting")
+    });
+    let end = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < end {
+        machine.beat();
+        thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(harness.read_lease()["state"], "active");
+    assert!(machine.actions().is_empty(), "{}", machine.log());
+    assert!(machine.log().contains("save finished"), "{}", machine.log());
+}
+
+#[test]
+fn a_damaged_alive_file_is_no_sooner_than_a_silent_server() {
+    let machine = Machine::new("idle", with(|s| s.stale_secs = 3));
+    machine.install();
+    fs::write(machine.dir().join("alive"), "garbage\n").unwrap();
+    machine.assert_no_action_for(Duration::from_secs(1));
+    machine.wait_for_action("terminate");
+}
+
+// ---- one action-selection rule
+
+#[test]
+fn a_failed_save_keeps_the_machine() {
+    let machine = Machine::new(
+        "idle",
+        with(|s| s.save = Some(support_script("finalize-fail.sh").display().to_string())),
+    );
+    machine.install();
+    machine.wait_for_action("stop");
+}
+
+#[test]
+fn a_save_that_times_out_keeps_the_machine() {
+    let machine = Machine::new(
+        "idle",
+        with(|s| {
+            s.save = Some(support_script("finalize-hang.sh").display().to_string());
+            s.save_timeout_secs = 1;
+        }),
+    );
+    machine.install();
+    machine.wait_for_action("stop");
+    assert!(machine.log().contains("exit 124"), "{}", machine.log());
+}
+
+#[test]
+fn a_successful_save_runs_first_and_then_terminates() {
+    let mut machine = Machine::new("idle", Settings::default());
+    machine.settings.save = Some(machine.save_command("touch $MARK"));
+    machine.install();
+    machine.wait_for_action("terminate");
+    assert!(machine.save_ran());
+}
+
+#[test]
+fn pending_downloads_downgrade_terminate_and_nothing_else() {
+    let machine = Machine::new("idle", with(|s| s.stale_secs = 2));
+    machine.install();
+    machine.write_intent(true, "terminate");
+    machine.wait_for_action("stop");
+
+    let clean = Machine::new("idle", with(|s| s.stale_secs = 2));
+    clean.install();
+    clean.write_intent(false, "terminate");
+    clean.wait_for_action("terminate");
+}
+
+#[test]
+fn the_plan_outranks_the_policy() {
+    let machine = Machine::new(
+        "idle",
+        with(|s| {
+            s.stale_secs = 2;
+            s.policy = "terminate";
+        }),
+    );
+    machine.install();
+    machine.write_intent(false, "stop");
+    machine.wait_for_action("stop");
+}
+
+#[test]
+fn an_unreadable_plan_means_stop() {
+    let machine = Machine::new("idle", with(|s| s.stale_secs = 2));
+    machine.install();
+    fs::write(machine.dir().join("intent.json"), "{oops").unwrap();
+    machine.wait_for_action("stop");
+}
+
+#[test]
+fn a_keep_plan_does_nothing_until_a_server_or_the_budget_says_otherwise() {
+    let machine = Machine::new("idle", with(|s| s.grace_secs = 1));
+    machine.install();
+    machine.write_intent(false, "keep");
+    machine.assert_no_action_for(Duration::from_secs(3));
     assert!(
-        !action_log.exists(),
-        "a refreshing owner was finalized after a transient disconnect arm"
+        machine.log().contains("waiting for a server"),
+        "{}",
+        machine.log()
+    );
+    // Under a budget, keep becomes stop.
+    machine.set_deadline(now_epoch());
+    machine.wait_for_action("stop");
+}
+
+#[test]
+fn queued_downloads_are_staged_before_a_stop_only() {
+    let machine = Machine::new("idle", with(|s| s.stale_secs = 2));
+    machine.install();
+    let staged = machine.temp.path().join("staged");
+    fs::write(
+        machine.dir().join("stage.sh"),
+        format!("touch {}\n", staged.display()),
+    )
+    .unwrap();
+    machine.write_intent(true, "stop");
+    machine.wait_for_action("stop");
+    assert!(staged.exists());
+
+    let machine = Machine::new("idle", with(|s| s.stale_secs = 2));
+    machine.install();
+    let staged = machine.temp.path().join("staged");
+    fs::write(
+        machine.dir().join("stage.sh"),
+        format!("touch {}\n", staged.display()),
+    )
+    .unwrap();
+    machine.write_intent(false, "terminate");
+    machine.wait_for_action("terminate");
+    assert!(!staged.exists());
+}
+
+// ---- the budget path
+
+#[test]
+fn a_passed_deadline_acts_after_the_grace_even_with_a_live_server() {
+    let machine = Machine::new(
+        "idle",
+        with(|s| {
+            s.stale_secs = 100;
+            s.grace_secs = 2;
+        }),
+    );
+    machine.install_full("me", None, Some(0), false);
+    let started = Instant::now();
+    machine.wait_for_action("terminate");
+    assert!(
+        started.elapsed() >= Duration::from_millis(1500),
+        "acted before the grace ended"
     );
 }
 
 #[test]
-fn budget_escalates_during_busy_disconnect_drain() {
-    let Some(harness) = Harness::new("budget_escalates_during_busy_disconnect_drain") else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
+fn grace_expiry_stops_a_busy_machine_rather_than_deleting_unsaved_work() {
+    let machine = Machine::new(
         "busy",
-        "budget_escalates_during_busy_disconnect_drain",
+        with(|s| {
+            s.stale_secs = 100;
+            s.grace_secs = 2;
+            s.save = Some("true".to_string());
+        }),
     );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    harness.lease_ok(&["arm", "1", "disconnect"]);
-    fs::write(
-        harness.state_dir().join("budget_deadline"),
-        format!("{}\n", now_epoch() + 2),
-    )
-    .expect("write budget deadline");
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 300,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(10));
-    assert!(log.contains("action=stop"));
-    let lease = harness.read_lease();
-    assert_eq!(lease["state"], "finalizing");
-    assert_eq!(lease["arm_reason"], "budget");
+    machine.install_full("me", None, Some(0), false);
+    machine.wait_for_action("stop");
+    assert!(machine.log().contains("save skipped"), "{}", machine.log());
 }
 
 #[test]
-fn budget_keep_intent_floors_to_stop_and_preserves_prior_outcome() {
-    let Some(harness) =
-        Harness::new("budget_keep_intent_floors_to_stop_and_preserves_prior_outcome")
-    else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "idle",
-        "budget_keep_intent_floors_to_stop_and_preserves_prior_outcome",
+fn a_busy_machine_with_no_save_configured_still_follows_its_policy() {
+    let machine = Machine::new(
+        "busy",
+        with(|s| {
+            s.stale_secs = 100;
+            s.grace_secs = 1;
+        }),
     );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    fs::write(
-        harness.state_dir().join("budget_deadline"),
-        format!("{}\n", now_epoch().saturating_sub(1)),
-    )
-    .expect("write budget deadline");
-    fs::write(
-        harness.state_dir().join("intent.json"),
-        b"{\"downloads_pending\":false,\"then\":\"keep\"}\n",
-    )
-    .expect("write keep intent");
-    let prior_outcome = b"{\"op_id\":\"prior-ambiguous\"}\n";
-    fs::write(harness.state_dir().join("outcome.json"), prior_outcome)
-        .expect("write prior outcome");
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 300,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let options = InstallOptions {
-        storage_rate: Some("0.125"),
-        enter_pause: None,
-        action_command: None,
-    };
-    let _watchdog =
-        install_watchdog_with_options(&harness, &jupyter, &action_log, &config, &options);
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(8));
-    assert!(log.contains("action=stop"));
+    machine.install_full("me", None, Some(0), false);
+    machine.wait_for_action("terminate");
+}
+
+#[test]
+fn the_save_is_bounded_by_what_is_left_of_the_grace() {
+    let machine = Machine::new(
+        "idle",
+        with(|s| {
+            s.stale_secs = 100;
+            s.grace_secs = 2;
+            s.save_timeout_secs = 60;
+            s.save = Some(support_script("finalize-hang.sh").display().to_string());
+        }),
+    );
+    machine.install_full("me", None, Some(0), false);
+    let started = Instant::now();
+    machine.wait_for_action("stop");
+    assert!(started.elapsed() < Duration::from_secs(15));
+}
+
+#[test]
+fn a_moved_deadline_is_the_only_cancel() {
+    for moment_ms in [200, 1200] {
+        let machine = Machine::new(
+            "idle",
+            with(|s| {
+                s.stale_secs = 100;
+                s.grace_secs = 3;
+            }),
+        );
+        machine.install_full("me", None, Some(0), false);
+        thread::sleep(Duration::from_millis(moment_ms));
+        machine.set_deadline(now_epoch() + 1000);
+        machine.assert_no_action_for(Duration::from_secs(4));
+    }
+}
+
+#[test]
+fn a_rewritten_deadline_that_has_still_passed_does_not_restart_the_grace() {
+    let machine = Machine::new(
+        "idle",
+        with(|s| {
+            s.stale_secs = 100;
+            s.grace_secs = 2;
+        }),
+    );
+    machine.install_full("me", None, Some(0), false);
+    let started = Instant::now();
+    while machine.actions().is_empty() {
+        // What a beat does once the budget has run out.
+        machine.set_deadline(now_epoch());
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{}",
+            machine.log()
+        );
+    }
+    assert_eq!(machine.actions()[0], "terminate");
+}
+
+/// A laptop closed on a long run: the drain has no limit of its own, but the
+/// budget does.
+#[test]
+fn a_stale_drain_yields_to_a_passed_deadline() {
+    let machine = Machine::new(
+        "busy",
+        with(|s| {
+            s.stale_secs = 1;
+            s.grace_secs = 1;
+            s.save = Some("true".to_string());
+        }),
+    );
+    machine.install();
+    thread::sleep(SETTLE);
+    assert!(machine.actions().is_empty());
+    machine.set_deadline(now_epoch());
+    machine.wait_for_action("stop");
+    assert!(
+        machine.log().contains("budget deadline passed"),
+        "{}",
+        machine.log()
+    );
+}
+
+#[test]
+fn a_fresh_alive_does_not_cancel_the_budget_path() {
+    let machine = Machine::new(
+        "idle",
+        with(|s| {
+            s.stale_secs = 100;
+            s.grace_secs = 1;
+        }),
+    );
+    machine.install_full("me", None, Some(0), false);
+    machine.beat();
+    machine.wait_for_action("terminate");
+}
+
+// ---- acting
+
+#[test]
+fn a_failed_action_is_retried_while_the_process_lives() {
+    let flag = tempfile::NamedTempFile::new().unwrap();
+    let mut machine = Machine::new("idle", Settings::default());
+    machine.settings.action = Some(format!(
+        "printf \"%s\\n\" \"$1\" >> {}; [ ! -e {} ]",
+        machine.log_path().display(),
+        flag.path().display()
+    ));
+    machine.install();
+    eventually("a second attempt", Duration::from_secs(15), || {
+        machine.actions().len() >= 2
+    });
+    assert!(machine.log().contains("call failed"), "{}", machine.log());
+    // The process carries on until the container dies under it.
+    assert!(is_alive(&machine.supervisor_pid()));
+}
+
+#[test]
+fn a_retry_is_cancelled_when_the_server_comes_back() {
+    let machine = Machine::new("idle", with(|s| s.stale_secs = 2));
+    machine.install();
+    machine.wait_for_action("terminate");
+    machine.beat();
+    let end = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < end {
+        machine.beat();
+        thread::sleep(Duration::from_millis(100));
+    }
+    let count = machine.actions().len();
+    assert!(machine.log().contains("cancelled"), "{}", machine.log());
+    let end = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < end {
+        machine.beat();
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(machine.actions().len(), count);
+}
+
+/// The chain deployed to `RunPod` pods takes the action in `$1`.
+#[test]
+fn the_real_runpod_action_command_reads_its_action() {
+    let mut machine = Machine::new("idle", with(|s| s.policy = "stop"));
+    machine.stub_command(
+        "runpodctl",
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = config ] && exit 0\necho \"$*\" >> {}\n",
+            machine.log_path().display()
+        ),
+    );
+    machine.settings.action = Some(remote_kernels::runtime::runpod::supervisor_action_command());
+    machine.install();
+    eventually("runpodctl", Duration::from_secs(15), || {
+        !machine.actions().is_empty()
+    });
     assert_eq!(
-        fs::read(harness.state_dir().join("outcome.json")).expect("read prior outcome"),
-        prior_outcome
+        machine.actions()[0],
+        "stop pod test-pod",
+        "{}",
+        machine.log()
     );
-    let secondary = fs::read_dir(harness.state_dir())
-        .expect("read state directory")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name().is_some_and(|name| {
-                let name = name.to_string_lossy();
-                name != "outcome.json" && name.starts_with("outcome.") && name.ends_with(".json")
-            })
-        })
-        .expect("secondary budget outcome");
-    let marker: Value =
-        serde_json::from_slice(&fs::read(secondary).expect("read secondary outcome"))
-            .expect("valid secondary outcome");
-    assert_eq!(marker["action"], "stop");
-    assert_eq!(marker["post_action_rate"].as_f64(), Some(0.125));
+}
+
+/// Vast machines end themselves through vast's API with the key vast injects.
+#[test]
+fn the_real_vast_action_calls_the_api() {
+    let real_curl = which("curl").unwrap();
+    for (policy, method) in [("terminate", "DELETE"), ("stop", "PUT")] {
+        let mut machine = Machine::new("idle", with(|s| s.policy = policy));
+        machine.stub_command(
+            "curl",
+            &format!(
+                "#!/bin/sh\ncase \"$*\" in *console.vast.ai*) echo \"$*\" >> {};; *) exec {} \"$@\";; esac\n",
+                machine.log_path().display(),
+                real_curl.display()
+            ),
+        );
+        machine.env = vec![("CONTAINER_API_KEY", "the-key"), ("CONTAINER_ID", "123")];
+        machine.settings.action =
+            Some(remote_kernels::runtime::vast::VastRuntime::self_action_command("root"));
+        machine.install();
+        eventually("the API call", Duration::from_secs(15), || {
+            !machine.actions().is_empty()
+        });
+        let call = &machine.actions()[0];
+        assert!(call.contains(&format!("-X {method}")), "{call}");
+        assert!(call.contains("Bearer the-key"), "{call}");
+        assert!(
+            call.contains("https://console.vast.ai/api/v0/instances/123/"),
+            "{call}"
+        );
+        if policy == "stop" {
+            assert!(call.contains("{\"state\":\"stopped\"}"), "{call}");
+        }
+    }
+}
+
+/// Without the key it falls back to halting, and terminate tries everything.
+#[test]
+fn the_vast_action_falls_back_to_a_halt() {
+    let mut machine = Machine::new("idle", Settings::default());
+    machine.stub_command(
+        "shutdown",
+        &format!(
+            "#!/bin/sh\necho \"shutdown $*\" >> {}\n",
+            machine.log_path().display()
+        ),
+    );
+    machine.settings.action =
+        Some(remote_kernels::runtime::vast::VastRuntime::self_action_command("root"));
+    machine.install();
+    eventually("shutdown", Duration::from_secs(15), || {
+        !machine.actions().is_empty()
+    });
+    assert_eq!(machine.actions()[0], "shutdown -h now");
+}
+
+// ---- install
+
+#[test]
+fn installing_again_replaces_the_supervisor_and_keeps_one_action() {
+    let machine = Machine::new("busy", with(|s| s.stale_secs = 2));
+    machine.install();
+    eventually("the pid file", Duration::from_secs(5), || {
+        !machine.supervisor_pid().is_empty()
+    });
+    let first = machine.supervisor_pid();
+    machine.install();
+    let second = machine.supervisor_pid();
+    assert_ne!(first, second);
+    eventually("the old supervisor to exit", Duration::from_secs(5), || {
+        !is_alive(&first)
+    });
+    machine.set_kernel_state("idle");
+    machine.wait_for_action("terminate");
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(machine.actions().len(), 1, "{}", machine.log());
 }
 
 #[test]
-fn downloads_false_terminate_intent_stays_terminate() {
-    let Some(harness) = Harness::new("downloads_false_terminate_intent_stays_terminate") else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "idle",
-        "downloads_false_terminate_intent_stays_terminate",
-    );
-    harness.lease_ok(&["acquire", "owner-a"]);
+fn installing_over_an_old_machine_kills_its_watchdog_and_clears_its_files() {
+    let machine = Machine::new("busy", with(|s| s.stale_secs = 100));
+    let dir = machine.dir();
+    fs::create_dir_all(&dir).unwrap();
+    // A process that looks like the old watchdog on its command line.
+    let watchdog = dir.join("rk-watchdog.sh");
+    fs::write(&watchdog, "sleep 300\n").unwrap();
+    let mut old = Command::new("bash").arg(&watchdog).spawn().unwrap();
+    fs::write(dir.join("watchdog.pid"), old.id().to_string()).unwrap();
+    for file in [
+        "lease.json",
+        "lease.lock",
+        "heartbeat",
+        "budget_deadline",
+        "outcome.json",
+        "outcome.abc.json",
+        "rk-lease.sh",
+    ] {
+        fs::write(dir.join(file), "{\"state\":\"finalizing\"}").unwrap();
+    }
+
+    machine.install();
+
+    eventually("the old watchdog to die", Duration::from_secs(5), || {
+        old.try_wait().unwrap().is_some()
+    });
+    for file in [
+        "watchdog.pid",
+        "lease.json",
+        "lease.lock",
+        "heartbeat",
+        "budget_deadline",
+        "outcome.json",
+        "outcome.abc.json",
+        "rk-lease.sh",
+        "rk-watchdog.sh",
+    ] {
+        assert!(!dir.join(file).exists(), "{file} survived");
+    }
+    assert!(!machine.supervisor_pid().is_empty());
+}
+
+/// A pid from before a stop can belong to anything now.
+#[test]
+fn a_pid_file_naming_someone_else_kills_nobody() {
+    let machine = Machine::new("busy", with(|s| s.stale_secs = 100));
+    fs::create_dir_all(machine.dir()).unwrap();
+    let mut innocent = Command::new("sleep").arg("30").spawn().unwrap();
     fs::write(
-        harness.state_dir().join("intent.json"),
-        b"{ \"downloads_pending\" : false, \"then\" : \"terminate\" }\n",
+        machine.dir().join("watchdog.pid"),
+        innocent.id().to_string(),
     )
-    .expect("write terminate intent");
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "stop",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(6));
-    assert!(log.contains("action=terminate"));
-    let outcome: Value = serde_json::from_slice(
-        &fs::read(harness.state_dir().join("outcome.json")).expect("read outcome"),
+    .unwrap();
+    fs::write(
+        machine.dir().join("supervisor.pid"),
+        innocent.id().to_string(),
     )
-    .expect("valid outcome");
-    assert_eq!(outcome["post_action_rate"], 0);
+    .unwrap();
+    machine.install();
+    thread::sleep(Duration::from_millis(200));
+    assert!(innocent.try_wait().unwrap().is_none());
+    innocent.kill().unwrap();
+    innocent.wait().unwrap();
 }
 
 #[test]
-fn finalize_timeout_downgrades_terminate_to_stop() {
-    let Some(harness) = Harness::new("finalize_timeout_downgrades_terminate_to_stop") else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "idle",
-        "finalize_timeout_downgrades_terminate_to_stop",
+fn install_refuses_a_fresh_foreign_alive_and_changes_nothing() {
+    let machine = Machine::new("busy", with(|s| s.stale_secs = 100));
+    fs::create_dir_all(machine.dir()).unwrap();
+    let alive = format!("other {}\n", now_epoch() - 5);
+    fs::write(machine.dir().join("alive"), &alive).unwrap();
+
+    let output = machine.install_full("me", Some(180), None, false);
+    assert!(output.starts_with("foreign other "), "{output}");
+    assert_eq!(
+        fs::read_to_string(machine.dir().join("alive")).unwrap(),
+        alive
     );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    let action_log = harness.temp.path().join("actions.log");
-    let finalize = support_script("finalize-hang.sh");
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 1,
-        default_action: "terminate",
-        finalize_cmd: &finalize,
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    let log = wait_for_log_lines(&action_log, 1, Duration::from_secs(7));
-    assert!(log.contains("action=stop"));
-    let outcome: Value = serde_json::from_slice(
-        &fs::read(harness.state_dir().join("outcome.json")).expect("read outcome"),
-    )
-    .expect("valid outcome");
-    assert_eq!(outcome["finalize_exit"], 124);
-}
+    assert!(machine.supervisor_pid().is_empty());
 
-#[test]
-fn fresh_install_without_lease_does_not_arm() {
-    let Some(harness) = Harness::new("fresh_install_without_lease_does_not_arm") else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(&harness, "idle", "fresh_install_without_lease_does_not_arm");
-    let action_log = harness.temp.path().join("actions.log");
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 1,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 2,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let _watchdog = install_watchdog(&harness, &jupyter, &action_log, &config);
-    thread::sleep(Duration::from_secs(3));
-    assert!(!harness.state_dir().join("lease.json").exists());
-    assert!(!action_log.exists());
-}
-
-#[test]
-fn explicit_enter_finalizing_accepts_active_and_budget_armed() {
-    let Some(active) = Harness::new("explicit_enter_finalizing_accepts_active_and_budget_armed")
-    else {
-        return;
-    };
-    active.lease_ok(&["acquire", "owner-a"]);
-    active.lease_ok(&["enter-finalizing", "1", "active-op", "stop"]);
-    assert_eq!(active.read_lease()["state"], "finalizing");
-
-    let Some(budget) = Harness::new("explicit_enter_finalizing_accepts_active_and_budget_armed")
-    else {
-        return;
-    };
-    let future_deadline = (now_epoch() + 300).to_string();
-    budget.lease_ok(&["acquire", "owner-a"]);
-    budget.lease_ok(&["arm", "1", "budget", &future_deadline]);
-    budget.lease_ok(&["enter-finalizing", "1", "budget-op", "terminate"]);
-    let lease = budget.read_lease();
-    assert_eq!(lease["state"], "finalizing");
-    assert_eq!(lease["action"], "terminate");
-}
-
-#[test]
-fn acquire_is_refused_between_enter_finalizing_and_provider_exec() {
-    let Some(harness) =
-        Harness::new("acquire_is_refused_between_enter_finalizing_and_provider_exec")
-    else {
-        return;
-    };
-    let jupyter = FakeJupyter::start(
-        &harness,
-        "idle",
-        "acquire_is_refused_between_enter_finalizing_and_provider_exec",
+    // Its own alive, a stale one, or no refusal asked for: all install.
+    assert_eq!(
+        machine.install_full("other", Some(180), None, false),
+        "installed"
     );
-    harness.lease_ok(&["acquire", "owner-a"]);
-    let action_log = harness.temp.path().join("actions.log");
-    let pause_marker = harness.temp.path().join("entered-finalizing");
-    let config = WatchdogConfig {
-        stale_secs: 1,
-        grace_secs: 2,
-        finalize_wait_secs: 0,
-        finalize_timeout_secs: 3,
-        default_action: "terminate",
-        finalize_cmd: Path::new("-"),
-    };
-    let options = InstallOptions {
-        storage_rate: None,
-        enter_pause: Some((3, &pause_marker)),
-        action_command: None,
-    };
-    let _watchdog =
-        install_watchdog_with_options(&harness, &jupyter, &action_log, &config, &options);
-    wait_for(&pause_marker, Duration::from_secs(6));
-    assert!(!action_log.exists());
-    let acquire = harness.lease(&["acquire", "owner-b"]);
-    assert_eq!(acquire.status.code(), Some(REFUSED));
-    assert_eq!(harness.read_lease()["state"], "finalizing");
-    let _ = wait_for_log_lines(&action_log, 1, Duration::from_secs(5));
+    fs::write(
+        machine.dir().join("alive"),
+        format!("other {}\n", now_epoch() - 500),
+    )
+    .unwrap();
+    assert_eq!(
+        machine.install_full("me", Some(180), None, false),
+        "installed"
+    );
+    fs::write(
+        machine.dir().join("alive"),
+        format!("other {}\n", now_epoch()),
+    )
+    .unwrap();
+    assert_eq!(machine.install_full("me", None, None, false), "installed");
 }
 
 #[test]
-fn prerequisite_check_has_distinct_missing_flock_exit() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let empty_path = temp.path().join("empty-path");
-    fs::create_dir(&empty_path).expect("empty PATH dir");
-    let output = Command::new("/bin/bash")
-        .arg(machine_script("rk-watchdog.sh"))
-        .arg(temp.path().join("state"))
-        .arg("check-prereqs")
-        .env("PATH", &empty_path)
-        .output()
-        .expect("run prerequisite check");
-    assert_eq!(output.status.code(), Some(NO_FLOCK));
+fn install_writes_alive_and_deadline_from_the_machine_clock() {
+    let machine = Machine::new("busy", with(|s| s.stale_secs = 100));
+    fs::create_dir_all(machine.dir()).unwrap();
+    machine.install_full("me", None, Some(1000), false);
+    let alive = fs::read_to_string(machine.dir().join("alive")).unwrap();
+    let (owner, ts) = alive.trim().split_once(' ').unwrap();
+    assert_eq!(owner, "me");
+    let ts: u64 = ts.parse().unwrap();
+    assert!(now_epoch().abs_diff(ts) < 5);
+    let deadline: u64 = fs::read_to_string(machine.dir().join("deadline"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(deadline.abs_diff(ts + 1000) < 5);
+
+    // No budget on the next install: the old deadline must not survive.
+    machine.install_full("me", None, None, false);
+    assert!(!machine.dir().join("deadline").exists());
+}
+
+/// `cleanup = disabled` and Kubernetes: `alive` for takeover detection, nothing
+/// that could act.
+#[test]
+fn no_action_command_means_alive_only_and_no_supervisor() {
+    let machine = Machine::new("idle", with(|s| s.stale_secs = 1));
+    fs::create_dir_all(machine.dir()).unwrap();
+    machine.install_full("me", None, None, true);
+    assert!(machine.dir().join("alive").exists());
+    assert!(!machine.dir().join("supervisor.pid").exists());
+    assert!(!machine.dir().join("deadline").exists());
+    machine.assert_no_action_for(SETTLE);
+}
+
+#[test]
+fn a_machine_missing_what_it_needs_says_so_and_flock_is_not_on_the_list() {
+    // A PATH with bash, but no curl or flock.
+    let mut machine = Machine::new("idle", with(|s| s.stale_secs = 100));
+    fs::create_dir_all(machine.dir()).unwrap();
+    let bin = machine.temp.path().join("bare-bin");
+    fs::create_dir(&bin).unwrap();
+    for tool in [
+        "bash", "cat", "date", "mkdir", "mv", "rm", "tr", "ps", "touch", "basename", "nohup",
+        "sed", "sleep",
+    ] {
+        if let Ok(found) = which(tool) {
+            std::os::unix::fs::symlink(found, bin.join(tool)).unwrap();
+        }
+    }
+    machine.path = bin.into_os_string();
+    let output = machine.install_full("me", None, None, false);
+    assert_eq!(output, "unsupervisable the machine lacks curl");
+
+    let curl = which("curl").unwrap();
+    std::os::unix::fs::symlink(curl, Path::new(&machine.path).join("curl")).unwrap();
+    assert_eq!(machine.install_full("me", None, None, false), "installed");
+}
+
+fn which(tool: &str) -> Result<PathBuf, ()> {
+    let output = Command::new("which").arg(tool).output().map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
 }

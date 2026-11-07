@@ -20,9 +20,8 @@ pub fn is_host_key_mismatch(err: &anyhow::Error) -> bool {
 /// Shared supervision-setup progress: the latest setup error and how long
 /// each setup step took. Supervision setup can sit inside a minutes-long
 /// reachability retry loop (or a slow host can make every step slow) while
-/// the server's budget-enforceability gate expires; without this,
-/// the gate's error is a generic "watchdog could not be confirmed" and the
-/// actual cause (e.g. `Permission denied (publickey)` from an unusable key
+/// the provision timeout expires; without this, its error is a generic "did
+/// not finish" and the actual cause (e.g. `Permission denied (publickey)` from an unusable key
 /// file, or one step eating the whole window) exists only in a log the user
 /// usually cannot see afterwards. Each failed attempt records its full error
 /// chain here BEFORE sleeping, and each step its duration, so the gate can
@@ -67,8 +66,8 @@ impl SetupDiagnostics {
         Some((step, elapsed))
     }
 
-    /// The steps so far, e.g. `SSH reachability 0.4s, lease acquire 1.2s,
-    /// watchdog install 13.1s (still running)`; `None` before any step.
+    /// The steps so far, e.g. `SSH reachability 0.4s, supervisor install 13.1s
+    /// (still running)`; `None` before any step.
     pub fn timeline(&self) -> Option<String> {
         let progress = self.progress();
         let mut parts = progress
@@ -102,7 +101,7 @@ impl SetupDiagnostics {
 ///
 /// ACCEPTED failure mode: if the host rotates the machine's key MID-SESSION
 /// (container recreated at the same address), every SSH use fails with the
-/// mismatch error until the user intervenes, and the on-machine watchdog
+/// mismatch error until the user intervenes, and the on-machine supervisor
 /// will eventually self-clean the machine. Auto-rehealing would gut the MITM
 /// protection, so the heartbeat loop instead raises a loud, actionable
 /// error-level diagnosis (see `heartbeat::run`).
@@ -197,8 +196,9 @@ impl SshEndpoint {
                     "{HOST_KEY_MISMATCH_PREFIX} {}@{}:{} presented a host key that does \
                      not match the pinned one. Likely cause: the machine was stopped and \
                      resumed outside this tool (providers regenerate host keys) — but it \
-                     can also mean the connection is being intercepted. If you know why, \
-                     delete {} and reconnect to re-pin.",
+                     can also mean the connection is being intercepted. Tell the user; if \
+                     they confirm the machine was stopped and resumed outside this tool, \
+                     delete the saved host key at {} and attach() again to record the new one.",
                     self.user,
                     self.host,
                     self.port,
@@ -403,7 +403,7 @@ pub fn validate_shell_safe(what: &str, value: &str) -> anyhow::Result<()> {
 /// that runs `halt_cmd` if no heartbeat has appeared within
 /// `halt_after_mins` (config `orphan-halt-mins`) of THIS boot. It runs at
 /// machine startup (vast onstart, `RunPod` dockerStartCmd), before SSH
-/// works — once a session's first heartbeat lands, the real watchdog takes
+/// works — once a session's first heartbeat lands, the real supervisor takes
 /// over as the money guard.
 ///
 /// The guard is deliberately boot-scoped: startup mechanisms re-run it on
@@ -416,11 +416,12 @@ pub fn validate_shell_safe(what: &str, value: &str) -> anyhow::Result<()> {
 /// disarm the current boot. `halt_cmd` may not contain single quotes (the
 /// script is single-quote wrapped); callers on stop-capable runtimes should
 /// make it preservation-aware (stop rather than destroy once the machine
-/// has ever held data).
+/// has ever held data). A failed provider call is tried again every minute, as
+/// the supervisor's are: one blip mustn't leave a machine billing unwatched.
 pub fn orphan_guard_line(halt_cmd: &str, halt_after_mins: u64) -> String {
     let sleep_secs = halt_after_mins.saturating_mul(60);
     format!(
-        "nohup sh -c 'sleep {sleep_secs}; [ -f /tmp/heartbeat ] || {{ {halt_cmd}; }}' \
+        "nohup sh -c 'sleep {sleep_secs}; while [ ! -f /tmp/heartbeat ]; do {halt_cmd}; sleep 60; done' \
          </dev/null >/dev/null 2>&1 &"
     )
 }

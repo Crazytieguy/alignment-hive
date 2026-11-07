@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StartParams {
-    /// Optional display-only label. Machine identity is a generated ULID.
+    /// Optional display-only label. Machines are identified by a generated id.
     pub label: Option<String>,
     /// Runtime to start the machine on (default: the configured default-runtime).
     pub runtime: Option<String>,
@@ -32,16 +32,19 @@ pub struct StartParams {
     /// even with true; the response says setup continues in the background.
     /// `status()` reports readiness and background failures.
     pub wait: Option<bool>,
+    /// Start even though an earlier `start()` in this session had an unclear
+    /// outcome, so its machine may already be billing. Call `status()` first:
+    /// it adopts that machine if it has appeared.
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AttachParams {
-    /// Machine id from `start()` or `status()`. Legacy name ids are also accepted.
+    /// Machine id from `start()` or `status()`.
     pub machine_id: String,
     /// Take control of a machine that another live server process is still
     /// driving (plain attach is refused while that process's claim is fresh),
-    /// cutting the other process off. Also required to revive a machine with
-    /// a pending terminate. Use only for an intentional takeover.
+    /// cutting the other process off. Use only for an intentional takeover.
     pub force: Option<bool>,
 }
 
@@ -75,14 +78,14 @@ pub struct FinishParams {
     /// under the project root. Absolute paths and ".." are not allowed.
     pub download: Option<Vec<String>>,
     /// What to do once pending executions and downloads finish: "stop"
-    /// (preserve the machine; storage may bill), "terminate" (delete it), or
+    /// (keep its persistent storage, which may bill), "terminate" (delete it), or
     /// "keep" (leave it running).
     pub then: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StatusParams {
-    /// Which machine to report. Omit to report every durable record.
+    /// Which machine to report. Omit to report every machine on record.
     pub instance: Option<String>,
 }
 
@@ -111,7 +114,7 @@ pub struct ExecuteParams {
     /// for NO timeout: hold the call open until the execution completes.
     pub timeout: Option<u64>,
     /// Start the execution and return immediately (fire-and-forget); collect the
-    /// result later with `get_output()`. Mutually exclusive with `timeout`.
+    /// result later with `get_output()`. Passing `timeout` as well is an error.
     pub background: Option<bool>,
     /// If true, queue behind the current execution instead of returning an error when busy.
     pub queue: Option<bool>,
