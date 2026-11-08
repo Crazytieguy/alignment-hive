@@ -9,14 +9,15 @@ function run(input: unknown) {
 }
 
 describe('debrief SessionStart', () => {
-  for (const source of ['startup', 'resume', 'compact', 'fork']) {
-    test(`returns the caller id on ${source}`, () => {
+  // A fork's context keeps the line its parent got, so the line says which one is current.
+  for (const source of ['startup', 'resume', 'clear', 'compact', 'fork']) {
+    test(`returns the caller id on ${source}, marked current`, () => {
       const result = run({ session_id: session, source });
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout.toString())).toEqual({
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: `Debrief parent session id: ${session}`,
+          additionalContext: `Debrief parent session id: ${session} (current; replaces any earlier line like this)`,
         },
       });
     });
