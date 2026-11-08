@@ -69,7 +69,9 @@ async function summarize($: EngineInterface, id: string, text: string, tries: nu
       $.clock.after(ABORT_RETRY_MS, () => enqueue($, id, text, tries + 1))
       return
     }
-    t = r.isAnswered ? lineFor(r.text) : FAIL + (r.reason ?? 'no answer')
+    // An answer lineFor leaves empty (blank, or a bare label like "Summary:") counts as a failure,
+    // so a redraw a minute later sends it again; saved as '', it would draw "summarizing…" forever.
+    t = r.isAnswered ? (lineFor(r.text) || FAIL + 'empty answer') : FAIL + (r.reason ?? 'no answer')
   } catch (err) {
     t = FAIL + 'refused: ' + String(err) // the engine refused to send it (a blocked model, say)
   }

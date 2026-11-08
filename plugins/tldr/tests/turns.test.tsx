@@ -82,11 +82,16 @@ test("a subagent's turn is not this load's first turn: blocks drawn before the m
   await ui.unmount()
 })
 
+/** A main-loop turn starts and ends; its start and end redraw the blocks still owed a summary. */
+async function finishTurn($: Engine, turnId: string) {
+  await $.turn.start({ text: 'hi', turnId } as never)
+  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1, isAborted: false, turnId } as never)
+}
+
 /** A finished turn whose long block is drawn: its summary is owed. */
 async function drawFinished($: Engine, requestId: string) {
   await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true } as never)
-  await $.turn.start({ text: 'hi', turnId: 't' + requestId } as never)
-  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1, isAborted: false, turnId: 't' + requestId } as never)
+  await finishTurn($, 't' + requestId)
   return $.ui.mount(draw(requestId))
 }
 
@@ -104,5 +109,30 @@ test('a summary aborted on every try shows as unavailable', async ($, on) => {
   const ui = await drawFinished($, 'r6')
   expect(await eventually(engine.clock, () => ui.find({ type: 'Text', text: /tl;dr unavailable: aborted/ }))).toBeDefined()
   expect(engine.asked()).toBe(3)
+  await ui.unmount()
+})
+
+for (const [what, text] of [
+  ['blank', '  \n'],
+  ['only a prefix', 'Summary:'],
+] as const) {
+  test(`an answer that is ${what} shows as unavailable, not as summarizing forever`, async ($, on) => {
+    const engine = fakeEngine(on, [{ isAnswered: true, text }])
+    const ui = await drawFinished($, 'r7-' + what)
+    expect(await eventually(engine.clock, () => ui.find({ type: 'Text', text: /tl;dr unavailable: empty answer/ }))).toBeDefined()
+    expect(engine.asked()).toBe(1)
+    await ui.unmount()
+  })
+}
+
+test('a block whose answer was empty is summarized again on a redraw a minute later', async ($, on) => {
+  const engine = fakeEngine(on, [{ isAnswered: true, text: '' }, SENTENCE])
+  const ui = await drawFinished($, 'r8')
+  expect(await eventually(engine.clock, () => ui.find({ type: 'Text', text: /tl;dr unavailable/ }))).toBeDefined()
+  await engine.clock.advance(60_000)
+  await settle()
+  await finishTurn($, 't8b')
+  expect(await eventually(engine.clock, () => ui.find({ type: 'Text', text: SUMMARY }))).toBeDefined()
+  expect(engine.asked()).toBe(2)
   await ui.unmount()
 })
