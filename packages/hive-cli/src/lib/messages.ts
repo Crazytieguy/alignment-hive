@@ -44,6 +44,7 @@ export const review = {
   evidenceMissing: (path: string) => `Evidence not found: ${path}`,
   rangeOutside: (range: string, total: number) => `Range ${range} exceeds ${total} lines`,
   otherSession: (locator: string) => `${locator} is not in this debrief's session or one of its agents`,
+  continuedSession: (locator: string, session: string) => `${locator} is in session ${session}, where this debrief's session continued; set session: ${session} in the frontmatter`,
   entryNotFound: (locator: string) => `Transcript entry not found: ${locator}`,
   notPrompt: (locator: string) => `asks: ${locator} is not a message the user or another session sent in this debrief's session`,
   duplicateAsk: (locator: string) => `asks: ${locator} is listed twice`,

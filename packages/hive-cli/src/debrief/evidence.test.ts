@@ -1,4 +1,4 @@
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
 import { EvidenceResolver, stampedAt } from './evidence';
@@ -174,6 +174,15 @@ test('locators resolve through hive local\'s resolver, in any form it prints; a 
   for (const form of [`${FIXTURE_SESSION}/agent-${AGENT_A}:2`, `11111111-1/agent-1111111199a:2`, `agent-${AGENT_A}:2`, `${AGENT_A}:2`]) {
     expect(await f.resolve({ transcript: form, summary: 'x' })).toMatchObject({ selector: `${FIXTURE_SESSION}/agent-${AGENT_A}:2` });
   }
+  await expect(f.resolve({ transcript: `${FIXTURE_SESSION}:1`, summary: 'x' })).resolves.toMatchObject({ selector: `${FIXTURE_SESSION}:1` });
+});
+
+// A fork that moves the conversation (to the background, say) copies it into a new session id and leaves a
+// continued-in record in the old transcript; a debrief that kept the old id is told which one to use.
+test('an entry of the session this debrief\'s session continues in is refused with that session named', async () => {
+  const f = await setup(); await sessions(f);
+  await appendFile(join(f.transcripts, `${FIXTURE_SESSION}.jsonl`), '\n' + JSON.stringify({ type: 'continued-in', sessionId: FIXTURE_SESSION, continuedInSessionId: UNRELATED }));
+  await expect(f.resolve({ transcript: '11111111-2222:1', summary: 'x' })).rejects.toThrow(`11111111-2222:1 is in session ${UNRELATED}, where this debrief's session continued; set session: ${UNRELATED} in the frontmatter`);
   await expect(f.resolve({ transcript: `${FIXTURE_SESSION}:1`, summary: 'x' })).resolves.toMatchObject({ selector: `${FIXTURE_SESSION}:1` });
 });
 

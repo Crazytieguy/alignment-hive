@@ -135,11 +135,16 @@ export class Transcripts {
   private parentRef(): Promise<TranscriptRef | undefined> {
     return this.parent ??= this.resolve({ session: this.session }).catch((error: unknown) => { if (error instanceof LocatorError) return undefined; throw error; });
   }
+  /** Whether this debrief's session's transcript has a continued-in entry naming `session`, where the conversation moved. */
+  private async continuesIn(session: string): Promise<boolean> {
+    const parent = await this.parentRef();
+    return !!parent && (await this.read(parent)).entries.some((e) => e.kind === 'continued-in' && e.target === session);
+  }
   async locate(locator: string): Promise<Located> {
     let ref: TranscriptRef;
     const parsed = parseLocator(locator);
     try { ref = await this.resolve(parsed); } catch (error) { throw error instanceof LocatorError ? new Error(error.message) : error; }
-    if (ref.session !== this.session) throw new Error(msg.otherSession(locator));
+    if (ref.session !== this.session) throw new Error(await this.continuesIn(ref.session) ? msg.continuedSession(locator, ref.session) : msg.otherSession(locator));
     const { from: n, item } = parsed.range!;
     const entry = (await this.read(ref)).entries[n - 1] as Entry | undefined;
     if (!entry) throw new Error(msg.entryNotFound(canonicalLocator(ref, n)));
