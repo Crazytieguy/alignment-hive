@@ -304,10 +304,12 @@ test('quotesIn reads the recall and retrieval agent formats, and a report handed
     '> [user] a separate section (c014, bbc0a27d:349 area, 2026-09-15)',
     '> [user] tests and lint pass (c034, 2026-09-15)',
     '> [user] longer prefix (abcdef012:5, 2026-09-15)',
+    '> [user note] tabs, not spaces (aaaa0001:7, 2026-09-16)',
   ].join('\n\n')
   expect(quotesIn(varied)).toEqual([
     { kind: 'tool', text: '"3. Plan, then plan review."', loc: 'a4aee255:100', date: '' },
     { kind: 'user', text: 'a separate section', loc: 'bbc0a27d:349', date: '2026-09-15' },
+    { kind: 'user note', text: 'tabs, not spaces', loc: 'aaaa0001:7', date: '2026-09-16' },
   ])
   // A quote ends where its blockquote does: a later blockquote with no label, after a blank line, is not part of it.
   const followed = [

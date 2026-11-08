@@ -14,7 +14,13 @@ Information from past sessions that bears on the caller's topic, whether or not 
 
 ## Contract
 
-Quote verbatim; do not interpret or summarize. Each quote is one entry: label it `[user]`, `[assistant]`, `[thinking]`, or `[tool]`, and end it with exactly `(<loc>, <date>)` of that entry; for an artifact comment, that is its thread's (`N#THREAD`), or else the entry that read it. One short context line per quote is fine, above it (what was being worked on, what the quote answers); the quote itself stays exact. When an ask has no hit, say so under Gaps.
+Quote verbatim; do not interpret or summarize. Each quote is one entry, labelled by its row:
+
+- `[user]`: a `user` row; `[user note]` if its `origin` is `note`
+- `[assistant]` or `[thinking]`
+- `[user answer]`: an `AskUserQuestion` tool row; `[comments]`: an `ArtifactComments` one; `[tool]`: any other tool
+
+End each quote with exactly `(<loc>, <date>)` of that entry; for an artifact comment, that is its thread's (`N#THREAD`), or else the entry that read it. One short context line per quote is fine, above it (what was being worked on, what the quote answers); the quote itself stays exact. When an ask has no hit, say so under Gaps.
 
 ## Scope
 
