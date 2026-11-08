@@ -158,9 +158,13 @@ export async function listSessionsImpl(
     hasUpload?: boolean;
   },
 ) {
-  const consentFilter = await buildConsentFilter(ctx);
-
   const { scope, hasUpload } = args;
+
+  // A user-scoped list only ever filters that user's sessions.
+  const consentFilter = await buildConsentFilter(
+    ctx,
+    scope?.type === "include" ? scope.userId : undefined,
+  );
 
   const uploadFilter = (session: Doc<"sessions">) => {
     if (hasUpload === undefined) return true;
@@ -280,7 +284,8 @@ export async function getSessionImpl(
 
   if (!session) return null;
 
-  const consentFilter = await buildConsentFilter(ctx);
+  // Only this owner's rows are checked: the session, or a parent that shares its owner.
+  const consentFilter = await buildConsentFilter(ctx, session.userDocId);
 
   // Fetch parent once — reused for both consent check and return value
   const parentSession = session.parentSessionId
@@ -341,7 +346,7 @@ export async function getUserImpl(
   const user = await ctx.db.get(args.userId);
   if (!user) return null;
 
-  const consentFilter = await buildConsentFilter(ctx);
+  const consentFilter = await buildConsentFilter(ctx, args.userId);
 
   const parents = await ctx.db
     .query("sessions")

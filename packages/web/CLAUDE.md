@@ -53,6 +53,7 @@ A workflow run's **run metadata** (`<session>/workflows/wf_<id>.json` — orches
 ### Rules for modifying this code
 
 - **Never add a new public query/mutation in `convex/` that returns cross-user session data without calling `requireAuthorized()` and applying `buildConsentFilter()`.** Internal queries/mutations/actions are exempt (not externally callable).
+- `buildConsentFilter(ctx)` loads every user's consent history. To read less, `buildConsentFilter(ctx, owner)` loads only that owner's, and treats every other user's session as not visible. Pass an owner only when every session the filter will see belongs to that owner (the `include` scope of `listSessionsImpl`, `getSessionImpl`, `getUserImpl`); for any read that spans users, leave it out. A wrong owner hides sessions; it never shows one.
 - **Never bypass `verifyConsent()` in session write mutations.**
 - **Never filter sessions after Convex pagination** — this breaks page sizes. Use `stream().filterWith()` from `convex-helpers/server/stream` for pre-pagination filtering.
 - If adding a new way to access session content (API endpoint, download, etc.), it must go through the same authorization and consent checks.

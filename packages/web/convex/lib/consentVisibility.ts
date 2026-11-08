@@ -6,6 +6,7 @@
  * See consent-windows.ts in session-data for the window computation logic.
  */
 import type { QueryCtx } from "../_generated/server";
+import type { Id } from "../_generated/dataModel";
 import {
   computeConsentWindows,
   isInConsentWindow,
@@ -28,20 +29,34 @@ interface SessionForVisibility {
 /**
  * Build a consent filter function.
  *
- * Loads all consent events, pre-computes consent windows per user (global)
+ * Loads consent events, pre-computes consent windows per user (global)
  * and per project group. Returns a function that checks whether a session
  * is visible based on consent windows.
  *
  * A session is visible if its timestamp (lastModified, or upload.uploadedAt
  * as fallback) falls within BOTH a global and project consent window.
+ *
+ * Without `owner`, every user's history is loaded, for reads that span users. With it, only
+ * that owner's (by index): a user's windows depend on their own events alone, so the filter
+ * decides their sessions exactly as the full one does, and fails closed on anyone else's.
+ * Only pass it when every session the filter will see belongs to that owner.
  */
 export async function buildConsentFilter(
   ctx: QueryCtx,
+  owner?: Id<"users">,
 ): Promise<(session: SessionForVisibility) => boolean> {
-  const allGlobalConsent = await ctx.db
-    .query("dataSharingConsent")
-    .collect();
-  const allProjectConsent = await ctx.db.query("projectConsent").collect();
+  const allGlobalConsent = owner
+    ? await ctx.db
+        .query("dataSharingConsent")
+        .withIndex("by_user_id", (q) => q.eq("userId", owner))
+        .collect()
+    : await ctx.db.query("dataSharingConsent").collect();
+  const allProjectConsent = owner
+    ? await ctx.db
+        .query("projectConsent")
+        .withIndex("by_user_id", (q) => q.eq("userId", owner))
+        .collect()
+    : await ctx.db.query("projectConsent").collect();
 
   // Pre-compute global consent windows per user (by Convex doc ID)
   const globalWindowsByUser = new Map<string, ConsentWindow[]>();
