@@ -499,7 +499,7 @@ export const hive = {
     takesNoArguments: (sub: string, arg: string): string => `${sub} takes no arguments (got "${arg}")`,
     excludeTakesOne: 'exclude takes one session id or --all',
     statusTakesOne: 'status takes one full session id',
-    sendTakesOne: 'send takes at most one session id, and not together with --delay or --sessions',
+    sendTakesOne: 'send takes at most one session id, and not together with --delay, --sessions or --scheduled-at',
     snoozeTakesOne: 'snooze takes one duration or --clear',
     sessionExcluded: (id: string): string => `Session ${id} is excluded.`,
     snoozeCleared: 'Snooze cleared. Automatic uploads resume on next session start.',
@@ -507,6 +507,8 @@ export const hive = {
     snoozedUntil: (dateStr: string): string => `Automatic uploads paused until ${dateStr}`,
     invalidDuration: (duration: string): string => `Invalid duration: "${duration}". Use format like 30m, 2h, 1d, 7d.`,
     invalidDelay: (value: string): string => `Invalid --delay value: "${value}" (expected seconds)`,
+    invalidScheduledAt: (value: string): string =>
+      `Invalid --scheduled-at value: "${value}" (expected milliseconds since the epoch)`,
     agentCannotExclude: 'Agent sessions cannot be excluded individually. Exclude the parent session instead.',
     agentCannotUpload: 'Agent sessions cannot be uploaded individually. Upload the parent session instead.',
     outsideConsentWindow: 'Session was last modified outside an active consent window.',

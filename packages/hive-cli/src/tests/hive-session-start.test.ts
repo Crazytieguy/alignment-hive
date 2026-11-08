@@ -1,10 +1,11 @@
-import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as realAuth from '../lib/auth';
 import * as realConvex from '../lib/convex';
 import * as realHookInput from '../lib/hook-input';
+import * as realSnooze from '../lib/snooze';
 import * as realSpawn from '../lib/spawn';
 import { mockForFile } from './file-mock';
 
@@ -14,6 +15,11 @@ const OLD = new Date(Date.now() - 7 * DAY_MS);
 let history: { global: Array<{ sessionSharing: boolean; timestamp: number }>; project: typeof history.global };
 const spawned: Array<Array<string>> = [];
 let root = '';
+// The snooze check, the sharing snapshot's last step, waits for the gate: a test holds it to line
+// up session starts just before they schedule.
+let snoozeGate: Promise<unknown> = Promise.resolve();
+let snoozeChecks = 0;
+let isSpawnFailing = false;
 
 mockForFile('../lib/convex', realConvex, {
   resolveProjectConsent: (cwd: string) => Promise.resolve({ consentMtime: 0, ids: { directory: cwd } }),
@@ -24,9 +30,17 @@ mockForFile('../lib/auth', realAuth, {
   getAuthData: () =>
     isLoginExpired ? Promise.reject(new Error('refresh failed')) : Promise.resolve({ accessToken: 'test' }),
 });
+const realGetSnoozeUntil = realSnooze.getSnoozeUntil;
+mockForFile('../lib/snooze', realSnooze, {
+  getSnoozeUntil: (stateDir: string) => {
+    snoozeChecks++;
+    return snoozeGate.then(() => realGetSnoozeUntil(stateDir));
+  },
+});
 mockForFile('../lib/hook-input', realHookInput, { readHookInput: () => Promise.resolve({ cwd: root }) });
 mockForFile('../lib/spawn', realSpawn, {
   spawnBackgroundCommand: (args: Array<string>) => {
+    if (isSpawnFailing) return null;
     spawned.push(args);
     return true;
   },
@@ -97,8 +111,11 @@ const SHARING = { global: [{ sessionSharing: true, timestamp: 1 }], project: [{ 
 describe('session start', () => {
   beforeEach(() => {
     isLoginExpired = false;
+    isSpawnFailing = false;
     delete process.env.HIVE_PLUGIN_VERSION;
   });
+
+  const uploadsScheduled = () => spawned.filter((args) => args[0] === 'upload');
 
   test('schedules the upload of a ready session and prints nothing; notices shows it', async () => {
     history = SHARING;
@@ -149,6 +166,49 @@ describe('session start', () => {
     } finally {
       await rm(bulk, { recursive: true, force: true });
     }
+  });
+
+  test('session starts at the same time schedule one upload between them', async () => {
+    history = SHARING;
+    let open!: () => void;
+    snoozeGate = new Promise<void>((resolve) => (open = resolve));
+    snoozeChecks = 0;
+    try {
+      // All three finish their snapshots together, then race to schedule.
+      const starts = Promise.all([hiveSessionStart(), hiveSessionStart(), hiveSessionStart()]);
+      while (snoozeChecks < 3) await Bun.sleep(1);
+      open();
+      await starts;
+    } finally {
+      snoozeGate = Promise.resolve();
+    }
+    expect(uploadsScheduled()).toHaveLength(1);
+  });
+
+  test('a failed spawn or marker write leaves no upload scheduled, and the next start tries again', async () => {
+    history = SHARING;
+    const marker = statePaths(getStateDir(root)).uploadScheduled;
+
+    isSpawnFailing = true;
+    await printed(hiveSessionStart);
+    expect(Bun.file(marker).size).toBe(0); // no marker left claiming a job that never started
+    isSpawnFailing = false;
+
+    // The marker cannot be written (it points into a missing directory): no job runs untracked.
+    await symlink(join(root, 'missing', 'upload-scheduled'), marker);
+    await printed(hiveSessionStart).catch(() => {});
+    expect(uploadsScheduled()).toEqual([]);
+    await rm(marker);
+
+    await printed(hiveSessionStart);
+    expect(uploadsScheduled()).toHaveLength(1);
+  });
+
+  test('a marker past the cooldown no longer holds back the next upload', async () => {
+    history = SHARING;
+    await writeFile(statePaths(getStateDir(root)).uploadScheduled, String(Date.now() - 16 * 60 * 1000));
+    await printed(hiveSessionStart);
+    expect(uploadsScheduled()).toHaveLength(1);
   });
 
   test('does not count or schedule a session last modified while sharing was off', async () => {

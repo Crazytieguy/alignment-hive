@@ -2,11 +2,13 @@
 // for login, consent and transcripts), a session's Keep private state, upload scheduling, and when
 // /hive:align is due.
 
+import { rm, writeFile } from 'node:fs/promises';
 import { canExclude, isPreUploadState } from '@alignment-hive/session-data';
 import { getAuthData } from './auth';
 import { isSharingDisabledLocally, loadTranscriptsDirs, readStateFile, readTimestamp, statePaths } from './config';
 import { resolveProjectConsent } from './convex';
 import { computeSessionStatus, hasIncompleteUpload, withDiscoveryCache } from './session-state';
+import { withPidLock } from './pid-lock';
 import { getSnoozeUntil } from './snooze';
 import { loadConsentWindows, loadSessionStateWithMigrations } from './upload-session';
 import type { StatusContext } from './session-state';
@@ -42,8 +44,34 @@ export async function uploadScheduledAt(stateDir: string): Promise<number | null
   return scheduledAt !== null && Date.now() - scheduledAt < UPLOAD_SCHEDULE_COOLDOWN_MS ? scheduledAt : null;
 }
 
-export async function isUploadScheduled(stateDir: string): Promise<boolean> {
-  return (await uploadScheduledAt(stateDir)) !== null;
+/**
+ * Start the upload job `spawnJob` starts, unless one is scheduled already. Checking and recording
+ * happen under a lock, so session starts at the same time schedule one job between them. The marker
+ * holds its scheduling time, which `spawnJob` passes to the job so `clearUploadScheduled` can tell
+ * the marker is its own. It is written before the spawn, so no job runs without one, and a failed
+ * spawn removes it again.
+ */
+export async function scheduleUpload(stateDir: string, spawnJob: (scheduledAt: number) => boolean): Promise<void> {
+  const { uploadScheduled, uploadScheduleLock } = statePaths(stateDir);
+  await withPidLock(uploadScheduleLock, async () => {
+    if ((await uploadScheduledAt(stateDir)) !== null) return;
+    const scheduledAt = Date.now();
+    await writeFile(uploadScheduled, String(scheduledAt));
+    if (!spawnJob(scheduledAt)) await rm(uploadScheduled, { force: true });
+  });
+}
+
+/**
+ * The scheduled job's last step: remove the marker if it is still the one written for this job,
+ * so the next session start schedules the next batch. A job that outlived its cooldown leaves the
+ * marker of the job scheduled after it. Skipped while a session start holds the lock; the marker
+ * then lapses with the cooldown.
+ */
+export async function clearUploadScheduled(stateDir: string, scheduledAt: number): Promise<void> {
+  const { uploadScheduled, uploadScheduleLock } = statePaths(stateDir);
+  await withPidLock(uploadScheduleLock, async () => {
+    if ((await readTimestamp(uploadScheduled)) === scheduledAt) await rm(uploadScheduled, { force: true });
+  });
 }
 
 /** /hive:align is due on first run (`new`) and whenever the plugin's minor version changes (`update`). */

@@ -1,4 +1,3 @@
-import { unlink } from 'node:fs/promises';
 import { canUpload, isEligibleForAutoUpload } from '@alignment-hive/session-data';
 import {
   ensureStateDir,
@@ -16,6 +15,7 @@ import { printError, printInfo, printSuccess } from '../lib/output';
 import { withPidLock } from '../lib/pid-lock';
 import { lookupParentSession } from '../lib/session-lookup';
 import { computeSessionStatus } from '../lib/session-state';
+import { clearUploadScheduled } from '../lib/sharing';
 import { getSnoozeUntil } from '../lib/snooze';
 import { loadConsentWindows, loadSessionStateWithMigrations, uploadOneSession } from '../lib/upload-session';
 
@@ -23,17 +23,23 @@ const UPLOAD_CONCURRENCY = 5;
 
 /**
  * `hive upload send [ID]`: upload one session, or every uploadable one. With --delay it is the job
- * session start schedules: it sleeps first, then uploads only ready sessions, and not while snoozed.
+ * session start schedules: it sleeps first, then uploads only ready sessions, and not while snoozed;
+ * --scheduled-at names its marker.
  */
 export async function uploadSend(args: Array<string>): Promise<number> {
   // A mistyped invocation must never fall through to the manual batch, which uploads pending
   // sessions still inside their review window: every malformed argument stops here.
-  const parsed = parseCommandArgs({ bool: [], value: ['--delay', '--sessions'] }, args, hive.upload.usage);
+  const parsed = parseCommandArgs(
+    { bool: [], value: ['--delay', '--sessions', '--scheduled-at'] },
+    args,
+    hive.upload.usage,
+  );
   if (typeof parsed === 'number') return parsed;
   const delayArg = parsed.flags.get('--delay') as string | undefined;
   const sessionsArg = parsed.flags.get('--sessions') as string | undefined;
+  const scheduledAtArg = parsed.flags.get('--scheduled-at') as string | undefined;
   const sessionPrefix = parsed.positional[0] as string | undefined;
-  const withFlags = delayArg !== undefined || sessionsArg !== undefined;
+  const withFlags = delayArg !== undefined || sessionsArg !== undefined || scheduledAtArg !== undefined;
   // An empty id would read as "no id" further down: the batch.
   if (parsed.positional.length > 1 || sessionPrefix === '' || (sessionPrefix !== undefined && withFlags)) {
     return usageError(hive.upload.sendTakesOne, hive.upload.usage);
@@ -43,6 +49,12 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     const n = parseWholeNumber(delayArg);
     if (n === null) return usageError(hive.upload.invalidDelay(delayArg), hive.upload.usage);
     delaySeconds = n;
+  }
+  // --scheduled-at names the marker session start wrote for this job; the job clears that marker
+  // when it ends.
+  const scheduledAt = scheduledAtArg === undefined ? null : parseWholeNumber(scheduledAtArg);
+  if (scheduledAtArg !== undefined && scheduledAt === null) {
+    return usageError(hive.upload.invalidScheduledAt(scheduledAtArg), hive.upload.usage);
   }
   const targetSessionIds = sessionsArg?.split(',').filter(Boolean);
 
@@ -72,8 +84,7 @@ export async function uploadSend(args: Array<string>): Promise<number> {
     }
     return result;
   } finally {
-    // The session-start hook wrote this marker when it scheduled us.
-    if (isBackground) await unlink(statePaths(stateDir).uploadScheduled).catch(() => {});
+    if (scheduledAt !== null) await clearUploadScheduled(stateDir, scheduledAt);
   }
 }
 

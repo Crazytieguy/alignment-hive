@@ -1,12 +1,11 @@
-import { writeFile } from 'node:fs/promises';
 import { ensureStateDir, getStateDir, statePaths } from '../lib/config';
 import { readHookInput } from '../lib/hook-input';
 import { isRegistryBackfillDone } from '../lib/registry-backfill';
 import {
   UPLOAD_DELAY_MINUTES,
-  isUploadScheduled,
   loadSharingSnapshot,
   pickUploadBatch,
+  scheduleUpload,
   summarizeUploads,
 } from '../lib/sharing';
 import { spawnBackgroundCommand } from '../lib/spawn';
@@ -37,16 +36,15 @@ export async function hiveSessionStart(): Promise<number> {
   if (snapshot.kind !== 'on') return 0;
 
   const { eligibleIds } = summarizeUploads(snapshot);
-  if (eligibleIds.length > 0 && !snapshot.snoozeUntil && !(await isUploadScheduled(stateDir))) {
+  if (eligibleIds.length > 0 && !snapshot.snoozeUntil) {
     // A capped batch: the ids travel as one argument. The job clears the marker when it ends, so
     // the next session start after that schedules the next batch.
-    const batch = pickUploadBatch(eligibleIds);
-    const spawned = spawnBackgroundCommand(
-      ['upload', 'send', '--delay', String(UPLOAD_DELAY_MINUTES * 60), '--sessions', batch.join(',')],
-      statePaths(stateDir).errorLog,
-    );
-    // Written only after a successful spawn: the child sleeps --delay first, so this cannot race it.
-    if (spawned) await writeFile(statePaths(stateDir).uploadScheduled, String(Date.now()));
+    const batch = pickUploadBatch(eligibleIds).join(',');
+    const delay = String(UPLOAD_DELAY_MINUTES * 60);
+    await scheduleUpload(stateDir, (scheduledAt) => {
+      const job = ['upload', 'send', '--delay', delay, '--sessions', batch, '--scheduled-at', String(scheduledAt)];
+      return spawnBackgroundCommand(job, statePaths(stateDir).errorLog) !== null;
+    });
   }
 
   if (snapshot.state.parentSessions.length > 0) {

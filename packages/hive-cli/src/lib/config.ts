@@ -230,6 +230,7 @@ export function statePaths(stateDir: string) {
     legacyWorkflowMigrationTs: join(stateDir, 'workflow-upload-migration-ts'),
     snoozeUntil: join(stateDir, 'snooze-until'),
     uploadScheduled: join(stateDir, 'upload-scheduled'),
+    uploadScheduleLock: join(stateDir, 'upload-schedule-lock'),
     uploadLock: join(stateDir, 'upload-lock'),
     heartbeatLock: join(stateDir, 'heartbeat-lock'),
     discoveryCache: join(stateDir, 'discovery-cache'),

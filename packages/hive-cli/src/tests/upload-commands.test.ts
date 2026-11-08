@@ -102,6 +102,23 @@ describe('upload send argument parsing', () => {
     });
   }
 
+  test('the background job removes the upload-scheduled marker only while it is still its own', async () => {
+    await mkdir(stateDir, { recursive: true });
+    // Snoozed, so each run ends before the upload path; the marker is cleared on every way out.
+    await writeFile(statePaths(stateDir).snoozeUntil, String(Date.now() + 60_000));
+    const marker = statePaths(stateDir).uploadScheduled;
+    const job = (scheduledAt: string) =>
+      quiet(() => uploadSend(['--delay', '0', '--sessions', 'abc', '--scheduled-at', scheduledAt]));
+
+    // A job scheduled earlier ends after a newer job was scheduled: the newer job's marker stays.
+    await writeFile(marker, '2000');
+    expect(await job('1000')).toBe(0);
+    expect(await Bun.file(marker).text()).toBe('2000');
+
+    expect(await job('2000')).toBe(0);
+    expect(await Bun.file(marker).exists()).toBe(false);
+  });
+
   test('--delay 0 is the background job: it honours a snooze, which a manual send ignores', async () => {
     await mkdir(stateDir, { recursive: true });
     await writeFile(statePaths(stateDir).snoozeUntil, String(Date.now() + 60_000));
