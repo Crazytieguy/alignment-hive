@@ -31,6 +31,23 @@ const sessionInput = z.object({ sessionId: z.string() });
 
 const MAX_CACHED_READS = 4;
 
+/**
+ * Whether a /trpc request comes from the page this server opened. Only the Host header separates
+ * it from a DNS-rebinding page, which reaches 127.0.0.1 under its own Host. A cross-site page can
+ * POST here with a CORS-simple content type (multipart/form-data, which tRPC parses) and the right
+ * Host, so the Origin and Sec-Fetch-Site headers, when the browser sends them, must name this
+ * origin too. Origin must match the request's own Host: the other loopback name is another
+ * origin, and may not even be this server (Bun binds `localhost` to ::1 alone on macOS).
+ */
+export function allowTrpcRequest(req: Request, port: number): boolean {
+  const host = req.headers.get('host') ?? '';
+  if (host !== `localhost:${port}` && host !== `127.0.0.1:${port}`) return false;
+  const origin = req.headers.get('origin');
+  if (origin !== null && origin !== `http://${host}`) return false;
+  const site = req.headers.get('sec-fetch-site');
+  return site === null || site === 'same-origin' || site === 'none';
+}
+
 export function createReviewRouter(stateDir: string, cwd: string) {
   // Per-process caches, revalidated by file mtime (and size); statuses are always computed fresh.
   const discoveryCache: DiscoveryCache = new Map();

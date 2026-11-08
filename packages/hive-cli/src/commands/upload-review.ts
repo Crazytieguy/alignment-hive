@@ -5,7 +5,7 @@ import { openBrowser } from '../lib/browser';
 import { ensureStateDir, getStateDir } from '../lib/config';
 import { reviewCmd } from '../lib/messages';
 import { printInfo, printSuccess } from '../lib/output';
-import { createReviewRouter } from '../lib/review-router';
+import { allowTrpcRequest, createReviewRouter } from '../lib/review-router';
 
 /**
  * `hive upload review`: serve the review app (embedded in the binary) and its tRPC API
@@ -29,11 +29,7 @@ export async function uploadReview(): Promise<number> {
       const url = new URL(req.url);
 
       if (url.pathname.startsWith('/trpc')) {
-        // Only the page this server opened: a DNS-rebinding page reaches 127.0.0.1 under its own Host.
-        const host = req.headers.get('host');
-        if (host !== `localhost:${srv.port}` && host !== `127.0.0.1:${srv.port}`) {
-          return new Response(null, { status: 403 });
-        }
+        if (!allowTrpcRequest(req, srv.port!)) return new Response(null, { status: 403 });
         return fetchRequestHandler({ endpoint: '/trpc', req, router });
       }
 
