@@ -1,41 +1,19 @@
 // Backend rules around blob deletion and child counts, on convex-test's in-memory backend. It
 // imitates Convex rather than being it, so a change here is still worth exercising on dev.
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
-import { dirname, join } from "node:path";
 import { convexTest } from "convex-test";
 import { api, internal } from "../convex/_generated/api";
 import { MAX_COUNTED_CHILDREN } from "../convex/lib/childCounts";
 import schema from "../convex/schema";
 import type { Id } from "../convex/_generated/dataModel";
-
-const convexDir = join(dirname(import.meta.dir), "convex");
-const modules = Object.fromEntries(
-  [...new Bun.Glob("**/*.{ts,js}").scanSync(convexDir)].map((path) => [
-    `../convex/${path}`,
-    () => import(join(convexDir, path)),
-  ]),
-);
+import { consentingUser, directory, modules } from "./harness";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const directory = "/project";
 const meta = { directory, checkoutId: "checkout", lastModified: Date.now() };
-const consent = {
-  sessionSharing: true,
-  communityFeatures: false,
-  publicationExcerpts: false,
-  creditByName: false,
-} as const;
 
 async function setup() {
   const t = convexTest(schema, modules);
-  const as = async (subject: string) => {
-    const user = t.withIdentity({ subject, email: `${subject}@example.com` });
-    await user.mutation(api.consent.submitConsent, { consent });
-    await user.mutation(api.consent.updateProjectSharing, {
-      changes: [{ identifier: { directory }, sessionSharing: true }],
-    });
-    return user;
-  };
+  const as = (subject: string) => consentingUser(t, subject);
   const store = (content: string) =>
     t.run((ctx) => ctx.storage.store(new Blob([content])));
   const blobExists = (id: Id<"_storage">) =>

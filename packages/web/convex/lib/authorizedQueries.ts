@@ -158,7 +158,6 @@ export async function listSessionsImpl(
     hasUpload?: boolean;
   },
 ) {
-  const allUsers = await ctx.db.query("users").collect();
   const consentFilter = await buildConsentFilter(ctx);
 
   const { scope, hasUpload } = args;
@@ -168,15 +167,25 @@ export async function listSessionsImpl(
     return hasUpload ? !!session.upload : !session.upload;
   };
 
+  // Read each page's owners once each, instead of loading the whole users table.
+  const owners = new Map<Id<"users">, Promise<Doc<"users"> | null>>();
+  const ownerOf = (session: Doc<"sessions">) => {
+    let owner = owners.get(session.userDocId);
+    if (!owner) {
+      owner = ctx.db.get(session.userDocId);
+      owners.set(session.userDocId, owner);
+    }
+    return owner;
+  };
+
   const formatPage = async (
     paginatedSessions: PaginationResult<Doc<"sessions">>,
-    ownerOf: (session: Doc<"sessions">) => Doc<"users"> | null,
   ) => ({
     ...paginatedSessions,
     page: await Promise.all(
       paginatedSessions.page.map(async (session: Doc<"sessions">) => {
         const upload = await formatUpload(ctx, session.upload);
-        const user = ownerOf(session);
+        const user = await ownerOf(session);
         return {
           ...formatSessionBase(session, upload),
           user: user ? formatUser(user) : null,
@@ -211,14 +220,8 @@ export async function listSessionsImpl(
       })
       .paginate(args.paginationOpts);
 
-    const user = await ctx.db.get(scope.userId);
-    return formatPage(paginatedSessions, () => user);
+    return formatPage(paginatedSessions);
   }
-
-  // Session owners for the no-scope and exclude paths
-  const userDocMap = new Map(allUsers.map((u) => [u._id as string, u]));
-  const ownerFromMap = (session: Doc<"sessions">) =>
-    userDocMap.get(session.userDocId) ?? null;
 
   // No-scope path — just consent + optional hasUpload
   if (!scope) {
@@ -232,7 +235,7 @@ export async function listSessionsImpl(
         uploadFilter(session) && consentFilter(session),
       )
       .paginate(args.paginationOpts);
-    return formatPage(paginatedSessions, ownerFromMap);
+    return formatPage(paginatedSessions);
   }
 
   // Exclude path
@@ -263,7 +266,7 @@ export async function listSessionsImpl(
     })
     .paginate(args.paginationOpts);
 
-  return formatPage(paginatedSessions, ownerFromMap);
+  return formatPage(paginatedSessions);
 }
 
 export async function getSessionImpl(
