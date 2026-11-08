@@ -1,7 +1,8 @@
 // Secret redaction. Uploads replace each span detectSecrets finds with `[REDACTED:<rule>]`: gitleaks'
 // rules (secret-rules.ts, generated), SECRET_SHAPES for secrets no rule names, a high-entropy
-// safety net, and the literal values of this process's credential env vars (withEnvValues). The
-// debrief page marks spans from a narrower list through secretSpans.
+// safety net, and the literal values of this process's credential env vars (withEnvValues). A
+// value under a SAFE_KEYS name gets a narrower list (sanitizeDeep). The debrief page marks spans
+// from a narrower list through secretSpans.
 
 import { SECRET_RULES } from './secret-rules';
 import type { SecretRule } from './secret-rules';
@@ -129,6 +130,13 @@ const HIGH_ENTROPY_RULE: SecretRule = {
 };
 
 const ALL_RULES: Array<SecretRule> = [...SECRET_SHAPES, ...SECRET_RULES, HIGH_ENTROPY_RULE];
+/**
+ * What a SAFE_KEYS value is still scanned with: every rule that names a secret, except the link shape, whose
+ * `/auth/<segment>` match misfires on the paths and branch names these keys hold (`packages/auth/oauth2-module`).
+ */
+const SAFE_KEY_RULES: Array<SecretRule> = [...SECRET_SHAPES.filter((shape) => shape.id !== 'link'), ...SECRET_RULES];
+/** A record or tool id. Under a SAFE_KEYS name it is checked against credential env values only: gitleaks' `EAAA` prefix rule would take about 1 random uuid in 30,000. */
+const UUID_VALUE = new RegExp(`^${UUID}$`, 'i');
 
 const ENV_VALUE_ID = 'env-value';
 /** Shorter values are too likely to be test stubs or ordinary words to redact everywhere they appear. */
@@ -293,7 +301,11 @@ export function secretSpans(content: string, rules: Array<SecretRule>): Array<Se
 }
 
 export function sanitizeString(content: string): string {
-  const secrets = detectSecrets(content);
+  return redact(content, ALL_RULES);
+}
+
+function redact(content: string, rules: Array<SecretRule>): string {
+  const secrets = secretSpans(content, withEnvValues(rules));
   if (secrets.length === 0) return content;
 
   let result = content;
@@ -322,9 +334,11 @@ export function sanitizeRecord(record: Record<string, unknown>): Record<string, 
 
 /**
  * Redact secrets in every string of a value. Transcript entries are schema-shaped (keys are
- * field names; SAFE_KEYS values are ids/paths), so the default walk skips both. `strict` also
- * scans keys and SAFE_KEYS values: arbitrary script-built structures like workflow run blobs can
- * carry a secret in either. Subtrees below MAX_SANITIZE_DEPTH are dropped, not passed through.
+ * field names; SAFE_KEYS values are ids/paths), so the default walk leaves keys alone and scans
+ * SAFE_KEYS values with SAFE_KEY_RULES only, sparing them the high-entropy net: the same names occur
+ * inside tool inputs and results, which carry arbitrary values. `strict` also scans keys and gives SAFE_KEYS values the entropy
+ * net: arbitrary script-built structures like workflow run blobs can carry a secret in either.
+ * Subtrees below MAX_SANITIZE_DEPTH are dropped, not passed through.
  */
 export function sanitizeDeep<T>(value: T, strict = false, depth = 0): T {
   if (depth > MAX_SANITIZE_DEPTH) return TRUNCATED_PLACEHOLDER as T;
@@ -335,10 +349,12 @@ export function sanitizeDeep<T>(value: T, strict = false, depth = 0): T {
   if (typeof value === 'object') {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      const scan = typeof val === 'string' ? namedScan(key, val) : undefined;
       if (!strict && SAFE_KEYS.has(key) && typeof val === 'string') {
-        result[key] = val;
-      } else if (typeof val === 'string' && scan !== undefined && scan.kind !== 'text') {
+        result[key] = redact(val, UUID_VALUE.test(val) ? [] : SAFE_KEY_RULES);
+        continue;
+      }
+      const scan = typeof val === 'string' ? namedScan(key, val) : undefined;
+      if (typeof val === 'string' && scan !== undefined && scan.kind !== 'text') {
         result[strict ? sanitizeString(key) : key] = scan.kind === 'whole' ? '[REDACTED:secret-value]' : sanitizeString(scan.prefix + val).slice(scan.prefix.length);
       } else {
         // In strict mode two keys redacting to the same placeholder collide (last one wins) —

@@ -127,13 +127,15 @@ describe('sanitizeDeep', () => {
 });
 
 describe('SAFE_KEYS', () => {
-  test('skips sanitization for known-safe string fields', () => {
+  test('skips the high-entropy net for known-safe string fields', () => {
+    // High-entropy, but named by no rule: kept under a safe key, redacted elsewhere.
+    const opaque = 'aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5';
     const input = {
-      uuid: TEST_GITHUB_TOKEN,
+      uuid: opaque,
       type: 'user',
       timestamp: '2025-01-01T00:00:00Z',
       sessionId: 'sess-12345',
-      content: TEST_GITHUB_TOKEN,
+      content: opaque,
     };
 
     const sanitized = sanitizeDeep(input);
@@ -142,8 +144,36 @@ describe('SAFE_KEYS', () => {
     expect(sanitized.type).toBe(input.type);
     expect(sanitized.timestamp).toBe(input.timestamp);
     expect(sanitized.sessionId).toBe(input.sessionId);
-    expect(sanitized.content).toContain('[REDACTED:');
-    expect(sanitized.content).not.toContain('ghp_');
+    expect(sanitized.content).toBe('[REDACTED:high-entropy-secret]');
+  });
+
+  test('a known secret under a safe key is still redacted, at any depth', () => {
+    const record = {
+      type: 'assistant',
+      uuid: '5e41ef2f-689e-4d7d-b917-06ebc40107bc',
+      cwd: '/home/user/project',
+      message: {
+        model: 'claude-opus-4-1-20250805',
+        id: 'msg_01AbCdEfGhIjKlMnOpQrStUv',
+        content: [{ type: 'tool_use', id: 'toolu_01AbCdEfGhIjKlMnOpQrStUv', name: 'mcp__x__connect', input: { name: TEST_GITHUB_TOKEN, id: TEST_GITHUB_TOKEN, model: TEST_GITHUB_TOKEN, cwd: `/repo/${TEST_GITHUB_TOKEN}`, other: TEST_GITHUB_TOKEN } }],
+      },
+    };
+    const input = { name: '[REDACTED:github-pat]', id: '[REDACTED:github-pat]', model: '[REDACTED:github-pat]', cwd: '/repo/[REDACTED:github-pat]', other: '[REDACTED:github-pat]' };
+    expect(sanitizeRecord(record)).toEqual({ ...record, message: { ...record.message, content: [{ ...record.message.content[0], input }] } });
+  });
+
+  test('uuids, and paths or branches under /auth/, are kept under a safe key', () => {
+    // `eaaa…` matches gitleaks' square-access-token prefix; `/auth/<segment>` matches the link shape.
+    const record = {
+      uuid: 'eaaa330f-dea7-4ae7-ba89-cdeafd1c56a3',
+      parentUuid: 'ed26a703-eaaa-4e42-abaa-89314a09520d',
+      sessionId: 'EAAA330F-DEA7-4AE7-BA89-CDEAFD1C56A3',
+      cwd: '/home/u/repo/packages/auth/oauth2-provider-module',
+      gitBranch: 'feat/auth/oauth2-refresh-tokens2',
+    };
+    expect(sanitizeRecord(record)).toEqual(record);
+    // Elsewhere the same values are still scanned as text.
+    expect(sanitizeString(record.uuid)).toBe('[REDACTED:square-access-token]');
   });
 
   test("sanitizeRecord keeps a request's beta flags whole, and scans any other betas", () => {
@@ -367,6 +397,12 @@ describe('credential env var values', () => {
     const out = sanitizeString(`Q7mZp2Lk9Wv4Rt8Yn3Bs${password} end`);
     expect(out).not.toContain('wwwwvvvv');
     expect(out).toEndWith(' end');
+  });
+
+  test("a credential var's value is redacted under a safe key, even when uuid-shaped", () => {
+    const uuidKey = '0f8e2c1a-5b7d-4e3f-9a6b-2c4d8e0f1a3b';
+    withEnv({ ...vars, FOO_DB_PASSWORD: uuidKey });
+    expect(sanitizeDeep({ name: KEY, id: uuidKey })).toEqual({ name: '[REDACTED:env-value]', id: '[REDACTED:env-value]' });
   });
 
   test('without credential vars nothing changes', () => {
