@@ -309,6 +309,19 @@ test('quotesIn reads the recall and retrieval agent formats, and a report handed
     { kind: 'tool', text: '"3. Plan, then plan review."', loc: 'a4aee255:100', date: '' },
     { kind: 'user', text: 'a separate section', loc: 'bbc0a27d:349', date: '2026-09-15' },
   ])
+  // A quote ends where its blockquote does: a later blockquote with no label, after a blank line, is not part of it.
+  const followed = [
+    '> [thinking] effort reaches Sol (adb104e6:232, 2026-09-23)',
+    '',
+    'It was recorded in experiments.md:',
+    '> `a probe artifact` (experiments/model-router.md:1510)',
+    '',
+    '> [user] the start',
+    '',
+    'Then, in Slack:',
+    '> "an endorsement" (48025416:66)',
+  ].join('\n')
+  expect(quotesIn(followed)).toEqual([{ kind: 'thinking', text: 'effort reaches Sol', loc: 'adb104e6:232', date: '2026-09-23' }])
 })
 
 test('collapsePasted keeps the opening of pasted text and the words around it', () => {

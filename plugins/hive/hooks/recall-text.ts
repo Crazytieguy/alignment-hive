@@ -46,15 +46,17 @@ type Quote = { loc: string; date: string; kind: string; text: string }
 
 /**
  * An earlier report's quotes, each `> [kind] text (loc, date)` as recall and the retrieval agent write them; a report a
- * background agent hands back comes with every line indented. The retrieval agent's closing parentheses vary: the loc
+ * background agent hands back comes with every line indented. A quote ends where its blockquote does: a blockquote after
+ * it, below a blank or context line, quotes something else. The retrieval agent's closing parentheses vary: the loc
  * is the first one in them, and a date is optional ('' when none).
  */
 export function quotesIn(report: string): Array<Quote> {
   const out: Array<Quote> = []
   for (const block of report.split(/\n(?=[ \t]*> \[)/)) {
     const lines = block.split('\n').map(l => l.trimStart())
+    const end = lines.findIndex(l => !l.startsWith('>'))
     const quote = lines
-      .filter((l, i) => (i === 0 ? l.startsWith('> [') : l.startsWith('>')))
+      .slice(0, end < 0 ? undefined : end)
       .map(l => l.replace(/^> ?/, ''))
       .join('\n')
     const m = /^\[([^\]]+)\]\s*([\s\S]*?)\s*\(([^()]*)\)\s*$/.exec(quote)
