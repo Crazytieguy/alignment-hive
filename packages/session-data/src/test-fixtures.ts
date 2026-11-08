@@ -154,6 +154,15 @@ class Builder {
     });
     return this;
   }
+  hookContext(label: string, parent: string | null, content: Array<string>) {
+    const base = this.common(label, parent);
+    this.push(label, {
+      ...base,
+      type: 'attachment',
+      attachment: { type: 'hook_additional_context', content, hookName: 'UserPromptSubmit', toolUseID: `hook-${label}` },
+    });
+    return this;
+  }
   raw(label: string, r: Rec) {
     this.push(label, r);
     return this;
@@ -644,6 +653,19 @@ export function plumbingFixture(): Fixture {
     .prompt('R', 'H1', 'The number formatter, not the date one.')
     .say('A4', 'R', 'msg_fd1_4', 'Looking for the number formatter.');
   return fixture('plumbing', b);
+}
+
+// Automatic recall's report, stored as context a hook added to a prompt beside another hook's, takes
+// an entry number; context from other hooks alone takes none.
+export function recallFixture(): Fixture {
+  const b = new Builder(sid('fd000002'), '2026-09-12T11:00:00Z');
+  b.prompt('U1', null, 'Pick up the caching work.')
+    .hookContext('RC', 'U1', ['Branch: main', '[hive recall] Entries from this project: the cache key moved.'])
+    .say('A1', 'RC', 'msg_fd2_1', 'Continuing from the moved cache key.')
+    .prompt('U2', 'A1', 'Now the tests.')
+    .hookContext('HC', 'U2', ['Branch: main'])
+    .say('A2', 'HC', 'msg_fd2_2', 'Running them.');
+  return fixture('recall', b);
 }
 
 // One record for each cause that changed entry numbers at the switch from the old parser: legacy

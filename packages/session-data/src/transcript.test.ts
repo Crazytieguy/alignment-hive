@@ -2,7 +2,7 @@
 import { describe, expect, test } from 'bun:test';
 import { hiddenBy } from './noise';
 import { leanRecord, readRecords } from './records';
-import { branchFixtures, migrationFixture, overlapFixtures, plumbingFixture } from './test-fixtures';
+import { branchFixtures, migrationFixture, overlapFixtures, plumbingFixture, recallFixture } from './test-fixtures';
 import { parseTranscript, readTranscript } from './transcript';
 
 const J = (...rs: Array<object>) => rs.map((r) => JSON.stringify(r)).join('\n') + '\n';
@@ -311,7 +311,7 @@ describe('entries', () => {
 
 describe('leanRecord', () => {
   test('a lean parse is the full one; only payloads readTranscript never reads go', () => {
-    const fixtures = [...branchFixtures(), ...overlapFixtures(), plumbingFixture(), migrationFixture()];
+    const fixtures = [...branchFixtures(), ...overlapFixtures(), plumbingFixture(), recallFixture(), migrationFixture()];
     const contents = fixtures.flatMap((f) =>
       f.files.filter((file) => file.path.endsWith('.jsonl')).map((file) => file.content),
     );

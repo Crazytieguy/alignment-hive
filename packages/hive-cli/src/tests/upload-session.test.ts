@@ -147,7 +147,7 @@ describe('readParseableRunBlobs', () => {
 });
 
 describe('readAndSanitizeSession', () => {
-  test('upload records keep titles, queued messages and chain stubs, redact secrets, and number like the local file', async () => {
+  test('upload records keep titles, queued messages, recall reports and chain stubs, redact secrets, and number like the local file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'hive-fields-'));
     try {
       const token = 'ghp_1a2B3c4D5e6F7g8H9i0J1k2L3m4N5o6P7qRs';
@@ -174,6 +174,15 @@ describe('readAndSanitizeSession', () => {
           { type: 'custom-title', customTitle: 'kept since titles name sessions' },
           { type: 'attachment', uuid: 'q', attachment: { type: 'queued_command', prompt: `also ${token}`, cwd: '/x' } },
           { type: 'attachment', uuid: 'h', attachment: { type: 'hook_success', stdout: 'local only' } },
+          {
+            type: 'attachment',
+            uuid: 'r',
+            attachment: {
+              type: 'hook_additional_context',
+              content: ['other hook: local only', `[hive recall] Entries: deploy with ${token}`],
+              hookName: 'UserPromptSubmit',
+            },
+          },
         ]
           .map((entry) => JSON.stringify(entry))
           .join('\n'),
@@ -194,6 +203,7 @@ describe('readAndSanitizeSession', () => {
         'custom-title',
         'attachment',
         'attachment',
+        'attachment',
       ]);
       expect(sanitizedEntries[0]).toMatchObject({
         toolUseResult: { status: 'completed', agentId: 'a', description: 'review' },
@@ -204,8 +214,16 @@ describe('readAndSanitizeSession', () => {
         attachment: { type: 'queued_command', prompt: expect.stringContaining('also [REDACTED:') },
       });
       expect(sanitizedEntries[6]).toEqual({ type: 'attachment', uuid: 'h' });
+      expect(sanitizedEntries[7]).toEqual({
+        type: 'attachment',
+        uuid: 'r',
+        attachment: {
+          type: 'hook_additional_context',
+          content: [expect.stringContaining('[hive recall] Entries: deploy with [REDACTED:')],
+        },
+      });
       // The web's Lines column: every record but the title and the hook's id-only stub.
-      expect(lineCount).toBe(5);
+      expect(lineCount).toBe(6);
       const uploaded = parseTranscript(sanitizedEntries.map((entry) => JSON.stringify(entry)).join('\n'));
       const local = parseTranscript(await Bun.file(path).text());
       expect(uploaded.entries.map((e) => [e.n, e.kind, e.uuid])).toEqual(
@@ -213,6 +231,7 @@ describe('readAndSanitizeSession', () => {
       );
       const text = JSON.stringify(sanitizedEntries);
       expect(text).not.toContain(token);
+      expect(text).not.toContain('local only');
       expect(text).toContain('[REDACTED:');
       expect(JSON.stringify(sanitizedEntries[0])).toContain('inspect [REDACTED:');
       for (const entry of sanitizedEntries.slice(2, 4)) expect(JSON.stringify(entry)).toContain('[REDACTED:');

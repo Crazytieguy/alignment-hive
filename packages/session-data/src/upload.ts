@@ -1,11 +1,11 @@
 /**
  * What an upload keeps of each transcript record, before secret sanitizing: conversation records,
  * titles and request records whole (toolUseResult pared, base64 payloads stripped), queued messages
- * pared to what the parser reads, and of any other record with a uuid only its place in the parent
- * chain.
+ * and automatic recall's reports pared to what the parser reads, and of any other record with a uuid
+ * only its place in the parent chain.
  */
 import { z } from 'zod';
-import { isQueuedCommand } from './transcript';
+import { isQueuedCommand, numbersFor, recallContext } from './transcript';
 import { isRequestType } from './records';
 import type { RawRecord } from './records';
 
@@ -39,14 +39,18 @@ const ToolUseResultSchema = z.object({
   prompt: z.string().optional().catch(undefined),
 });
 
-/** A queued message keeps only the fields the parser reads from it; other attachments stay local. */
-const QueuedCommandSchema = z.object({
+/** Of a numbered attachment record, the fields the parser reads outside the attachment itself. */
+const AttachmentRecordSchema = z.object({
   type: z.literal('attachment'),
   uuid: z.string().optional().catch(undefined),
   parentUuid: z.string().nullable().optional().catch(undefined),
   timestamp: z.string().optional().catch(undefined),
   isSidechain: z.boolean().optional().catch(undefined),
   isMeta: z.boolean().optional().catch(undefined),
+});
+
+/** A queued message keeps only the fields the parser reads from it; other attachments stay local. */
+const QueuedCommandSchema = AttachmentRecordSchema.extend({
   attachment: z.object({
     type: z.literal('queued_command'),
     prompt: z.unknown(),
@@ -73,17 +77,24 @@ function stripBinary(value: unknown): unknown {
 /**
  * What an upload keeps of a record (before secret sanitizing), or undefined for a record that
  * stays local. Request records (see isRequestType) go whole, for research that replays a request;
- * they take no entry number and count as no line. Any
- * other record with a uuid keeps only its place in the parent chain (type, uuid, parentUuid), so an
- * uploaded copy finds the same rewinds.
+ * they take no entry number and count as no line. Automatic recall's report keeps its text alone,
+ * not the context other hooks added beside it. Any other record with a uuid keeps only its place in
+ * the parent chain (type, uuid, parentUuid), so an uploaded copy finds the same rewinds.
  */
 export function uploadRecord(r: RawRecord): Record<string, unknown> | undefined {
   const kept = UPLOADED_TYPES.has(r.type) || isRequestType(r.type)
     ? withToolUseResult(r.data)
     : isQueuedCommand(r)
       ? QueuedCommandSchema.parse(r.data)
-      : chainStub(r);
+      : (recallRecord(r) ?? chainStub(r));
   return kept && (stripBinary(kept) as Record<string, unknown>);
+}
+
+/** Automatic recall's report as uploaded: the record fields the parser reads and the recall text alone. */
+function recallRecord(r: RawRecord): Record<string, unknown> | undefined {
+  const recall = recallContext(r);
+  if (recall === undefined) return undefined;
+  return { ...AttachmentRecordSchema.parse(r.data), attachment: { type: 'hook_additional_context', content: [recall] } };
 }
 
 /** What an upload keeps of a record that stays local: its place in the parent chain, if it has one. */
@@ -99,9 +110,10 @@ function withToolUseResult(data: Record<string, unknown>): Record<string, unknow
 }
 
 /**
- * Whether an uploaded record counts toward the session's line count: the conversation's records,
- * not titles, request records or the id-only stubs of records that stay local.
+ * Whether an uploaded record counts toward the session's line count: the conversation's records and
+ * the attachments that take an entry number (queued messages, recall's reports), not titles, request
+ * records or the id-only stubs of records that stay local.
  */
 export function countsAsLine(r: RawRecord): boolean {
-  return (UPLOADED_TYPES.has(r.type) && !TITLE_TYPES.has(r.type)) || isQueuedCommand(r);
+  return (UPLOADED_TYPES.has(r.type) && !TITLE_TYPES.has(r.type)) || (r.type === 'attachment' && numbersFor(r) > 0);
 }

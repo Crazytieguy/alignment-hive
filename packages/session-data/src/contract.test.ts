@@ -4,12 +4,12 @@
 import { describe, expect, test } from 'bun:test';
 import { hiddenBy } from './noise';
 import { readRecords } from './records';
-import { branchFixtures, migrationFixture, overlapFixtures, plumbingFixture } from './test-fixtures';
+import { branchFixtures, migrationFixture, overlapFixtures, plumbingFixture, recallFixture } from './test-fixtures';
 import { parseTranscript } from './transcript';
 import { uploadRecord } from './upload';
 import type { Entry } from './transcript';
 
-const files = [...branchFixtures(), ...overlapFixtures(), plumbingFixture(), migrationFixture()].flatMap((f) =>
+const files = [...branchFixtures(), ...overlapFixtures(), plumbingFixture(), recallFixture(), migrationFixture()].flatMap((f) =>
   f.files
     .filter((file) => file.path.endsWith('.jsonl'))
     .map((file) => ({ name: `${f.name}/${file.path}`, content: file.content })),
@@ -41,17 +41,23 @@ describe('numbering contract', () => {
   });
 
   test('(c) an uploaded copy gives every identity the same number and branch state', () => {
-    for (const { name, content } of files) {
-      const local = parseTranscript(content).entries;
+    const uploadedCopy = (content: string) => {
       const kept = readRecords(content).records.flatMap((r) => uploadRecord(r) ?? []);
       const header = JSON.stringify({ _type: 'session-meta', version: '0.1', sessionId: 's' });
-      const uploaded = parseTranscript([header, ...kept.map((r) => JSON.stringify(r))].join('\n') + '\n').entries;
+      return parseTranscript([header, ...kept.map((r) => JSON.stringify(r))].join('\n') + '\n').entries;
+    };
+    for (const { name, content } of files) {
+      const local = parseTranscript(content).entries;
       const facts = (e: Entry) => [...identity(e), e.branch, e.resumes];
-      expect([name, uploaded.map(facts)]).toEqual([name, local.map(facts)]);
+      expect([name, uploadedCopy(content).map(facts)]).toEqual([name, local.map(facts)]);
     }
     // The plumbing fixture's rewind runs through a hook attachment and a progress record.
     const plumbing = parseTranscript(plumbingFixture().files[0].content).entries;
     expect(plumbing.map((e) => e.branch ?? '')).toEqual(['', '', 'abandoned', 'abandoned', 'abandoned', '', '']);
+    // Recall's report uploads as the same entry, text and origin included.
+    const recall = recallFixture().files[0].content;
+    expect(uploadedCopy(recall)).toEqual(parseTranscript(recall).entries);
+    expect(parseTranscript(recall).entries[1]).toMatchObject({ n: 2, kind: 'user', origin: 'recall' });
   });
 
   test('(d) the change from the old numbering, classified by cause', () => {

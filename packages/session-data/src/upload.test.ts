@@ -48,6 +48,37 @@ describe('the upload field set', () => {
     expect(readRecords(J(shape, request, blob)).records.some(countsAsLine)).toBe(false);
   });
 
+  test("attachments: recall's report reduced to its text and the fields the parser reads; other hook context stays local", () => {
+    const recall = '[hive recall] Entries from this project.';
+    const context = (uuid: string, content: Array<string>) => ({
+      type: 'attachment',
+      uuid,
+      parentUuid: 'p',
+      timestamp: 't',
+      isSidechain: false,
+      isMeta: true,
+      cwd: '/private/path',
+      sessionId: 's',
+      attachment: { type: 'hook_additional_context', content, hookName: 'UserPromptSubmit', toolUseID: 'x' },
+    });
+    const out = project(context('r', ['Branch: private', recall]), context('h', ['Branch: private']));
+    expect(out).toEqual([
+      {
+        type: 'attachment',
+        uuid: 'r',
+        parentUuid: 'p',
+        timestamp: 't',
+        isSidechain: false,
+        isMeta: true,
+        attachment: { type: 'hook_additional_context', content: [recall] },
+      },
+      { type: 'attachment', uuid: 'h', parentUuid: 'p' },
+    ]);
+    const [noUuid] = project({ type: 'attachment', attachment: { type: 'hook_additional_context', content: [recall] } });
+    expect(noUuid).toEqual({ type: 'attachment', attachment: { type: 'hook_additional_context', content: [recall] } });
+    expect(parseTranscript(J(noUuid!)).entries).toEqual([{ n: 1, kind: 'user', text: recall, origin: 'recall' }]);
+  });
+
   test('attachments: queued messages reduced to the fields the parser reads; others to their place in the chain', () => {
     const out = project(
       {
@@ -143,9 +174,11 @@ describe('the upload field set', () => {
         { type: 'progress', uuid: 'p' },
         { type: 'attachment', uuid: 'q', attachment: { type: 'queued_command', prompt: 'also' } },
         { type: 'attachment', uuid: 'h', attachment: { type: 'hook_success' } },
+        { type: 'attachment', uuid: 'r', attachment: { type: 'hook_additional_context', content: ['[hive recall] x'] } },
+        { type: 'attachment', uuid: 'c', attachment: { type: 'hook_additional_context', content: ['other'] } },
       ),
     );
-    expect(records.filter(countsAsLine).map((r) => r.uuid ?? r.type)).toEqual(['u', 'summary', 'q']);
+    expect(records.filter(countsAsLine).map((r) => r.uuid ?? r.type)).toEqual(['u', 'summary', 'q', 'r']);
   });
 
   test('base64 payloads are dropped wherever they are; media types stay', () => {

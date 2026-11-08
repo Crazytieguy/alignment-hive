@@ -107,7 +107,7 @@ export function isQueuedCommand(r: RawRecord): boolean {
 }
 
 /** Automatic recall's report, which Claude Code stores as context a hook added to the prompt. */
-function recallContext(r: RawRecord): string | undefined {
+export function recallContext(r: RawRecord): string | undefined {
   const a = obj(r.data.attachment);
   if (r.type !== 'attachment' || a?.type !== 'hook_additional_context' || !Array.isArray(a.content)) return undefined;
   return a.content.find((c): c is string => typeof c === 'string' && isRecallText(c));
