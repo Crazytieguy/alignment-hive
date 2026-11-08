@@ -304,15 +304,19 @@ install_hive_binary() {
 
 # --- Auth helpers ---
 
+# Written to a mktemp file (600 from creation) and moved into place, so the tokens are never
+# readable by others. On a failure the auth file is left as it was.
 save_auth() {
-  local response="$1" authenticated_at="${2:-}"
+  local response="$1" authenticated_at="${2:-}" tmp
   mkdir -p "$AUTH_DIR"
+  chmod 700 "$AUTH_DIR"
+  tmp=$(mktemp "$AUTH_FILE.XXXXXX") || return 1
   if [ -n "$authenticated_at" ]; then
-    echo "$response" | $JQ --argjson at "$authenticated_at" '. + {authenticated_at: $at}' > "$AUTH_FILE"
+    echo "$response" | $JQ --argjson at "$authenticated_at" '. + {authenticated_at: $at}' > "$tmp" || { rm -f "$tmp"; return 1; }
   else
-    echo "$response" > "$AUTH_FILE"
+    echo "$response" > "$tmp"
   fi
-  chmod 600 "$AUTH_FILE"
+  mv "$tmp" "$AUTH_FILE"
 }
 
 # --- Step 6: Check existing auth ---
@@ -340,7 +344,9 @@ check_auth() {
 
   local authenticated_at
   authenticated_at=$($JQ -r '.authenticated_at // empty' "$AUTH_FILE" 2>/dev/null || true)
-  save_auth "$response" "$authenticated_at"
+  # A login this script can't save is lost (WorkOS has already rotated the refresh token), so
+  # it falls through to signing in again.
+  save_auth "$response" "$authenticated_at" || return 1
 
   local email
   email=$(echo "$response" | $JQ -r '.user.email // "unknown"')
@@ -391,7 +397,10 @@ device_auth_flow() {
     err=$(echo "$token_response" | $JQ -r '.error // empty')
 
     if [ -z "$err" ]; then
-      save_auth "$token_response" "$(date +%s)000"
+      if ! save_auth "$token_response" "$(date +%s)000"; then
+        error "Couldn't save the login to $AUTH_FILE."
+        return 1
+      fi
 
       local email first_name
       email=$(echo "$token_response" | $JQ -r '.user.email // "unknown"')
