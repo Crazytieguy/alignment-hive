@@ -74,6 +74,40 @@ acquire_lock() {
   mkdir "$LOCK" 2>/dev/null
 }
 
+# The first hive-cli release published with SHA256SUMS. Older ones have none, so their binary
+# installs unverified; from this one on, a binary that can't be checked against it isn't installed.
+FIRST_SUMMED_CLI_VERSION="0.2.15"
+
+# The SHA-256 of file $1; fails when there's no sha256sum or shasum.
+sha256() {
+  local sum
+  if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum < "$1") || return 1
+  elif command -v shasum >/dev/null 2>&1; then sum=$(shasum -a 256 < "$1") || return 1
+  else return 1
+  fi
+  echo "${sum%% *}"
+}
+
+# Whether version $1 is older than $2, both X.Y.Z; false when either isn't.
+older() {
+  [[ "$1" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  local a=$((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
+  [[ "$2" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  local b=$((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
+  (( a < b ))
+}
+
+# Checks file $1, the release asset named $2, against the SHA256SUMS of the release at URL $3.
+# When it doesn't pass, prints why and fails.
+check_release_sum() {
+  local sums expected actual
+  sums=$(curl -fsSL "$3/SHA256SUMS" 2>/dev/null) || { echo "couldn't fetch the release's SHA256SUMS"; return 1; }
+  expected=$(awk -v name="$2" '$2 == name { print $1 }' <<< "$sums")
+  [ -n "$expected" ] || { echo "the release's SHA256SUMS doesn't list $2"; return 1; }
+  actual=$(sha256 "$1") || { echo "found no sha256sum or shasum to check it with"; return 1; }
+  [ "$actual" = "$expected" ] || { echo "it doesn't match the release's SHA256SUMS (expected $expected, got $actual)"; return 1; }
+}
+
 if [ ! -x "$BINARY" ]; then
   mkdir -p "$CACHE_DIR"
   # Partial downloads that a kill on the hook's timeout left behind.
@@ -91,6 +125,14 @@ if [ ! -x "$BINARY" ]; then
       echo "Downloading hive-cli v${VERSION} for ${TARGET}..." >&2
       if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMPFILE"; then
         echo "Failed to download hive-cli v${VERSION} from $DOWNLOAD_URL" >&2
+        install_notice update-failed problem "CLI update failed"
+        exit 0
+      fi
+
+      if older "$VERSION" "$FIRST_SUMMED_CLI_VERSION"; then
+        echo "hive-cli v${VERSION} was released before SHA256SUMS; installing it unverified" >&2
+      elif ! PROBLEM=$(check_release_sum "$TMPFILE" "$BINARY_NAME" "${DOWNLOAD_URL%/*}"); then
+        echo "Not installing hive-cli v${VERSION} for ${TARGET}: $PROBLEM" >&2
         install_notice update-failed problem "CLI update failed"
         exit 0
       fi
@@ -115,15 +157,6 @@ if [ ! -x "$BINARY" ]; then
     fi
   fi
 fi
-
-# Whether version $1 is older than $2, both X.Y.Z; false when either isn't.
-older() {
-  [[ "$1" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
-  local a=$((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
-  [[ "$2" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
-  local b=$((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
-  (( a < b ))
-}
 
 # Every start, not only after a download: the symlink must track this plugin's cli-version,
 # not whichever version was downloaded last. It never moves back to an older version, though,

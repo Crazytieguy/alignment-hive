@@ -110,6 +110,12 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # install.sh and the hive plugin's bootstrap.sh check each download against it, and refuse one
+      # they can't check from FIRST_SUMMED_CLI_VERSION (0.2.15) on.
+      - name: Checksum the binaries
+        working-directory: dist
+        run: sha256sum hive-cli-* > SHA256SUMS
+
       - name: Create tag and release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -118,6 +124,6 @@ jobs:
           TAG="hive-cli-v${VERSION}"
           git tag "$TAG"
           git push origin "$TAG"
-          gh release create "$TAG" dist/hive-cli-* \
+          gh release create "$TAG" dist/hive-cli-* dist/SHA256SUMS \
             --title "hive-cli v${VERSION}" \
             --generate-notes

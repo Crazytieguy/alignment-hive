@@ -41,6 +41,9 @@ CLAUDE_PLUGINS_DIR="$(resolve_claude_config_dir)/plugins"
 KNOWN_MARKETPLACES="$CLAUDE_PLUGINS_DIR/known_marketplaces.json"
 INSTALLED_PLUGINS="$CLAUDE_PLUGINS_DIR/installed_plugins.json"
 JQ=""
+# The first hive-cli release published with SHA256SUMS. Older ones have none, so their binary
+# installs unverified; from this one on, a binary that can't be checked against it isn't installed.
+FIRST_SUMMED_CLI_VERSION="0.2.15"
 
 # --- Output helpers ---
 
@@ -62,6 +65,36 @@ info()    { echo "  ${BOLD}$1${RESET}"; }
 success() { echo "  ${GREEN}$1${RESET}"; }
 warn()    { echo "  ${YELLOW}$1${RESET}"; }
 error()   { echo "  ${RED}$1${RESET}" >&2; }
+
+# The SHA-256 of file $1; fails when there's no sha256sum or shasum.
+sha256() {
+  local sum
+  if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum < "$1") || return 1
+  elif command -v shasum >/dev/null 2>&1; then sum=$(shasum -a 256 < "$1") || return 1
+  else return 1
+  fi
+  echo "${sum%% *}"
+}
+
+# Whether version $1 is older than $2, both X.Y.Z; false when either isn't.
+older() {
+  [[ "$1" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  local a=$((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
+  [[ "$2" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  local b=$((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
+  (( a < b ))
+}
+
+# Checks file $1, the release asset named $2, against the SHA256SUMS of the release at URL $3.
+# When it doesn't pass, prints why and fails.
+check_release_sum() {
+  local sums expected actual
+  sums=$(curl -fsSL "$3/SHA256SUMS" 2>/dev/null) || { echo "couldn't fetch the release's SHA256SUMS"; return 1; }
+  expected=$(awk -v name="$2" '$2 == name { print $1 }' <<< "$sums")
+  [ -n "$expected" ] || { echo "the release's SHA256SUMS doesn't list $2"; return 1; }
+  actual=$(sha256 "$1") || { echo "found no sha256sum or shasum to check it with"; return 1; }
+  [ "$actual" = "$expected" ] || { echo "it doesn't match the release's SHA256SUMS (expected $expected, got $actual)"; return 1; }
+}
 
 # --- Step 1: Check claude CLI ---
 
@@ -104,6 +137,14 @@ ensure_jq() {
   esac
 
   local url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-${os_name}-${arch_name}"
+  # From the jq-1.7.1 release's sha256sum.txt.
+  local expected
+  case "${os_name}-${arch_name}" in
+    linux-amd64) expected="5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5" ;;
+    linux-arm64) expected="4dd2d8a0661df0b22f1bb9a1f9830f06b6f3b8f7d91211a1ef5d7c4f06a8b4a5" ;;
+    macos-amd64) expected="4155822bbf5ea90f5c79cf254665975eb4274d426d0709770c21774de5407443" ;;
+    macos-arm64) expected="0bbe619e663e0de2c550be2fe0d240d076799d6f8a652b70fa04aea8a8362e8a" ;;
+  esac
 
   info "Downloading jq..."
   mkdir -p "$JQ_CACHE_DIR"
@@ -111,6 +152,18 @@ ensure_jq() {
   if ! curl -fSL "$url" -o "$JQ_BINARY" 2>/dev/null; then
     rm -f "$JQ_BINARY"
     error "Failed to download jq. Install jq manually and re-run."
+    exit 1
+  fi
+
+  local actual
+  if ! actual=$(sha256 "$JQ_BINARY"); then
+    rm -f "$JQ_BINARY"
+    error "Found no sha256sum or shasum to check the jq download with. Install jq manually and re-run."
+    exit 1
+  fi
+  if [ "$actual" != "$expected" ]; then
+    rm -f "$JQ_BINARY"
+    error "Downloaded jq doesn't match its published checksum. Install jq manually and re-run."
     exit 1
   fi
 
@@ -264,16 +317,29 @@ install_hive_binary() {
     local binary_name="hive-cli-${target}"
     local download_url="https://github.com/Crazytieguy/alignment-hive/releases/download/hive-cli-v${version}/${binary_name}"
 
+    # Downloaded beside the binary and moved into place once checked. bootstrap.sh clears
+    # leftover .hive.tmp.* files.
+    local tmp="$cache_dir/.hive.tmp.$$" problem
+
     info "Downloading hive binary v${version}..."
     mkdir -p "$cache_dir"
 
-    if ! curl -fSL "$download_url" -o "$binary" 2>/dev/null; then
-      rm -f "$binary"
+    if ! curl -fSL "$download_url" -o "$tmp" 2>/dev/null; then
+      rm -f "$tmp"
       error "Failed to download hive binary v${version}."
       exit 1
     fi
 
-    chmod +x "$binary"
+    if older "$version" "$FIRST_SUMMED_CLI_VERSION"; then
+      warn "hive-cli v${version} was released before SHA256SUMS; installing the binary unverified."
+    elif ! problem=$(check_release_sum "$tmp" "$binary_name" "${download_url%/*}"); then
+      rm -f "$tmp"
+      error "Not installing hive binary v${version}: ${problem}."
+      exit 1
+    fi
+
+    chmod +x "$tmp"
+    mv "$tmp" "$binary"
   fi
 
   # Symlink to ~/.local/bin

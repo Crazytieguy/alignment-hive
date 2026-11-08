@@ -1,9 +1,23 @@
 // public/install.sh, run function by function in a scratch HOME: the script is sourced without
 // its `main` call, so nothing reaches Claude Code, WorkOS or the network.
-import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Each test runs bash a few times, which on a busy machine takes seconds.
+setDefaultTimeout(20_000);
 
 const installSh = join(import.meta.dir, "..", "public", "install.sh");
 const root = mkdtempSync(join(tmpdir(), "install-sh-"));
@@ -21,13 +35,36 @@ const functions = join(root, "install-functions.sh");
 writeFileSync(functions, readFileSync(installSh, "utf8").replace(/^main "\$@"$/m, ""));
 
 /** Runs `script` after install.sh's functions are loaded, under the common umask 022. */
-function runInstaller(home: string, script: string) {
+function runInstaller(home: string, script: string, { path = process.env.PATH, mayFail = false } = {}) {
   const result = Bun.spawnSync(["bash", "-c", `umask 022; source "$1"; ${script}`, "bash", functions], {
-    env: { PATH: process.env.PATH, HOME: home },
+    env: { PATH: path, HOME: home, FAKE_RELEASE: join(home, "release") },
   });
-  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
-  return result;
+  if (result.exitCode !== 0 && !mayFail) throw new Error(result.stderr.toString());
+  return { exitCode: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
 }
+
+// A curl that answers any URL with the file of that name in $FAKE_RELEASE ($HOME/release), and
+// fails like a 404 for one it doesn't hold.
+const fakeBin = join(root, "bin");
+mkdirSync(fakeBin);
+writeFileSync(
+  join(fakeBin, "curl"),
+  `#!/bin/bash
+out=""; url=""
+while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac; done
+src="$FAKE_RELEASE/\${url##*/}"
+[ -f "$src" ] || exit 22
+if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
+`,
+);
+chmodSync(join(fakeBin, "curl"), 0o755);
+
+function release(home: string, assets: Record<string, string>) {
+  mkdirSync(join(home, "release"));
+  for (const [name, content] of Object.entries(assets)) writeFileSync(join(home, "release", name), content);
+}
+
+const sha256 = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex");
 
 const mode = (path: string) => statSync(path).mode & 0o777;
 
@@ -80,5 +117,75 @@ describe("install.sh save_auth", () => {
     expect(() => runInstaller(home, `JQ=jq; save_auth '{"refresh_token":"new"}' notanumber`)).toThrow();
     expect(readdirSync(dir)).toEqual(["auth.json"]);
     expect(readFileSync(join(dir, "auth.json"), "utf8")).toBe('{"refresh_token":"old"}');
+  });
+});
+
+describe("install.sh hive binary download", () => {
+  const target = `${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
+  const binaryName = `hive-cli-${target}`;
+  const BINARY = "#!/bin/sh\necho hive\n";
+
+  /** A scratch HOME where the hive plugin pins cli-version `version`, and the release holds `assets`. */
+  function install(assets: Record<string, string>, version = "9.9.9") {
+    const home = scratchHome();
+    mkdirSync(join(home, "plugin"));
+    writeFileSync(join(home, "plugin", "cli-version"), `${version}\n`);
+    mkdirSync(join(home, ".claude", "plugins"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "plugins", "installed_plugins.json"),
+      JSON.stringify({ plugins: { "hive@alignment-hive": [{ installPath: join(home, "plugin") }] } }),
+    );
+    release(home, assets);
+    const result = runInstaller(home, "JQ=jq; install_hive_binary", { path: `${fakeBin}:${process.env.PATH}`, mayFail: true });
+    const cacheDir = join(home, ".cache", "hive", `v${version}`);
+    return { ...result, binary: join(cacheDir, "hive"), cached: existsSync(cacheDir) ? readdirSync(cacheDir) : [] };
+  }
+
+  test("a binary matching the release's SHA256SUMS is installed", () => {
+    const result = install({ [binaryName]: BINARY, SHA256SUMS: `${sha256(BINARY)}  ${binaryName}\n` });
+    expect(result.exitCode).toBe(0);
+    expect(result.cached).toEqual(["hive"]);
+    expect(mode(result.binary)).toBe(0o755);
+  });
+
+  test("a binary that doesn't match, that SHA256SUMS doesn't list, or without SHA256SUMS, is refused and removed", () => {
+    const cases: [Record<string, string>, string][] = [
+      [{ SHA256SUMS: `${sha256("other")}  ${binaryName}\n` }, "it doesn't match the release's SHA256SUMS"],
+      [{ SHA256SUMS: `${sha256(BINARY)}  hive-cli-other\n` }, `the release's SHA256SUMS doesn't list ${binaryName}`],
+      [{}, "couldn't fetch the release's SHA256SUMS"],
+    ];
+    for (const [assets, why] of cases) {
+      const result = install({ [binaryName]: BINARY, ...assets });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain(`Not installing hive binary v9.9.9: ${why}`);
+      expect(result.cached).toEqual([]);
+    }
+  });
+
+  test("a release from before SHA256SUMS still installs, with a warning", () => {
+    const result = install({ [binaryName]: BINARY }, "0.2.14");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("hive-cli v0.2.14 was released before SHA256SUMS; installing the binary unverified.");
+    expect(mode(result.binary)).toBe(0o755);
+  });
+});
+
+describe("install.sh jq download", () => {
+  test("a jq that doesn't match its pinned checksum is refused and removed", () => {
+    // A PATH without jq, so the installer downloads one, from the fake curl.
+    const tools = join(root, "tools");
+    mkdirSync(tools);
+    for (const tool of ["bash", "uname", "tr", "mkdir", "chmod", "rm", "awk", "cp", "cat", "shasum", "sha256sum"]) {
+      const found = Bun.which(tool);
+      if (found) symlinkSync(found, join(tools, tool));
+    }
+    symlinkSync(join(fakeBin, "curl"), join(tools, "curl"));
+    const home = scratchHome();
+    const os = process.platform === "darwin" ? "macos" : "linux";
+    release(home, { [`jq-${os}-${process.arch === "arm64" ? "arm64" : "amd64"}`]: "#!/bin/sh\necho jq-1.7.1\n" });
+    const result = runInstaller(home, "ensure_jq", { path: tools, mayFail: true });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("doesn't match its published checksum");
+    expect(existsSync(join(home, ".cache", "alignment-hive", "jq"))).toBe(false);
   });
 });
