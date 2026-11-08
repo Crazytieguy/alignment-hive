@@ -20,7 +20,7 @@ import { getClaudeProjectDir, isSharingDisabledLocally, readStateFile, statePath
 import { generateUploadUrls, getConsentHistory, saveUploads, saveWorkflowRuns } from './convex';
 import { hive } from './messages';
 import { fileSessionSummary } from './session-facts';
-import { chunk, mapBatched } from './batch';
+import { allSettledFirstError, chunk, mapBatched } from './batch';
 import { escapeRegExp } from './grep-prefilter';
 import { buildSessionMeta } from './session-format';
 import { sanitizeDeep, sanitizeRecord, sanitizeString } from './sanitize';
@@ -468,7 +468,8 @@ async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadRes
     },
   ]);
 
-  // 2. Agents in chunks: one URL mint, concurrent blob uploads, one save per chunk.
+  // 2. Agents in chunks: one URL mint, concurrent blob uploads, one save per chunk. A failed
+  //    upload is reported only once the chunk's others settle, so none outlives the result.
   for (const batch of chunk(agents, UPLOAD_CHUNK)) {
     await assertNoVeto();
     const urls = await generateUploadUrls(
@@ -476,7 +477,7 @@ async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadRes
       batch.map((a) => a.sessionId),
       consentIds,
     );
-    const uploads = await Promise.all(
+    const uploads = await allSettledFirstError(
       batch.map(async (agent): Promise<UploadRecord> => {
         const url = urls[agent.sessionId];
         if (!url) throw new Error('No upload URL for agent');
@@ -521,7 +522,7 @@ async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadRes
         consentIds,
         batch.map((r) => r.row.workflowRunId),
       );
-      const saveRuns = await Promise.all(
+      const saveRuns = await allSettledFirstError(
         batch.map(async (run): Promise<WorkflowRunUpload> => {
           const url = urls[run.row.workflowRunId];
           if (!url) throw new Error('No upload URL for workflow run');
