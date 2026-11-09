@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const hook = fileURLToPath(new URL('./register-transcript-dir.sh', import.meta.url));
@@ -53,8 +53,12 @@ describe('hive PostToolUse register-transcript-dir', () => {
     mkdirSync(cache, { recursive: true });
     const moved = transcript('-no-jq');
     writeFileSync(join(cache, 'jq'), `#!/bin/bash\ncase "$2" in *transcript_path*) echo '${moved.path}' ;; *) echo '${main}' ;; esac\n`, { mode: 0o755 });
-    const path = (process.env.PATH ?? '').split(delimiter).filter((dir) => !existsSync(join(dir, 'jq')) && !existsSync(join(dir, 'jq.exe'))).join(delimiter);
-    const result = Bun.spawnSync(['bash', hook], { cwd: main, stdin: Buffer.from('{}'), env: { ...process.env, PATH: path, HOME: home, CLAUDE_PLUGIN_ROOT: pluginRoot } });
+    // Only the tools the hook runs: dropping each PATH dir that holds a jq would drop /usr/bin where
+    // jq ships there (macOS 15+, Ubuntu), and git, dirname, head and sed with it.
+    const bin = join(root, 'bin-no-jq');
+    mkdirSync(bin);
+    for (const tool of ['bash', 'cat', 'dirname', 'git', 'grep', 'head', 'mkdir', 'sed']) symlinkSync(Bun.which(tool)!, join(bin, tool));
+    const result = Bun.spawnSync([join(bin, 'bash'), hook], { cwd: main, stdin: Buffer.from('{}'), env: { ...process.env, PATH: bin, HOME: home, CLAUDE_PLUGIN_ROOT: pluginRoot } });
     expect([result.exitCode, result.stderr.toString()]).toEqual([0, '']);
     expect(readFileSync(registry, 'utf8').trim().split('\n').at(-1)).toBe(moved.dir);
   });

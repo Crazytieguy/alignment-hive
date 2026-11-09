@@ -2,7 +2,7 @@
 
 # jq from PATH, else the copy install.sh downloads when the machine has none.
 JQ=jq
-command -v jq >/dev/null 2>&1 || JQ="$HOME/.cache/alignment-hive/jq"
+command -v jq >/dev/null 2>&1 || JQ="${HOME:-}/.cache/alignment-hive/jq"
 
 # The CLI's state dir: <main worktree>/.claude/hive (resolved from the cwd), or $1/.claude/hive outside a repo.
 resolve_state_dir() {
