@@ -64,7 +64,11 @@ export function toClaudeProjectDirName(absolutePath: string): string {
 /** Where Claude Code keeps every project's transcript directory: under CLAUDE_CONFIG_DIR when set, else ~/.claude. */
 export function claudeProjectsRoot(): string {
   const dir = process.env.CLAUDE_CONFIG_DIR;
-  const config = dir ? (dir.startsWith('~/') ? join(homedir(), dir.slice(2)) : resolve(dir)) : join(homedir(), '.claude');
+  const config = dir
+    ? dir.startsWith('~/')
+      ? join(homedir(), dir.slice(2))
+      : resolve(dir)
+    : join(homedir(), '.claude');
   return join(config, 'projects');
 }
 
@@ -136,6 +140,43 @@ export interface ProjectIds {
 }
 
 /**
+ * Normalize an origin remote URL to host/path (e.g. github.com/owner/repo),
+ * stripping protocol schemes, auth credentials, port numbers, trailing slashes,
+ * and .git suffixes. Returns undefined if the URL cannot be parsed.
+ */
+export function normalizeGitRemote(remoteUrl: string): string | undefined {
+  const trimmed = remoteUrl.trim();
+  if (!trimmed) return undefined;
+
+  // Local file paths (Unix absolute, relative, or Windows drive letter)
+  if (/^(?:[a-zA-Z]:[\\/]|[/\\.])/.test(trimmed)) {
+    return undefined;
+  }
+
+  const scpMatch = trimmed.match(/^(?:[^@/]+@)?([^:/]+):(.+)$/);
+  if (scpMatch && !trimmed.includes('://')) {
+    const host = scpMatch[1];
+    const path = scpMatch[2]
+      .replace(/\.git\/?$/, '')
+      .replace(/^\/+/, '')
+      .replace(/\/+$/, '');
+    return path ? `${host}/${path}`.toLowerCase() : undefined;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname;
+    const path = parsed.pathname
+      .replace(/\.git\/?$/, '')
+      .replace(/^\/+/, '')
+      .replace(/\/+$/, '');
+    return host && path ? `${host}/${path}`.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * directory: the main worktree path, or cwd outside a repo.
  * gitRemote: normalized origin URL, or undefined if none.
  */
@@ -146,14 +187,9 @@ export function getProjectIdentifiers(cwd: string): ProjectIds {
       cwd,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    });
 
-    gitRemote = remoteUrl
-      .replace(/^git@/, '')
-      .replace(/^https?:\/\//, '')
-      .replace(':', '/')
-      .replace(/\.git$/, '')
-      .toLowerCase();
+    gitRemote = normalizeGitRemote(remoteUrl);
   } catch {}
 
   return { directory: getMainWorktreePath(cwd) ?? cwd, gitRemote };

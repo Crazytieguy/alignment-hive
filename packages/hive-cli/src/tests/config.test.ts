@@ -7,6 +7,7 @@ import {
   claudeProjectsRoot,
   getOrCreateCheckoutId,
   loadTranscriptsDirs,
+  normalizeGitRemote,
   statePaths,
   toClaudeProjectDirName,
 } from '../lib/config';
@@ -101,5 +102,43 @@ describe('state dir files', () => {
     const ids = await Promise.all([getOrCreateCheckoutId(stateDir), getOrCreateCheckoutId(stateDir)]);
     expect(ids[0]).toBe(ids[1]);
     expect(await getOrCreateCheckoutId(stateDir)).toBe(ids[0]);
+  });
+});
+
+describe('normalizeGitRemote', () => {
+  test('normalizes standard https and scp remotes', () => {
+    expect(normalizeGitRemote('git@github.com:Org/Repo.git')).toBe('github.com/org/repo');
+    expect(normalizeGitRemote('https://github.com/Org/Repo')).toBe('github.com/org/repo');
+    expect(normalizeGitRemote('https://github.com/Org/Repo.git')).toBe('github.com/org/repo');
+  });
+
+  test('strips embedded credentials and tokens', () => {
+    expect(normalizeGitRemote('https://ghp_ABCDEFGH12345678@github.com/Org/Repo.git')).toBe('github.com/org/repo');
+    expect(normalizeGitRemote('https://x-access-token:ghp_ABCDEFGH12345678@github.com/Org/Repo.git')).toBe(
+      'github.com/org/repo',
+    );
+    expect(normalizeGitRemote('https://user:p@ss@github.com/Org/Repo.git')).toBe('github.com/org/repo');
+  });
+
+  test('handles ssh:// and git:// schemes with and without ports', () => {
+    expect(normalizeGitRemote('ssh://git@github.com/Org/Repo.git')).toBe('github.com/org/repo');
+    expect(normalizeGitRemote('ssh://git@github.com:22/Org/Repo.git')).toBe('github.com/org/repo');
+    expect(normalizeGitRemote('git://github.com/Org/Repo.git')).toBe('github.com/org/repo');
+  });
+
+  test('strips trailing slashes and handles nested paths', () => {
+    expect(normalizeGitRemote('https://github.com/Org/Repo/')).toBe('github.com/org/repo');
+    expect(normalizeGitRemote('git@gitlab.com:group/subgroup/repo.git')).toBe('gitlab.com/group/subgroup/repo');
+    expect(normalizeGitRemote('https://gitlab.com/group/subgroup/repo.git')).toBe('gitlab.com/group/subgroup/repo');
+  });
+
+  test('returns undefined for invalid or local path remotes', () => {
+    expect(normalizeGitRemote('/local/path')).toBeUndefined();
+    expect(normalizeGitRemote('C:\\repo')).toBeUndefined();
+    expect(normalizeGitRemote('C:/repo')).toBeUndefined();
+    expect(normalizeGitRemote('./relative/path')).toBeUndefined();
+    expect(normalizeGitRemote('https://github.com/')).toBeUndefined();
+    expect(normalizeGitRemote('')).toBeUndefined();
+    expect(normalizeGitRemote('   ')).toBeUndefined();
   });
 });
