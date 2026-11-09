@@ -126,6 +126,13 @@ describe('normalizeGitRemote', () => {
     expect(normalizeGitRemote('git://github.com/Org/Repo.git')).toBe('github.com/org/repo');
   });
 
+  test('keeps a non-default port, so repos on two services of one host stay apart', () => {
+    expect(normalizeGitRemote('https://git.example.com:8443/team/repo.git')).toBe('git.example.com:8443/team/repo');
+    expect(normalizeGitRemote('https://git.example.com:443/team/repo.git')).toBe('git.example.com/team/repo');
+    expect(normalizeGitRemote('ssh://git@git.example.com:2222/team/repo.git')).toBe('git.example.com:2222/team/repo');
+    expect(normalizeGitRemote('git://git.example.com:9418/team/repo.git')).toBe('git.example.com/team/repo');
+  });
+
   test('strips trailing slashes and handles nested paths', () => {
     expect(normalizeGitRemote('https://github.com/Org/Repo/')).toBe('github.com/org/repo');
     expect(normalizeGitRemote('git@gitlab.com:group/subgroup/repo.git')).toBe('gitlab.com/group/subgroup/repo');

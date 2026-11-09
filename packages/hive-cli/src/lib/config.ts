@@ -139,9 +139,12 @@ export interface ProjectIds {
   gitRemote?: string;
 }
 
+/** Default ports a remote URL may spell out: dropped, as URL drops http(s)'s. */
+const DEFAULT_GIT_PORTS: Record<string, string> = { 'ssh:': '22', 'git+ssh:': '22', 'git:': '9418' };
+
 /**
  * Normalize an origin remote URL to host/path (e.g. github.com/owner/repo),
- * stripping protocol schemes, auth credentials, port numbers, trailing slashes,
+ * stripping protocol schemes, auth credentials, default ports, trailing slashes,
  * and .git suffixes. Returns undefined if the URL cannot be parsed.
  */
 export function normalizeGitRemote(remoteUrl: string): string | undefined {
@@ -165,12 +168,15 @@ export function normalizeGitRemote(remoteUrl: string): string | undefined {
 
   try {
     const parsed = new URL(trimmed);
+    // A non-default port stays: two services on one host may hold unrelated repos at the same
+    // path, and one must not inherit the other's sharing consent. URL already drops http(s)'s.
+    const port = parsed.port && parsed.port !== DEFAULT_GIT_PORTS[parsed.protocol] ? `:${parsed.port}` : '';
     const host = parsed.hostname;
     const path = parsed.pathname
       .replace(/\.git\/?$/, '')
       .replace(/^\/+/, '')
       .replace(/\/+$/, '');
-    return host && path ? `${host}/${path}`.toLowerCase() : undefined;
+    return host && path ? `${host}${port}/${path}`.toLowerCase() : undefined;
   } catch {
     return undefined;
   }
