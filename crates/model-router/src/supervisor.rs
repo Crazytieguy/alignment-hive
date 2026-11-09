@@ -334,6 +334,23 @@ fn payload_section(pinned: &[(&ProviderModel, &Vec<String>)]) -> String {
     use std::fmt::Write as _;
     let mut yaml = String::from("\npayload:\n");
     yaml.push_str(&ultrafast_payload_rule());
+    // Since 8.0.53 the child forwards a Claude request's `max_tokens` to
+    // Codex, xAI and Meta as `max_output_tokens`, where reasoning counts
+    // against it: Claude Code's 32000 would cut long high-effort GPT turns
+    // short. Up to 8.0.52 no cap reached them; this keeps it that way.
+    // `codex` is the target format of the Codex and xAI executors, `meta`
+    // Meta's.
+    yaml.push_str("  filter:\n    - models:\n");
+    for protocol in ["codex", "meta"] {
+        let _ = writeln!(yaml, "        - name: {}", yaml_quote("*"));
+        let _ = writeln!(yaml, "          protocol: {}", yaml_quote(protocol));
+        let _ = writeln!(yaml, "          from-protocol: {}", yaml_quote("claude"));
+    }
+    let _ = writeln!(
+        yaml,
+        "      params:\n        - {}",
+        yaml_quote("max_output_tokens")
+    );
     if !pinned.is_empty() {
         yaml.push_str("  override-raw:\n");
         for (model, providers) in pinned {
@@ -1431,6 +1448,25 @@ mod tests {
                 "{yaml}"
             );
         }
+    }
+
+    #[test]
+    fn claude_requests_reach_codex_xai_and_meta_without_an_output_cap() {
+        let yaml = upstream_config_yaml(1, Path::new("/a"), "s", &with_providers(vec![]));
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let rules: serde_json::Value =
+            serde_yaml::from_value(parsed["payload"]["filter"].clone()).unwrap();
+        assert_eq!(
+            rules,
+            serde_json::json!([{
+                "models": [
+                    {"name": "*", "protocol": "codex", "from-protocol": "claude"},
+                    {"name": "*", "protocol": "meta", "from-protocol": "claude"},
+                ],
+                "params": ["max_output_tokens"],
+            }]),
+            "{yaml}"
+        );
     }
 
     #[test]

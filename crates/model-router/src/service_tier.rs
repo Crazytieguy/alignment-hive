@@ -3,7 +3,7 @@
 //!
 //! A `-fast` twin ([`crate::config::ModelRoute::tier`]) sends `service_tier:
 //! "priority"`, the field and value native Codex sends for its `/fast`.
-//! `CLIProxyAPI` (8.0.49) keeps it, and on a subscription login adds the
+//! `CLIProxyAPI` (8.0.58) keeps it, and on a subscription login adds the
 //! `X-Codex-Routing-Hint: model=…;tier=priority` header Codex sends. Every
 //! other GPT-branch request loses any `speed` or `service_tier` it carries:
 //! the child would map either to priority, xAI and Meta included, so the
@@ -37,7 +37,7 @@
 //! both models in Codex (the speed page for Astra, the 2026-10-08 rollout
 //! post for Sol); it is unmeasured here. The body cannot carry it: `CLIProxyAPI`'s Claude
 //! translator keeps only `priority` (`normalizeCodexServiceTier`, 8.0.44
-//! through 8.0.51). So the router sends the twin's turns with
+//! through 8.0.58). So the router sends the twin's turns with
 //! [`ULTRAFAST_RELAY_HEADER`] instead, and the managed child's payload rule
 //! (`supervisor::upstream_config_yaml`) writes `service_tier: "ultrafast"`
 //! into the final upstream body of a request that carries it. That rule runs
