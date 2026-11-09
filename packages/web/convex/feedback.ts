@@ -16,7 +16,21 @@ export const CLAIM_TTL_MS = 10 * 60 * 1000;
  */
 function requireServiceSecret(provided: string): void {
   const expected = process.env.FEEDBACK_TOKEN_SECRET;
-  if (!expected || provided !== expected) throw new Error("Unauthorized");
+  if (!expected || !constantTimeEquals(provided, expected)) throw new Error("Unauthorized");
+}
+
+/**
+ * String equality that reads every character of `expected` whatever `provided` is, so the time it
+ * takes doesn't reveal how much of a guess matched. node:crypto's timingSafeEqual is only available
+ * in Node actions, and these are queries and mutations.
+ */
+function constantTimeEquals(provided: string, expected: string): boolean {
+  let diff = provided.length ^ expected.length;
+  for (let i = 0; i < expected.length; i++) {
+    // Past the end of `provided`, charCodeAt is NaN, which ^ treats as 0.
+    diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 export const claim = mutation({

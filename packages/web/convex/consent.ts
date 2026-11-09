@@ -5,6 +5,7 @@ import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { extractIdentifiers } from "@alignment-hive/session-data";
 import { upsertUser } from "./lib/users";
+import { assertIdentifierLengths } from "./lib/limits";
 import {
   loadAndGroupUserConsent,
   getMatchingConsentGroup,
@@ -17,8 +18,9 @@ const projectIdentifierArgs = v.union(
   v.object({ directory: v.optional(v.string()), gitRemote: v.string() }),
 );
 
-/** Validate non-empty strings (defense in depth). */
+/** Validate non-empty strings of bounded length (defense in depth). */
 function validateIdentifiers(ids: { directory?: string; gitRemote?: string }): void {
+  assertIdentifierLengths(ids);
   if (!ids.directory && !ids.gitRemote) {
     throw new ConvexError("At least one of directory or gitRemote is required");
   }

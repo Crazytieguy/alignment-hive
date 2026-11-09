@@ -20,12 +20,16 @@ export const consent = {
   creditByName: false,
 } as const;
 
-/** A signed-in user who has consented to sharing, and to sharing `directory`. */
-export async function consentingUser(t: TestConvex<typeof schema>, subject: string) {
+/** A signed-in user who has consented to sharing, and to sharing `project` (default `directory`). */
+export async function consentingUser(
+  t: TestConvex<typeof schema>,
+  subject: string,
+  project: { directory: string; gitRemote?: string } = { directory },
+) {
   const user = t.withIdentity({ subject, email: `${subject}@example.com` });
   await user.mutation(api.consent.submitConsent, { consent });
   await user.mutation(api.consent.updateProjectSharing, {
-    changes: [{ identifier: { directory }, sessionSharing: true }],
+    changes: [{ identifier: project, sessionSharing: true }],
   });
   return user;
 }

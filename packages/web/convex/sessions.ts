@@ -13,6 +13,7 @@ import {
 } from "@alignment-hive/session-data";
 import { assertStorageIdUnclaimed, deleteReplacedBlob } from "./lib/blobs";
 import { refreshChildCounts } from "./lib/childCounts";
+import { assertIdentifierLengths, assertMaxItems, MAX_UPLOAD_URL_IDS } from "./lib/limits";
 import { upsertUser } from "./lib/users";
 import { getMatchingConsentGroup } from "./lib/projectConsent";
 
@@ -200,6 +201,7 @@ export const heartbeatSession = mutation({
     sessionStartGitCommitHash: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    assertIdentifierLengths(args);
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
       throw new ConvexError("Not authenticated");
@@ -232,6 +234,9 @@ export const generateUploadUrls = mutation({
     lastModified: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    assertMaxItems("agentSessionIds", args.agentSessionIds, MAX_UPLOAD_URL_IDS);
+    assertMaxItems("workflowRunIds", args.workflowRunIds ?? [], MAX_UPLOAD_URL_IDS);
+    assertIdentifierLengths(args);
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
       throw new ConvexError("Not authenticated");
@@ -280,6 +285,10 @@ export const saveUploads = mutation({
     })),
   },
   handler: async (ctx, args) => {
+    assertIdentifierLengths(args);
+    for (const { sessionId, parentSessionId, agentType, workflowRunId } of args.uploads) {
+      assertIdentifierLengths({ sessionId, parentSessionId, agentType, workflowRunId });
+    }
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
       throw new ConvexError("Not authenticated");
@@ -356,6 +365,10 @@ export const saveWorkflowRuns = mutation({
     })),
   },
   handler: async (ctx, args) => {
+    assertIdentifierLengths(args);
+    for (const { workflowRunId, runId } of args.runs) {
+      assertIdentifierLengths({ workflowRunId, runId });
+    }
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
       throw new ConvexError("Not authenticated");
@@ -418,9 +431,20 @@ export const saveWorkflowRuns = mutation({
   },
 });
 
+// A UUID in its usual text form. Every hive CLI release mints its checkout id with randomUUID().
+const CHECKOUT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Count a checkout. Unauthenticated on purpose, because the table counts installs that never
+ * share anything, so anyone can add to its counts. Only a UUID is accepted, which bounds what one
+ * call can store.
+ */
 export const upsertCheckout = mutation({
   args: { checkoutId: v.string() },
   handler: async (ctx, { checkoutId }) => {
+    if (!CHECKOUT_ID_PATTERN.test(checkoutId)) {
+      throw new ConvexError("checkoutId must be a UUID");
+    }
     const now = Date.now();
 
     const existing = await ctx.db
