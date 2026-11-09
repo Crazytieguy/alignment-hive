@@ -127,3 +127,14 @@ jobs:
           gh release create "$TAG" dist/hive-cli-* dist/SHA256SUMS \
             --title "hive-cli v${VERSION}" \
             --generate-notes
+
+      # Fetches what install.sh and bootstrap.sh will: a release whose SHA256SUMS is missing, incomplete or
+      # wrong would block every install of it, so fail here instead.
+      - name: Check the published checksums
+        run: |
+          BASE="https://github.com/${{ github.repository }}/releases/download/hive-cli-v${{ needs.check.outputs.version }}"
+          mkdir published && cd published
+          curl -fsSL "$BASE/SHA256SUMS" -o SHA256SUMS
+          [ "$(wc -l < SHA256SUMS)" -eq "$(ls ../dist/hive-cli-* | wc -l)" ]
+          for name in $(awk '{ print $2 }' SHA256SUMS); do curl -fsSL "$BASE/$name" -o "$name"; done
+          sha256sum -c SHA256SUMS
