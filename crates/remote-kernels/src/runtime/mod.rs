@@ -446,7 +446,11 @@ pub struct SupervisorPolicy {
     /// `None` means unbounded drain; the script CLI represents that as zero.
     pub finalize_wait_secs: Option<u64>,
     pub finalize_timeout_secs: u64,
-    pub finalize_command: Option<String>,
+    /// The configured pre-stop and pre-terminate commands. The supervisor runs
+    /// the one for the action it is about to take, which a `finish()` plan can
+    /// change.
+    pub pre_stop_command: Option<String>,
+    pub pre_terminate_command: Option<String>,
 }
 
 /// Live transport to one machine.

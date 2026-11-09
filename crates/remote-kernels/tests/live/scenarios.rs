@@ -627,12 +627,17 @@ fn network_volume_config(volume: &str) -> Config {
 
 /// L5: close the laptop during a long cell. The core promise: the cell
 /// finishes, the save runs, the action follows, and attach backfills the
-/// notebook.
+/// notebook. Both save commands use paths relative to the workdir
+/// (/workspace), which is where they must run: the machine's own save here,
+/// and the explicit terminate()'s at the end.
 pub fn l5() {
     run_scenario("L5", limits(35), |sc| {
-        let config = Config::runpod().with("cleanup = \"stop\"").with(
-            "pre-stop-command = \"test -e /workspace/cell-done && echo cell-was-done > /workspace/save-ran || echo cell-was-not-done > /workspace/save-ran\"",
-        );
+        let config = Config::runpod()
+            .with("cleanup = \"stop\"")
+            .with(
+                "pre-stop-command = \"test -e cell-done && echo cell-was-done > save-ran || echo cell-was-not-done > save-ran\"",
+            )
+            .with("pre-terminate-command = \"test -e save-ran\"");
         let project = sc.project("", &config);
         let session = sc.session("a");
         let srv = sc.server(&project, "a", &session);
@@ -702,8 +707,13 @@ pub fn l5() {
         );
         sc.check(
             save.mentions("cell-was-done"),
-            &format!("the save command ran, after the cell: {}", save.text),
+            &format!(
+                "the save command ran in the workdir, after the cell: {}",
+                save.text
+            ),
         );
+        // A pre-terminate command run anywhere else fails, and the terminate
+        // would become a stop.
         terminate_and_verify(sc, &srv2, &up.provider, &json!({"instance": up.machine_id}));
     });
 }

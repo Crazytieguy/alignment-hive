@@ -63,12 +63,19 @@ impl KubernetesRuntime {
                     context: self.config.context.clone(),
                     ..Default::default()
                 };
-                let kube_config = kube::Config::from_kubeconfig(&options).await.map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to load kubeconfig (context: {:?}): {e}",
-                        self.config.context
-                    )
-                })?;
+                let mut kube_config =
+                    kube::Config::from_kubeconfig(&options).await.map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to load kubeconfig (context: {:?}): {e}",
+                            self.config.context
+                        )
+                    })?;
+                kube_config.proxy_url = cluster_proxy(
+                    &kube_config.cluster_url,
+                    kube_config.proxy_url.take(),
+                    env_var_either("HTTPS_PROXY", "https_proxy").as_deref(),
+                    env_var_either("NO_PROXY", "no_proxy").as_deref(),
+                );
                 let namespace = resolve_namespace(
                     self.config.namespace.as_deref(),
                     &kube_config.default_namespace,
@@ -172,6 +179,123 @@ impl KubernetesRuntime {
 /// context doesn't set one).
 fn resolve_namespace(explicit: Option<&str>, context_default: &str) -> String {
     explicit.unwrap_or(context_default).to_string()
+}
+
+fn env_var_either(upper: &str, lower: &str) -> Option<String> {
+    [upper, lower]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.is_empty())
+}
+
+/// The proxy for the cluster's API server, chosen as kubectl chooses it, so a
+/// cluster the user's kubectl reaches is one this reaches too. kube-rs puts
+/// every cluster behind `HTTPS_PROXY` when the kubeconfig names no
+/// `proxy-url`; kubectl instead goes direct to a loopback server (a local kind
+/// or minikube cluster) and to hosts `NO_PROXY` lists. `configured` is what
+/// kube-rs chose: the kubeconfig's `proxy-url`, else `https_proxy`. One equal to
+/// `https_proxy` is taken to have come from it.
+fn cluster_proxy(
+    cluster_url: &http::Uri,
+    configured: Option<http::Uri>,
+    https_proxy: Option<&str>,
+    no_proxy: Option<&str>,
+) -> Option<http::Uri> {
+    let proxy = configured?;
+    let from_env = https_proxy
+        .and_then(|value| value.parse::<http::Uri>().ok())
+        .is_some_and(|env_proxy| env_proxy == proxy);
+    if !from_env {
+        return Some(proxy);
+    }
+    let host = cluster_url.host()?;
+    let bare_host = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = bare_host.eq_ignore_ascii_case("localhost")
+        || bare_host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    let port = cluster_url
+        .port_u16()
+        .unwrap_or(match cluster_url.scheme_str() {
+            Some("http") => 80,
+            _ => 443,
+        });
+    let listed = no_proxy.is_some_and(|list| no_proxy_lists(list, bare_host, port));
+    (!loopback && !listed).then_some(proxy)
+}
+
+/// Whether a `NO_PROXY` list covers `host:port`, by the rules kubectl's Go
+/// HTTP library uses: `*` covers everything; an entry is an IP, a CIDR range or
+/// a domain, optionally with `:port`; a domain covers its subdomains, with or
+/// without a leading `.` or `*.`.
+fn no_proxy_lists(list: &str, host: &str, port: u16) -> bool {
+    let host = host.to_ascii_lowercase();
+    let ip = host.parse::<std::net::IpAddr>().ok();
+    list.split(',')
+        .map(|entry| entry.trim().to_ascii_lowercase())
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| {
+            if entry == "*" {
+                return true;
+            }
+            if let Some((network, bits)) = entry.split_once('/') {
+                return ip.is_some_and(|ip| in_cidr(ip, network, bits));
+            }
+            let (entry_host, entry_port) = split_host_port(&entry);
+            if entry_port.is_some_and(|entry_port| entry_port != port) {
+                return false;
+            }
+            if let Ok(entry_ip) = entry_host.parse::<std::net::IpAddr>() {
+                return ip == Some(entry_ip);
+            }
+            // `.domain` and `*.domain` cover subdomains only; `domain` itself too.
+            let domain = entry_host.strip_prefix('*').unwrap_or(entry_host);
+            let (domain, subdomains_only) = match domain.strip_prefix('.') {
+                Some(rest) => (rest, true),
+                None => (domain, false),
+            };
+            !domain.is_empty()
+                && ((!subdomains_only && host == domain)
+                    || host
+                        .strip_suffix(domain)
+                        .is_some_and(|prefix| prefix.ends_with('.')))
+        })
+}
+
+/// `host:port`, `[v6]:port`, `[v6]` or a bare host or address.
+fn split_host_port(entry: &str) -> (&str, Option<u16>) {
+    if let Some(rest) = entry.strip_prefix('[') {
+        let (host, after) = rest.split_once(']').unwrap_or((rest, ""));
+        return (host, after.strip_prefix(':').and_then(|p| p.parse().ok()));
+    }
+    match entry.rsplit_once(':') {
+        // More than one colon without brackets: a bare IPv6 address.
+        Some((host, port)) if !host.contains(':') => (host, port.parse().ok()),
+        _ => (entry, None),
+    }
+}
+
+fn in_cidr(ip: std::net::IpAddr, network: &str, bits: &str) -> bool {
+    use std::net::IpAddr;
+    let (Ok(network), Ok(bits)) = (network.parse::<IpAddr>(), bits.parse::<u32>()) else {
+        return false;
+    };
+    let masked = |value: u128, width: u32| {
+        if bits == 0 {
+            0
+        } else {
+            value >> (width - bits.min(width))
+        }
+    };
+    match (ip, network) {
+        (IpAddr::V4(ip), IpAddr::V4(network)) if bits <= 32 => {
+            masked(u128::from(u32::from(ip)), 32) == masked(u128::from(u32::from(network)), 32)
+        }
+        (IpAddr::V6(ip), IpAddr::V6(network)) if bits <= 128 => {
+            masked(u128::from(ip), 128) == masked(u128::from(network), 128)
+        }
+        _ => false,
+    }
 }
 
 /// The single definition of "the workload container": `container-name` from
@@ -974,6 +1098,57 @@ spec:
             env.iter().any(|e| e.name == "REMOTE_KERNELS_JUPYTER_TOKEN"
                 && e.value.as_deref() == Some("tok123"))
         );
+    }
+
+    #[test]
+    fn cluster_proxy_follows_kubectl() {
+        let uri = |s: &str| s.parse::<http::Uri>().unwrap();
+        let env = Some("http://127.0.0.1:8787");
+        let proxied = |cluster: &str, no_proxy: Option<&str>| {
+            cluster_proxy(
+                &uri(cluster),
+                Some(uri("http://127.0.0.1:8787")),
+                env,
+                no_proxy,
+            )
+        };
+        // A remote cluster goes through the environment's proxy.
+        assert!(proxied("https://k8s.example.org:6443", None).is_some());
+        // Loopback clusters never do.
+        assert!(proxied("https://127.0.0.1:6443", None).is_none());
+        assert!(proxied("https://localhost:6443", None).is_none());
+        assert!(proxied("https://[::1]:6443", None).is_none());
+        // NO_PROXY entries: domains with their subdomains, and networks.
+        assert!(proxied("https://api.lab.example.org", Some("example.org")).is_none());
+        assert!(proxied("https://10.2.3.4:6443", Some("foo.com, 10.0.0.0/8")).is_none());
+        assert!(proxied("https://k8s.other.org", Some("example.org")).is_some());
+        assert!(proxied("http://k8s.lab.example.org", Some(".example.org")).is_none());
+        assert!(proxied("https://api.lab.example.org", Some("*.lab.example.org")).is_none());
+        assert!(proxied("https://notexample.org", Some("example.org")).is_some());
+        assert!(proxied("https://lab.example.org", Some("lab.example.org")).is_none());
+        assert!(proxied("https://lab.example.org", Some("*.lab.example.org")).is_some());
+        assert!(proxied("https://lab.example.org", Some(".lab.example.org")).is_some());
+        // Entries with a port cover that port only; https defaults to 443.
+        assert!(proxied("https://api.example.org:6443", Some("api.example.org:6443")).is_none());
+        assert!(proxied("https://api.example.org:6443", Some("api.example.org:443")).is_some());
+        assert!(proxied("https://api.example.org", Some("api.example.org:443")).is_none());
+        assert!(proxied("https://10.0.0.5:6443", Some("10.0.0.5:6443")).is_none());
+        assert!(proxied("https://[fd00::5]:6443", Some("[fd00::5]:6443, other")).is_none());
+        assert!(proxied("https://[fd00::5]:6443", Some("fd00::/8")).is_none());
+        assert!(proxied("https://API.Example.org", Some("api.example.ORG")).is_none());
+        assert!(proxied("https://anything.example", Some("*")).is_none());
+        // A kubeconfig proxy-url is used as given, even for loopback.
+        assert_eq!(
+            cluster_proxy(
+                &uri("https://127.0.0.1:6443"),
+                Some(uri("socks5://bastion:1080")),
+                env,
+                Some("*"),
+            ),
+            Some(uri("socks5://bastion:1080"))
+        );
+        // No proxy anywhere.
+        assert!(cluster_proxy(&uri("https://k8s.example.org"), None, None, None).is_none());
     }
 
     #[test]

@@ -322,9 +322,13 @@ impl RemoteKernelsServer {
                     finalize_timeout_secs: self
                         .config
                         .finalize_command_timeout_secs_for(&runtime_name),
-                    finalize_command: self
+                    pre_stop_command: self
                         .config
-                        .pre_command_for(&runtime_name, cleanup)
+                        .pre_command_for(&runtime_name, Cleanup::Stop)
+                        .map(ToString::to_string),
+                    pre_terminate_command: self
+                        .config
+                        .pre_command_for(&runtime_name, Cleanup::Terminate)
                         .map(ToString::to_string),
                 },
                 mode,
@@ -455,16 +459,15 @@ impl RemoteKernelsServer {
                     "provider endpoint (public, token-protected)"
                 }
             };
+            // cost_per_hr is everything a running machine bills, disks included.
+            let rate = inst.cost_per_hr;
+            let precision = super::rate_precision(rate);
             let mut summary = format!(
-                "- ID: {machine_id}\n- Label: {}\n- Provider ID: {}\n- Runtime: {}\n- GPU: {}\n- Cost: ${:.2}/hr\n- Jupyter: {access}\n- Status: RUNNING",
+                "- ID: {machine_id}\n- Label: {}\n- Provider ID: {}\n- Runtime: {}\n- GPU: {}\n- Cost: ${rate:.precision$}/hr\n- Jupyter: {access}\n- Status: RUNNING",
                 inst.label.as_deref().unwrap_or("none"),
                 inst.external_id,
                 inst.runtime,
                 inst.gpu_name,
-                inst.cost_per_hr
-                    + record
-                        .as_ref()
-                        .map_or(0.0, crate::state::InstanceRecord::storage_rate)
             );
             if let Some(caveat) = record.and_then(|record| record.supervision_note) {
                 let _ = write!(summary, "\n- Caveat: {caveat}");

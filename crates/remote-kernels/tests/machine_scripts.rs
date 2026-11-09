@@ -56,7 +56,9 @@ struct Settings {
     wait_secs: u64,
     save_timeout_secs: u64,
     policy: &'static str,
+    /// The save for both actions, unless `terminate_save` overrides it.
     save: Option<String>,
+    terminate_save: Option<String>,
     action: Option<String>,
 }
 
@@ -69,6 +71,7 @@ impl Default for Settings {
             save_timeout_secs: 5,
             policy: "terminate",
             save: None,
+            terminate_save: None,
             action: None,
         }
     }
@@ -113,6 +116,10 @@ impl Machine {
         self.temp.path().join("state")
     }
 
+    fn workdir(&self) -> PathBuf {
+        self.temp.path().join("work")
+    }
+
     fn set_kernel_state(&self, state: &str) {
         fs::write(&self.kernel_state_file, state).expect("update kernel state");
     }
@@ -144,6 +151,7 @@ impl Machine {
         no_supervisor: bool,
     ) -> String {
         fs::create_dir_all(self.dir()).expect("state dir");
+        fs::create_dir_all(self.workdir()).expect("workdir");
         let settings = &self.settings;
         let action = settings
             .action
@@ -163,8 +171,16 @@ impl Machine {
             .arg(self.port.to_string())
             .arg("test-token")
             .arg(settings.policy)
-            .arg(settings.save.as_deref().unwrap_or("-"))
             .arg(if no_supervisor { "-" } else { action.as_str() })
+            .arg(self.workdir())
+            .arg(settings.save.as_deref().unwrap_or("-"))
+            .arg(
+                settings
+                    .terminate_save
+                    .as_deref()
+                    .or(settings.save.as_deref())
+                    .unwrap_or("-"),
+            )
             .env("PATH", &self.path)
             .env("BASH_ENV", self.temp.path().join("bash-env"))
             .env("RK_SUPERVISOR_POLL_SECS", "0.2")
@@ -413,6 +429,41 @@ fn a_successful_save_runs_first_and_then_terminates() {
     machine.install();
     machine.wait_for_action("terminate");
     assert!(machine.save_ran());
+}
+
+#[test]
+fn the_save_runs_in_the_workdir() {
+    let mut machine = Machine::new("idle", Settings::default());
+    machine.settings.save = Some(machine.save_command("pwd > $MARK"));
+    machine.install();
+    machine.wait_for_action("terminate");
+    let ran_in = fs::read_to_string(machine.temp.path().join("save-ran")).expect("save output");
+    assert_eq!(
+        fs::canonicalize(ran_in.trim()).expect("pwd"),
+        fs::canonicalize(machine.workdir()).expect("workdir")
+    );
+}
+
+#[test]
+fn the_save_matches_the_action_the_plan_chose() {
+    let mut machine = Machine::new(
+        "idle",
+        with(|s| {
+            s.stale_secs = 2;
+            s.policy = "terminate";
+        }),
+    );
+    // The policy's own save would mark "terminate"; the plan's action is stop.
+    let mark = machine.temp.path().join("save-ran").display().to_string();
+    machine.settings.save = Some(format!("echo stop > {mark}"));
+    machine.settings.terminate_save = Some(format!("echo terminate > {mark}"));
+    machine.install();
+    machine.write_intent(false, "stop");
+    machine.wait_for_action("stop");
+    assert_eq!(
+        fs::read_to_string(&mark).expect("save output").trim(),
+        "stop"
+    );
 }
 
 #[test]

@@ -14,8 +14,9 @@
 # Usage: rk-supervisor.sh <dir> install <owner> <refuse_foreign_within|-> <deadline_secs|-> <settings>
 #        rk-supervisor.sh <dir> supervise <settings>
 # Settings: <stale_secs> <grace_secs> <wait_secs> <save_timeout_secs> <port> <token>
-#           <stop|terminate> <save_cmd|-> <action_cmd|->
-# An action_cmd of "-" installs no supervisor, only the alive file.
+#           <stop|terminate> <action_cmd|-> <workdir> <stop_save_cmd|-> <terminate_save_cmd|->
+# An action_cmd of "-" installs no supervisor, only the alive file. The save
+# that runs is the one for the action about to be taken, in the workdir.
 
 set -u
 umask 077
@@ -105,21 +106,23 @@ run_bounded() {
     wait "$pid"
 }
 
-# Sets save_ok. A configured save that was skipped, failed or timed out leaves
-# save_ok=0, and select_action will not delete the machine after that.
+# Runs the save for $action, in the workdir. A configured save that was
+# skipped, failed or timed out turns a terminate into a stop.
 run_save() {
-    local limit="$1" status=0
-    save_ok=1
+    local limit="$1" status=0 save_cmd="$stop_save_cmd"
+    [ "$action" != "terminate" ] || save_cmd="$terminate_save_cmd"
     [ "$save_cmd" != "-" ] || return 0
     if [ "$limit" -le 0 ]; then
         log "save skipped: no time left"
-        save_ok=0
-        return 0
+        status=1
+    else
+        log "save starting (limit ${limit}s)"
+        run_bounded "$limit" bash -lc 'cd -- "$1" && eval "$2"' rk-save "$workdir" "$save_cmd" || status=$?
+        log "save finished: exit $status"
     fi
-    log "save starting (limit ${limit}s)"
-    run_bounded "$limit" bash -lc "$save_cmd" || status=$?
-    log "save finished: exit $status"
-    [ "$status" -eq 0 ] || save_ok=0
+    if [ "$status" -ne 0 ] && [ "$action" = "terminate" ]; then
+        action="stop"
+    fi
 }
 
 # The one rule both paths use. $1 is "budget" or "stale". Sets action.
@@ -138,9 +141,6 @@ select_action() {
         esac
     fi
     if [ "$1" = "budget" ] && [ "$action" = "keep" ]; then
-        action="stop"
-    fi
-    if [ "$save_ok" -eq 0 ] && [ "$action" = "terminate" ]; then
         action="stop"
     fi
 }
@@ -190,7 +190,6 @@ drain() {
 # grace to move the deadline; the stale path stands down the moment one is back.
 cleanup() {
     local path="$1" grace_end save_limit="$save_timeout_secs"
-    save_ok=1
     if [ "$path" = "budget" ]; then
         log "budget deadline passed"
         grace_end=$(($(date +%s) + grace_secs))
@@ -199,17 +198,16 @@ cleanup() {
     else
         log "no server for ${stale_secs}s"
         drain stale "$wait_secs" || return 0
-        select_action stale
-        if [ "$action" = "keep" ]; then
-            log "finish plan says keep; waiting for a server"
-            until is_fresh || budget_due; do
-                pause
-            done
-            return 0
-        fi
+    fi
+    select_action "$path"
+    if [ "$action" = "keep" ]; then
+        log "finish plan says keep; waiting for a server"
+        until is_fresh || budget_due; do
+            pause
+        done
+        return 0
     fi
     run_save "$save_limit"
-    select_action "$path"
     if [ "$path" = "budget" ]; then
         while [ "$(date +%s)" -lt "$grace_end" ]; do
             cancelled budget && return 0
@@ -251,7 +249,7 @@ kill_if_ours() {
 install() {
     local owner="$1" refuse_within="$2" deadline_secs="$3" now current_owner ts rest
     shift 3
-    local action_arg="${9:-}"
+    local action_arg="${8:-}"
     if [ "$action_arg" != "-" ]; then
         for tool in curl sed nohup; do
             if ! command -v "$tool" >/dev/null 2>&1; then
@@ -306,6 +304,8 @@ save_timeout_secs="$4"
 port="$5"
 token="$6"
 default_action="$7"
-save_cmd="$8"
-action_cmd="$9"
+action_cmd="$8"
+workdir="$9"
+stop_save_cmd="${10}"
+terminate_save_cmd="${11}"
 supervise

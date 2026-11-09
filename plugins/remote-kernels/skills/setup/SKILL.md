@@ -150,16 +150,17 @@ pod lifetime limit fires. Data can reach safety along three routes:
   disconnect between producing and downloading falls through to the
   finalize command below.
 - **Finalize command (the fallback)** — the per-runtime
-  `pre-terminate-command` / `pre-stop-command`. Self-cleanup and `finish()`
-  run it once work has drained; an explicit `stop()`/`terminate()` runs it
-  right away without waiting for kernels, and only if it can reach the
-  machine. Self-cleanup uses the command matching `cleanup` even when a
-  `finish()` plan changes the final action, so make that command safe for
-  both. It runs in the login directory, not the workdir, so use absolute
-  paths. Ask directly: "if a machine has to clean itself up while you're
-  away, where should results go?" — and set the command that puts them there.
-  If the command fails, terminate degrades to stop, which keeps persistent
-  storage but not a RunPod pod's container disk. When the finalize command
+  `pre-terminate-command` / `pre-stop-command`, run in the workdir and chosen
+  by the action about to happen (an action with no command saves nothing).
+  Self-cleanup and `finish()` run it after waiting for running work, when they
+  stop or terminate (a `keep` plan saves nothing); an explicit
+  `stop()`/`terminate()` runs it right away without waiting for kernels, and
+  only if it can reach the machine. Ask directly: "if a machine has to clean
+  itself up while you're away, where should results go?" — and set the command
+  that puts them there. The machine needs that tool and its credentials (an
+  image or startup command can install them). If the command exits nonzero or
+  times out, terminate degrades to stop, which keeps persistent storage but not
+  a RunPod pod's container disk; a Kubernetes pod is kept running instead. When the finalize command
   reliably syncs everything, in-session downloads of the same artifacts are
   redundant (and doubly transferred) — pick which route owns which data.
 

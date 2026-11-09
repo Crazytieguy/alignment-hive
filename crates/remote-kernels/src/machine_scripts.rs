@@ -77,8 +77,10 @@ pub async fn install<C: Connection + ?Sized>(
         conn.machine_jupyter_port().to_string(),
         shell_quote(&conn.jupyter().token),
         default_action.to_string(),
-        shell_quote(plan.policy.finalize_command.as_deref().unwrap_or("-")),
         shell_quote(action.as_deref().unwrap_or("-")),
+        shell_quote(conn.workdir()),
+        shell_quote(plan.policy.pre_stop_command.as_deref().unwrap_or("-")),
+        shell_quote(plan.policy.pre_terminate_command.as_deref().unwrap_or("-")),
     ]
     .join(" ");
     let intent = intent_script(conn, plan.intent);
@@ -417,7 +419,8 @@ mod tests {
             budget_grace_secs: 1,
             finalize_wait_secs: None,
             finalize_timeout_secs: 1,
-            finalize_command: None,
+            pre_stop_command: None,
+            pre_terminate_command: None,
         };
         let installed = super::install(
             &conn,

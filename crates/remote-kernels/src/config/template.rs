@@ -164,15 +164,15 @@ impl Config {
 # Default: "{default_cleanup}"
 # cleanup = "{default_cleanup}"
 
-# Commands that save results before a stop or terminate. An explicit stop() or
-# terminate() runs the matching one right away, if it can reach the machine.
-# Self-cleanup first waits for running kernels to go idle, then runs the one
-# matching cleanup above, even if a finish() plan changes the final action. If
-# the command fails, terminate becomes stop, which keeps the volume but not the
-# container disk. Commands run in the login directory, not the workdir, so use
-# absolute paths.
-# pre-stop-command = "rclone sync {default_volume_mount_path}/results remote:results"
-# pre-terminate-command = "rclone sync {default_volume_mount_path}/results remote:results"
+# Commands that save results before a stop or terminate. They run on the
+# machine in the workdir (below), where sync() puts the project. An explicit
+# stop() or terminate() runs the matching one right away, if it can reach the
+# machine. Self-cleanup first waits for running kernels to go idle, then runs
+# the one for the action it takes; an action whose command is unset saves
+# nothing. If the command exits nonzero or runs out of time, terminate becomes
+# stop, which keeps the volume but not the container disk.
+# pre-stop-command = "rclone copy results remote:results"
+# pre-terminate-command = "rclone copy results remote:results"
 # How long to wait for running work to go idle before cleanup proceeds anyway.
 # Unset: unlimited — budget exhaustion is the only thing that overrides the
 # wait. Set a value only to put a hard bound on it.
@@ -312,15 +312,15 @@ impl Config {
 # and a machine no session ever reached stops itself even when "disabled".
 # Default: "{default_cleanup}"
 # cleanup = "{default_cleanup}"
-# Commands that save results before a stop or terminate. An explicit stop() or
-# terminate() runs the matching one right away, if it can reach the machine.
-# Self-cleanup first waits for running kernels to go idle, then runs the one
-# matching cleanup above, even if a finish() plan changes the final action. If
-# the command fails, terminate becomes stop, and storage bills until terminate()
-# succeeds. Commands run in the login directory,
-# not the workdir, so use absolute paths.
-# pre-stop-command = "rclone sync {default_vast_workdir}/results remote:results"
-# pre-terminate-command = "rclone sync {default_vast_workdir}/results remote:results"
+# Commands that save results before a stop or terminate. They run on the
+# machine in the workdir (below), where sync() puts the project. An explicit
+# stop() or terminate() runs the matching one right away, if it can reach the
+# machine. Self-cleanup first waits for running kernels to go idle, then runs
+# the one for the action it takes; an action whose command is unset saves
+# nothing. If the command exits nonzero or runs out of time, terminate becomes
+# stop, and storage bills until terminate() succeeds.
+# pre-stop-command = "rclone copy results remote:results"
+# pre-terminate-command = "rclone copy results remote:results"
 # How long to wait for running work to go idle before cleanup proceeds anyway.
 # Unset: unlimited — budget exhaustion is the only thing that overrides the
 # wait. Set a value only to put a hard bound on it.
@@ -445,9 +445,9 @@ impl Config {
 # On Kubernetes, disconnecting always preserves the pod: it ends only through an
 # explicit terminate(), or when max-lifetime-secs (below) fires. Before an explicit
 # terminate, the pod runs this command if the server can reach it — your chance to
-# push results somewhere that outlives it. It doesn't run in the workdir, so use
-# absolute paths:
-# pre-terminate-command = "rclone sync {default_k8s_workdir}/results remote:results"
+# push results somewhere that outlives it. It runs in the workdir (below). If it
+# exits nonzero or runs out of time, the pod is kept and terminate() says so:
+# pre-terminate-command = "rclone copy results remote:results"
 # Time limit for that command.
 # Default: 600
 # finalize-command-timeout-secs = 600

@@ -797,8 +797,8 @@ mod tests {
     fn template_golden_contains_phase4_lifecycle_contract() {
         let template = Config::template();
         for line in [
-            "# pre-stop-command = \"rclone sync /workspace/results remote:results\"",
-            "# pre-terminate-command = \"rclone sync /workspace/results remote:results\"",
+            "# pre-stop-command = \"rclone copy results remote:results\"",
+            "# pre-terminate-command = \"rclone copy results remote:results\"",
             "# finalize-wait-secs = 3600",
             "# finalize-command-timeout-secs = 600",
             "# budget-grace-secs = 900",

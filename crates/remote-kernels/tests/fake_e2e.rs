@@ -1857,6 +1857,47 @@ async fn disconnect_with_busy_kernel_leaves_machine_and_record() {
 
 #[tokio::test]
 #[ignore = "needs uv + network for jupyter-server; run with --ignored"]
+async fn an_explicit_stop_runs_its_save_in_the_workdir() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let saved = out.path().join("saved.txt");
+    std::fs::write(dir.path().join("results.txt"), "from the workdir").unwrap();
+    let config: Config = toml::from_str(&format!(
+        "default-runtime = \"fake\"\n[runpod]\npre-stop-command = \"cp results.txt {}\"",
+        saved.display()
+    ))
+    .unwrap();
+    let server = server_with(dir.path(), config, None);
+    let (machine_id, _) = start_machine(&server, Some("save-cwd")).await;
+    let synced = server
+        .sync(Parameters(remote_kernels::server::SyncParams {
+            include: None,
+            instance: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&synced), "{}", text_of(&synced));
+    let record = remote_kernels::state::load_instance_record(dir.path(), &machine_id).unwrap();
+    let result = server
+        .stop(Parameters(remote_kernels::server::StopParams {
+            instance: Some(machine_id.clone()),
+            skip_pre_stop_command: None,
+        }))
+        .await
+        .unwrap();
+    assert!(!is_error(&result), "{}", text_of(&result));
+    assert_eq!(
+        std::fs::read_to_string(&saved).unwrap_or_default(),
+        "from the workdir"
+    );
+    remote_kernels::runtime::fake::FakeRuntime::new(dir.path())
+        .terminate(record.provider_id())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs uv + network for jupyter-server; run with --ignored"]
 async fn failing_terminate_preop_downgrades_to_confirmed_stop() {
     let dir = tempfile::tempdir().unwrap();
     let config: Config =

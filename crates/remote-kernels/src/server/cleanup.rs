@@ -162,6 +162,25 @@ impl RemoteKernelsServer {
         let action = self
             .run_pre_command(target, connection.as_deref(), requested, skip_finalize)
             .await;
+        // A failed save turns a terminate into a stop, which a pod can't do.
+        if action != requested
+            && runtime.capabilities().stop_resume == crate::runtime::StopSupport::Unsupported
+        {
+            if let Some(instance) = self
+                .state
+                .lock()
+                .await
+                .live_mut(&target.machine_id, &target.external_id)
+            {
+                instance.ending = false;
+            }
+            anyhow::bail!(
+                "The pre-terminate command failed, so machine {:?} was kept. Fix the command and \
+                 call terminate() again, or terminate(skip_pre_terminate_command=true) to end it \
+                 without saving.",
+                target.machine_id
+            );
+        }
         let provider_result = match (action, &status) {
             // Already there, whoever got it there.
             (_, Ok(InstanceStatus::Gone)) | (CleanupAction::Stop, Ok(InstanceStatus::Stopped)) => {
@@ -223,7 +242,12 @@ impl RemoteKernelsServer {
             self.config
                 .finalize_command_timeout_secs_for(&target.runtime),
         );
-        if let Err(error) = connection.exec(command, timeout).await {
+        // In the workdir, as the supervisor runs it; a failed cd fails the save.
+        let command = format!(
+            "cd {} && (\n{command}\n)",
+            crate::machine_scripts::shell_quote(connection.workdir())
+        );
+        if let Err(error) = connection.exec(&command, timeout).await {
             tracing::warn!(target: super::LOG_TARGET, instance = %target.machine_id, "Finalize command failed: {error}");
             return CleanupAction::Stop;
         }
