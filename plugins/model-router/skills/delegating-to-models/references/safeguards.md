@@ -10,16 +10,17 @@ under its
 [Meta Superintelligence Scaling Framework](https://research.meta.ai/static/meta-superintelligence-scaling-framework);
 Kimi and GLM publish no vendor safety framework.
 
-- **Fable 5.1 / Mythos 5.1** — the same model at two safeguard levels:
-  Fable 5.1 is generally available, Mythos 5.1 only through trusted-access
-  programs for cyber and life-sciences work. Fable 5.1 runs a classifier
-  layer that reroutes cyber, bio/chem, and distillation queries (the user
-  is notified): blocked cyber tasks complete on Opus 4.8, blocked biology
-  tasks on Opus 5. The classifiers are tuned to stay out of ordinary work,
-  security-adjacent coding included; heavy safeguards remain on biology.
-  Zero data retention is available to eligible customers.
-  [Anthropic, 2026-09-01](https://www.anthropic.com/claude-fable-and-mythos-5-1);
-  [system card, 2026-09-01](https://www-cdn.anthropic.com/0339e6a7c5c7b87f5c07798616dc32c215d14235/Claude%20Fable%205.1%20&%20Claude%20Mythos%205.1%20System%20Card.pdf).
+- **Fable 5.2 / Mythos 5.2** — the same model at two safeguard levels:
+  Fable 5.2 is generally available, Mythos 5.2 through Anthropic's
+  cyber and life-sciences verification programs. As with Opus 5.5
+  (below), blocked cyber tasks complete on Opus 4.8 and blocked biology
+  tasks on Opus 5; Anthropic reports about 55% fewer blocks than Fable
+  5.1 in early testing. Zero data retention is available to eligible customers.
+  [Anthropic, 2026-11-09](https://www.anthropic.com/claude-fable-and-mythos-5-2);
+  [system card, 2026-11-09](https://assets.claude.com/27d60918d218125e7504bc7354c4b4626ec56b11.pdf).
+  Fable 5.1 (still available as `claude-fable-5-1`) has the same
+  fallbacks and blocks more.
+  [Anthropic, 2026-09-01](https://www.anthropic.com/claude-fable-and-mythos-5-1).
   Fable 5 (still routable) has the earlier, deliberately over-cautious
   classifiers.
   [Anthropic, 2026-06-09](https://www.anthropic.com/news/claude-fable-5-mythos-5).
@@ -148,6 +149,9 @@ First-week reports on Fable 5.1: the classifiers stay out of ordinary
 work unless you are pushing it, occasional downgrades to Opus 4.8 still
 happen, and they are less strict than Astra's
 ([Zvi's roundup, 2026-09-05](https://thezvi.substack.com/p/claude-mythos-51-and-fable-51-capabilities)).
+Vals's launch-day evaluation of Fable 5.2 at high effort reports a 1.88%
+fallback rate and no refusals
+([Vals, 2026-11-09](https://www.vals.ai/models/anthropic_claude-fable-5-2)).
 GPT-5.6/Codex is reported less strict in practice, though not refusal-free:
 in [one comparison](https://www.techtimes.com/articles/319808/20260707/gpt-56-sol-review-faster-coding-half-fable-5-cost-benchmark-problem.htm)
 both Codex and Fable refused exploit-adjacent security fixes that Kimi K3

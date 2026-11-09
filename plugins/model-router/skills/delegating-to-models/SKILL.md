@@ -23,7 +23,10 @@ models. An install on an OpenAI API key pays per token instead, so volume
 costs money directly. A `-fast` route spends 2.5x its model's
 subscription usage, or about twice its API price. Within the Claude family, Fable use is
 capped at a share of the weekly limit (currently up to ~50%); the other
-Claude models draw on the whole limit.
+Claude models draw on the whole limit. One user's measurements, not
+confirmed by Anthropic, suggest a Fable 5.2 token draws on the weekly
+limit about five times what an Opus token does, well beyond their 2x
+price gap.
 
 ## Character differences
 
@@ -55,11 +58,12 @@ a Claude model review GPT work and vice versa.
 The larger Claude models are much harder to prompt-inject than GPT
 models: on the Gray Swan indirect-injection benchmark Opus 5.5 and Fable
 5.1 tie near 1% attack success over 15 attempts, Sonnet 5.5 sits at
-3.4%, Haiku 5.5 at 7.1%, GPT-6 Astra at 8.5% (down from 27% for
+3.4%, Fable 5.2 at 4.1%, Haiku 5.5 at 7.1%, GPT-6 Astra at 8.5% (down from 27% for
 GPT-5.6), and OpenAI reports Sol and Luna improved over GPT-5.6, and
 Terra similar to Astra and 6.1 Sol, without publishing comparable
 numbers. A Claude session that a safety
-classifier drops to Opus 4.8 loses much of that robustness. Claude Code's
+classifier drops to Opus 4.8 loses much of that robustness; Anthropic
+attributes most of Fable 5.2's higher rate to such fallbacks. Claude Code's
 auto mode adds its own classifier pass over tool calls for whichever
 model is running, cutting the risk below these numbers for all of them.
 Relevant when a task involves browsing untrusted websites or processing
@@ -85,11 +89,8 @@ tokens, and wall-clock time grows from minutes to over an hour.
 ## Model notes
 
 - **Opus 5.5** — the default for most work, as the main agent and for
-  delegated implementation. Anthropic's benchmarks put it ahead of Fable
-  5.1 on most coding and knowledge work at 40% of Fable's token price
-  ($4/$20), though Anthropic says the real-world gap is narrower than the
-  scores suggest. Artificial Analysis ranks it first, it draws on the
-  general Claude limit rather than the Fable cap, and user reports put
+  delegated implementation. At half of Fable 5.2's token price ($4/$20),
+  it draws on the general Claude limit rather than the Fable cap, and user reports put
   it ahead of Fable on writing, including
   copy that persists (prompts, skills, docs). Effort: medium (its
   default) for most tasks. At xhigh it thinks far more per turn, and on scope-penalizing evals
@@ -99,16 +100,21 @@ tokens, and wall-clock time grows from minutes to over an hour.
   open-ended research; on consequential work, have both Fable and
   GPT-6.1 Sol review it. In unattended runs it can end its turn on a progress report,
   so say what counts as done.
-- **Fable** — review, judgement- and taste-heavy work such as design and
-  front-end, and open-ended brainstorming and discussion. No measured edge
-  over Opus 5.5 backs this; it is a working preference, not a benchmark
-  result. Also a good second attempt when another model failed, and best
-  for simple, clean code and for simplifying existing code. Effort: medium
+- **Fable 5.2** — review, judgement- and taste-heavy work such as design
+  and front-end, and open-ended brainstorming and discussion; a working
+  preference carried over from Fable 5.1, not a benchmark result. Also a
+  good second attempt when another model failed, and best for simple,
+  clean code and for simplifying existing code: tell it the code is its
+  own to restructure, or it tends to build on the existing structure.
+  Anthropic's launch benchmarks put it ahead of Opus 5.5 on most coding
+  and agentic evals; how that shows in everyday work is not yet clear.
+  It can end its turn with doable work left, so say what counts as
+  done. Effort: medium
   for most tasks. At high and above it does more on its own — extra
   verification, proactive edits — and token use climbs with it. Mind the
   Fable usage cap.
 - **gpt-6-astra** — the strongest GPT model, for hard tasks where 6.1 Sol
-  falls short. Priced like Fable ($10/$50) but reported to spend a fraction of the tokens, and it bills Codex. Its
+  falls short. Priced above Fable 5.2 ($10/$50 against $8/$40) but reported to spend a fraction of the tokens, and it bills Codex. Its
   clearest gains over other models are computer use, long autonomous runs,
   and research-level math, all confirmed by users (computer use from
   inside Claude Code as well); it is strong at 3D work too, though Opus
