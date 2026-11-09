@@ -1,7 +1,6 @@
 // Sandbox routers for the candidate tier: a router + CLIProxyAPI pair with its own XDG dirs and ports, optionally
-// holding a copy of the live Codex login, and the checks that keep that copy from costing the user their live login.
+// holding copies of the live logins with what renews them removed, so nothing in a sandbox can rotate a live login.
 import { type ChildProcess, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -14,12 +13,11 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { childEnv, http, LIVE_AUTH_DIR, LIVE_ROUTER_PORT, portFree, routerBinary, run, SANDBOXES, sleep, stamp, writeJsonAtomic } from './env';
+import { childEnv, http, LIVE_AUTH_DIR, LIVE_ROUTER_PORT, portFree, routerBinary, run, SANDBOXES, sleep, stamp } from './env';
 import type { Check, Recorder, RouterTarget, Status } from './report';
 import { liveTarget } from './probes';
 import { pinnedVersion } from './upstream';
@@ -40,9 +38,6 @@ export type SandboxSpec = {
 
 export type FamilyLogins = { files: Array<string>; grok: boolean; muse: boolean; detail: string };
 
-/** One copied login: where it came from, where the copy lives, and hashes taken at copy time (never the values). */
-export type CredentialCopy = { file: string; livePath: string; copyPath: string; liveSha256: string; refreshSha256: string };
-
 export type Sandbox = {
   target: RouterTarget;
   root: string;
@@ -50,25 +45,20 @@ export type Sandbox = {
   upstreamVersion: string;
   /** The child's own log (`state/model-router/logs/cliproxyapi.log`). */
   cpaLogFile: string;
-  credentials: Array<CredentialCopy>;
   /** Stop the router and its child; keeps the directory. Idempotent. */
   halt(): Promise<void>;
-  /** halt, run the credential postcheck if nobody has, optionally keep the logs, then delete the whole root. Idempotent. */
+  /** halt, optionally keep the logs, then delete the whole root. Idempotent. */
   stop(opts?: { keepLogsIn?: string }): Promise<void>;
 };
 
-// CLIProxyAPI refreshes a Codex login once it is within CodexOuterRefreshLead (96h, sdk/cliproxy/auth/types.go in
-// 8.0.34) of expiry; a day of margin keeps a copy from crossing that line during a run.
-const REFRESH_LEAD_HOURS = 96;
-export const MIN_LOGIN_HOURS = REFRESH_LEAD_HOURS + 24;
+// A copy can't renew its access token, so the token must outlast the run, bench and reruns included. The live child
+// renews the live login 96h before expiry, so a login under this is one the live router has stopped renewing.
+export const MIN_LOGIN_HOURS = 12;
 
 const READY_TIMEOUT_MS = 90_000;
 const ROUTER_STOP_MS = 15_000;
-/** Files in a sandbox root that let a later run clean up after a run that died: the copies' metadata, the router's pid. */
-const COPIES_FILE = 'copies.json';
+/** The router's pid in a sandbox root, so a later run can stop the processes of a run that died. */
 const ROUTER_PID_FILE = 'router.pid';
-
-const sha256 = (bytes: Uint8Array | string): string => createHash('sha256').update(bytes).digest('hex');
 const isCodexLogin = (name: string): boolean => /^codex-.*\.json$/.test(name);
 /** A login's file name without the email it carries (`codex-<id>-<email>-<plan>.json`, state.rs). */
 const shortName = (name: string): string => name.replace(/-[^-]*@[^-]*(?=-|\.json$)/, '');
@@ -81,36 +71,27 @@ function codexLogins(dir: string): Array<string> {
 }
 
 const truthy = (v: unknown): boolean => v === true || (typeof v === 'string' && /^(1|true|yes)$/i.test(v.trim()));
-// Keys that would make CLIProxyAPI refresh on its own schedule rather than the 96h lead (conductor_refresh.go
-// authPreferredInterval), or through the 5-minute SIWC path (types.go IsCodexUseSIWC / SIWCExpirationTime).
-const INTERVAL_KEYS = ['refresh_interval_seconds', 'refreshIntervalSeconds', 'refresh_interval', 'refreshInterval'];
 
 export type Precheck = {
   ok: boolean;
   detail: string;
-  /** Absolute live paths of the logins safe to copy; `startSandbox` copies exactly these. */
+  /** Absolute live paths of the logins a sandbox can use; `startSandbox` copies exactly these. */
   files: Array<string>;
-  /** Nothing is eligible only because of the expiry window, which clears within a day as the live child refreshes. */
-  transient: boolean;
 };
 
 /**
- * Which live Codex logins are safe to copy, each judged on its own: it must stay valid for more than MIN_LOGIN_HOURS,
- * so a sandbox copy is nowhere near its refresh lead, and refresh on no other schedule. A file left out is never
- * copied, so it cannot block the rest. Reads only `expired` and the presence of refresh-schedule keys.
+ * Which live Codex logins a sandbox can use, each judged on its own: its access token must stay valid for more than
+ * MIN_LOGIN_HOURS, and it must not use SIWC, whose renewal lives in a section of its own. A file left out is never
+ * copied, so it cannot block the rest. Reads only `expired` and the SIWC keys.
  */
 export function credentialPrecheck(now = Date.now(), authDir = LIVE_AUTH_DIR): Precheck {
   const names = codexLogins(authDir);
-  if (!names.length) return { ok: false, detail: `no codex-*.json login in ${authDir}`, files: [], transient: false };
+  if (!names.length) return { ok: false, detail: `no codex-*.json login in ${authDir}`, files: [] };
   const files: Array<string> = [];
   const excluded: Array<string> = [];
-  let windowOnly = true;
   let minHours = Infinity;
   for (const f of names) {
-    const refuse = (why: string, window = false): void => {
-      excluded.push(`${shortName(f)} (${why})`);
-      if (!window) windowOnly = false;
-    };
+    const refuse = (why: string): void => void excluded.push(`${shortName(f)} (${why})`);
     let login: Record<string, unknown>;
     try {
       login = JSON.parse(readFileSync(join(authDir, f), 'utf8')) as Record<string, unknown>;
@@ -119,12 +100,7 @@ export function credentialPrecheck(now = Date.now(), authDir = LIVE_AUTH_DIR): P
       continue;
     }
     if (truthy(login.use_siwc) || (typeof login.siwc === 'object' && login.siwc !== null)) {
-      refuse('has a SIWC section (5-minute refresh lead); a copy could rotate it');
-      continue;
-    }
-    const interval = INTERVAL_KEYS.find((k) => k in login);
-    if (interval) {
-      refuse(`sets ${interval}; a copy may refresh on its own schedule`);
+      refuse('uses SIWC, which a copy would still renew');
       continue;
     }
     const expires = typeof login.expired === 'string' ? Date.parse(login.expired) : NaN;
@@ -138,38 +114,38 @@ export function credentialPrecheck(now = Date.now(), authDir = LIVE_AUTH_DIR): P
       continue;
     }
     if (hours <= MIN_LOGIN_HOURS) {
-      refuse(`expires in ${hours.toFixed(0)}h; a copy needs > ${MIN_LOGIN_HOURS}h, the ${REFRESH_LEAD_HOURS}h refresh lead + 24h`, true);
+      refuse(`expires in ${hours.toFixed(0)}h; a copy needs > ${MIN_LOGIN_HOURS}h, and the live router renews it 96h before expiry`);
       continue;
     }
     minHours = Math.min(minHours, hours);
     files.push(resolve(authDir, f));
   }
   const left = excluded.length ? `; left out: ${excluded.join(', ')}` : '';
-  if (!files.length) return { ok: false, detail: `no Codex login is safe to copy: ${excluded.join(', ')}`, files, transient: windowOnly };
+  if (!files.length) return { ok: false, detail: `no Codex login a sandbox can use: ${excluded.join(', ')}`, files };
   const across = files.length > 1 ? ` across ${files.length} logins` : '';
-  return { ok: true, detail: `Codex login valid for ${minHours.toFixed(0)}h (> ${MIN_LOGIN_HOURS}h)${across}${left}`, files, transient: false };
+  return { ok: true, detail: `Codex login valid for ${minHours.toFixed(0)}h (> ${MIN_LOGIN_HOURS}h)${across}${left}`, files };
 }
 
-/** Copy the given live `codex-*.json` files into `destDir` (0700 dir, 0600 files), hashing each file and its `refresh_token`. */
-export function copyCredentials(files: Array<string>, destDir: string): Array<CredentialCopy> {
+/**
+ * Copy the given live `codex-*.json` files into `destDir` (0700 dir, 0600 files) without their `refresh_token`.
+ * Refresh tokens are single use, so a copy that renewed would cost the live login its own; without one, CLIProxyAPI
+ * (8.0.51 and later) never tries.
+ */
+export function copyCredentials(files: Array<string>, destDir: string): void {
   if (!files.length) throw new Error('no Codex login to copy');
   for (const livePath of files) {
     if (!isCodexLogin(basename(livePath)) || !lstatSync(livePath).isFile()) throw new Error(`${shortName(basename(livePath))} is not a codex-*.json login file`);
   }
   mkdirSync(destDir, { recursive: true, mode: 0o700 });
   chmodSync(destDir, 0o700);
-  const copies: Array<CredentialCopy> = [];
   for (const livePath of files) {
-    const file = basename(livePath);
-    const bytes = readFileSync(livePath);
-    const token = (JSON.parse(bytes.toString('utf8')) as { refresh_token?: unknown }).refresh_token;
-    if (typeof token !== 'string' || !token) throw new Error(`${shortName(file)} has no refresh_token`);
-    const copyPath = join(destDir, file);
-    writeFileSync(copyPath, bytes, { mode: 0o600 });
+    const login = JSON.parse(readFileSync(livePath, 'utf8')) as Record<string, unknown>;
+    delete login.refresh_token;
+    delete login.refreshToken;
+    const copyPath = join(destDir, basename(livePath));
+    writeFileSync(copyPath, `${JSON.stringify(login, null, 2)}\n`, { mode: 0o600 });
     chmodSync(copyPath, 0o600);
-    copies.push({ file, livePath, copyPath, liveSha256: sha256(bytes), refreshSha256: sha256(token) });
   }
-  return copies;
 }
 
 /** An xAI access token lasts 6 hours and the probes that use it run in a run's first minutes. */
@@ -178,9 +154,9 @@ const isXaiLogin = (name: string): boolean => /^xai-.*\.json$/.test(name);
 const isMetaLogin = (name: string): boolean => /^meta-.*\.json$/.test(name);
 
 /**
- * Which live Grok and Muse logins a sandbox can use. Unlike a Codex copy, these go in without what renews them
- * (`copyFamilyLogins`), so a copy needs only a credential that works now, and no candidate's code can rotate the live
- * login. Reads only `expired`, `disabled` and the presence of the key.
+ * Which live Grok and Muse logins a sandbox can use. Like a Codex copy, these go in without what renews them
+ * (`copyFamilyLogins`), so a copy needs only a credential that works now. Reads only `expired`, `disabled` and the
+ * presence of the key.
  */
 export function familyPrecheck(now = Date.now(), authDir = LIVE_AUTH_DIR): FamilyLogins {
   const names = existsSync(authDir) ? readdirSync(authDir).filter((n) => (isXaiLogin(n) || isMetaLogin(n)) && lstatSync(join(authDir, n)).isFile()).sort() : [];
@@ -219,8 +195,10 @@ export function copyFamilyLogins(files: Array<string>, destDir: string): void {
   for (const livePath of files) {
     const file = basename(livePath);
     const login = JSON.parse(readFileSync(livePath, 'utf8')) as Record<string, unknown>;
-    if (isXaiLogin(file)) delete login.refresh_token;
-    else if (isMetaLogin(file)) {
+    if (isXaiLogin(file)) {
+      delete login.refresh_token;
+      delete login.refreshToken;
+    } else if (isMetaLogin(file)) {
       // A Meta access token starting "dca:" stands in for dca_token (meta_executor.go extractDCAToken). The API key does the work.
       delete login.dca_token;
       delete login.access_token;
@@ -229,77 +207,6 @@ export function copyFamilyLogins(files: Array<string>, destDir: string): void {
     writeFileSync(copyPath, `${JSON.stringify(login, null, 2)}\n`, { mode: 0o600 });
     chmodSync(copyPath, 0o600);
   }
-}
-
-/** Replace `path` through a temp file in the same directory (0600), so the live child never reads half a login. */
-function replaceAtomically(path: string, bytes: Uint8Array): void {
-  const tmp = join(dirname(path), `.${basename(path)}.canary-${process.pid}`);
-  writeFileSync(tmp, bytes, { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
-}
-
-/**
- * Compare each sandbox copy's refresh token with its copy-time hash. A rotated copy holds the only valid refresh
- * token (they are single-use), so it goes back to the live auth dir when the live file is still the one copied;
- * when both rotated there is nothing safe to write. Synchronous so the exit handler can run it.
- */
-export function postcheckCopies(copies: Array<CredentialCopy>): { status: Status; detail: string } {
-  const notes: Array<string> = [];
-  let status: Status = 'pass';
-  const worse = (s: Status): void => {
-    if (s === 'fail' || (s === 'warn' && status === 'pass')) status = s;
-  };
-  for (const c of copies) {
-    const name = shortName(c.file);
-    if (!existsSync(c.copyPath)) {
-      worse('fail');
-      notes.push(`${name}: sandbox copy is gone; cannot tell whether it rotated`);
-      continue;
-    }
-    const bytes = readFileSync(c.copyPath);
-    let token: unknown;
-    try {
-      token = (JSON.parse(bytes.toString('utf8')) as { refresh_token?: unknown }).refresh_token;
-    } catch {
-      worse('fail');
-      notes.push(`${name}: sandbox copy is not valid JSON`);
-      continue;
-    }
-    if (typeof token === 'string' && sha256(token) === c.refreshSha256) continue;
-    const liveNow = existsSync(c.livePath) ? sha256(readFileSync(c.livePath)) : undefined;
-    if (liveNow === c.liveSha256 && typeof token === 'string' && token) {
-      replaceAtomically(c.livePath, bytes);
-      worse('warn');
-      notes.push(`${name}: sandbox refreshed the Codex login; wrote the new token back to the live auth dir`);
-    } else {
-      worse('fail');
-      notes.push(`${name}: both rotated; run \`model-router login\` if GPT routes fail`);
-    }
-  }
-  return { status, detail: notes.length ? notes.join('; ') : `refresh token unchanged in ${copies.length} login(s)` };
-}
-
-/**
- * Compare the sandbox's login copies with the live ones (after halting the sandbox, so nothing rotates mid-check).
- * Never throws: a failed halt is recorded in the check, and the copies are still compared.
- */
-export async function credentialPostcheck(sb: Sandbox, rec: Recorder): Promise<void> {
-  let haltError = '';
-  try {
-    await sb.halt();
-  } catch (e) {
-    haltError = e instanceof Error ? e.message : String(e);
-  }
-  await rec.time({ tier: 'candidate', target: sb.target.label, name: 'credential-postcheck' }, async () => {
-    const internal = INTERNAL.get(sb);
-    if (internal) internal.postchecked = true;
-    if (!sb.credentials.length)
-      return haltError ? { status: 'warn', detail: `halt failed: ${haltError}; no credentials were copied` } : { status: 'skip', detail: 'no credentials were copied' };
-    const r = postcheckCopies(sb.credentials);
-    if (!haltError) return r;
-    return { status: 'fail', detail: `halt failed (${haltError}), so the sandbox may still rotate its copy; ${r.detail}` };
-  });
 }
 
 /** The sandbox's config.toml: its two ports, and grok and muse only when it has their logins (off in config.rs defaults). */
@@ -428,14 +335,14 @@ const tail = (path: string, n = 200): string => {
   }
 };
 
-type Internal = { postchecked: boolean; emergency: () => void };
-const INTERNAL = new WeakMap<Sandbox, Internal>();
+/** Process exit, when nothing async runs any more: signal each sandbox's router and delete its root. */
+const EMERGENCY = new WeakMap<Sandbox, () => void>();
 const ACTIVE = new Set<Sandbox>();
 let handlersInstalled = false;
 
 /**
- * An interrupted run still stops its sandboxes (write-back included) and deletes them. SIGINT/SIGTERM stop every
- * active sandbox and then exit; a plain exit can only signal the routers and run the synchronous postcheck.
+ * An interrupted run still stops its sandboxes and deletes them. SIGINT/SIGTERM stop every active sandbox and then
+ * exit; a plain exit can only signal the routers and delete the roots.
  */
 function installHandlers(): void {
   if (handlersInstalled) return;
@@ -450,7 +357,7 @@ function installHandlers(): void {
   process.on('SIGINT', () => onSignal('SIGINT', 130));
   process.on('SIGTERM', () => onSignal('SIGTERM', 143));
   process.on('exit', () => {
-    for (const s of ACTIVE) INTERNAL.get(s)?.emergency();
+    for (const s of ACTIVE) EMERGENCY.get(s)?.();
   });
 }
 
@@ -526,19 +433,14 @@ export async function startSandbox(spec: SandboxSpec, rec: Recorder): Promise<Sa
     root,
     upstreamVersion: '',
     cpaLogFile,
-    credentials: [],
     halt,
     stop: (opts = {}) =>
       (stopped ??= (async () => {
         const t1 = performance.now();
         try {
-          try {
-            await halt();
-          } catch (e) {
-            leftovers.push(`stop error: ${e instanceof Error ? e.message : String(e)}`);
-          }
-          // Runs after a failed halt too (it records the failure), so a rotated login is still written back.
-          if (!INTERNAL.get(sb)!.postchecked && sb.credentials.length) await credentialPostcheck(sb, rec);
+          await halt();
+        } catch (e) {
+          leftovers.push(`stop error: ${e instanceof Error ? e.message : String(e)}`);
         } finally {
           // The copies go whatever happened above (never the live auth dir: nothing here points at it).
           try {
@@ -562,23 +464,13 @@ export async function startSandbox(spec: SandboxSpec, rec: Recorder): Promise<Sa
         });
       })()),
   };
-  INTERNAL.set(sb, {
-    postchecked: false,
-    // Process exit: nothing async runs any more. Signal the router, rescue a rotated login, delete the copies.
-    emergency: () => {
-      try {
-        if (proc && proc.exitCode === null && proc.signalCode === null) proc.kill('SIGTERM');
-        const internal = INTERNAL.get(sb)!;
-        if (!internal.postchecked && sb.credentials.length) {
-          internal.postchecked = true;
-          const r = postcheckCopies(sb.credentials);
-          if (r.status !== 'pass') console.error(`${spec.label} sandbox at exit: ${r.detail}`);
-        }
-        rmSync(root, { recursive: true, force: true });
-      } catch {
-        // Best effort at exit.
-      }
-    },
+  EMERGENCY.set(sb, () => {
+    try {
+      if (proc && proc.exitCode === null && proc.signalCode === null) proc.kill('SIGTERM');
+      rmSync(root, { recursive: true, force: true });
+    } catch {
+      // Best effort at exit.
+    }
   });
   ACTIVE.add(sb);
   installHandlers();
@@ -601,9 +493,7 @@ export async function startSandbox(spec: SandboxSpec, rec: Recorder): Promise<Sa
 
   if (spec.copyCredentials !== false) {
     try {
-      sb.credentials = copyCredentials(spec.files ?? [], join(state, 'codex-auth'));
-      // What sweepSandboxes needs to write a rotated copy back if this run dies without stopping (no secrets).
-      writeJsonAtomic(join(root, COPIES_FILE), sb.credentials, 0o600);
+      copyCredentials(spec.files ?? [], join(state, 'codex-auth'));
       copyFamilyLogins(spec.family?.files ?? [], join(state, 'codex-auth'));
     } catch (e) {
       return abort(`copying credentials: ${e instanceof Error ? e.message : String(e)}`);
@@ -678,45 +568,21 @@ export async function startSandbox(spec: SandboxSpec, rec: Recorder): Promise<Sa
     return abort(`child GET /v1/models: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  const copied = spec.copyCredentials === false ? 0 : (spec.files?.length ?? 0) + (spec.family?.files.length ?? 0);
   const check: Check = {
     ...base,
     name: 'sandbox-start',
     status: 'pass',
-    detail: `ready in ${readyS.toFixed(1)}s; router ${spec.routerVersion} running ${basename(dirname(spec.cpaBinary))}/${basename(spec.cpaBinary)} in the v${pin} slot; child lists ${models} models; ${sb.credentials.length + (spec.family?.files.length ?? 0)} login(s) copied`,
-    metrics: { ready_s: readyS, models, logins: sb.credentials.length },
+    detail: `ready in ${readyS.toFixed(1)}s; router ${spec.routerVersion} running ${basename(dirname(spec.cpaBinary))}/${basename(spec.cpaBinary)} in the v${pin} slot; child lists ${models} models; ${copied} login(s) copied`,
+    metrics: { ready_s: readyS, models, logins: copied },
     ms: performance.now() - t0,
   };
   rec.add(check);
   return sb;
 }
 
-/** A sandbox root's copies.json, accepted only when every entry points inside that root and the live auth dir. */
-function loadCopies(root: string, liveAuthDir: string): Array<CredentialCopy> | string {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(readFileSync(join(root, COPIES_FILE), 'utf8'));
-  } catch {
-    return `${COPIES_FILE} is unreadable; cannot tell whether a copy rotated`;
-  }
-  const copyDir = join(root, 'state/model-router/codex-auth');
-  const hex = /^[0-9a-f]{64}$/;
-  const valid = (c: Partial<Record<keyof CredentialCopy, unknown>>): boolean =>
-    typeof c.file === 'string' &&
-    isCodexLogin(c.file) &&
-    basename(c.file) === c.file &&
-    c.livePath === join(liveAuthDir, c.file) &&
-    c.copyPath === join(copyDir, c.file) &&
-    typeof c.liveSha256 === 'string' &&
-    hex.test(c.liveSha256) &&
-    typeof c.refreshSha256 === 'string' &&
-    hex.test(c.refreshSha256);
-  if (!Array.isArray(raw) || !raw.every((c) => typeof c === 'object' && c !== null && valid(c as Record<string, unknown>)))
-    return `${COPIES_FILE} names files outside this sandbox or the live auth dir; wrote nothing back`;
-  return raw as Array<CredentialCopy>;
-}
-
-/** Clean one abandoned root: stop its own processes, write a rotated copy back, delete it (kept if a process is stuck). */
-async function sweepRoot(root: string, liveAuthDir: string, graceMs: number): Promise<{ status: Status; notes: Array<string> }> {
+/** Clean one abandoned root: stop its own processes and delete it (kept if a process is stuck). */
+async function sweepRoot(root: string, graceMs: number): Promise<{ status: Status; notes: Array<string> }> {
   const notes: Array<string> = [];
   let status: Status = 'warn';
   let stuck = false;
@@ -733,21 +599,6 @@ async function sweepRoot(root: string, liveAuthDir: string, graceMs: number): Pr
   const routerStopped = await stop('router', join(root, ROUTER_PID_FILE), 0);
   await stop('child', join(root, 'state/model-router/cliproxyapi-child.json'), routerStopped ? 5000 : 0);
 
-  if (existsSync(join(root, COPIES_FILE))) {
-    const copies = loadCopies(root, liveAuthDir);
-    if (typeof copies === 'string') {
-      status = 'fail';
-      notes.push(copies);
-    } else if (copies.length) {
-      const r = postcheckCopies(copies);
-      if (r.status === 'fail') status = 'fail';
-      notes.push(r.detail);
-    }
-  } else if (codexLogins(join(root, 'state/model-router/codex-auth')).length && existsSync(join(root, ROUTER_PID_FILE))) {
-    status = 'fail';
-    notes.push(`login copies were served but ${COPIES_FILE} is missing; cannot tell whether they rotated`);
-  }
-
   if (stuck) {
     status = 'fail';
     notes.push('kept the sandbox so the next sweep retries');
@@ -759,15 +610,14 @@ async function sweepRoot(root: string, liveAuthDir: string, graceMs: number): Pr
 }
 
 /**
- * Clean up after runs that died without stopping their sandboxes (kill -9, a crash, launchd's SIGKILL). An orphaned
- * CLIProxyAPI keeps refreshing its login copy and can rotate the live login with no postcheck to write it back; its
- * ports also block every later run. For each root left in SANDBOXES: stop the router and child that are provably that
- * root's own (anything else is left alone), write a rotated copy back, delete the root. Records one `sandbox-sweep`
- * check: pass when nothing was left, warn when it cleaned leftovers, fail when a write-back was impossible or a process
- * could not be stopped. Call under the canary lock before starting a sandbox: every root this process did not start
- * counts as abandoned.
+ * Clean up after runs that died without stopping their sandboxes (kill -9, a crash, launchd's SIGKILL): their
+ * processes hold ports every later run needs, and their roots hold login copies. For each root left in SANDBOXES: stop
+ * the router and child that are provably that root's own (anything else is left alone), then delete the root. Records
+ * one `sandbox-sweep` check: pass when nothing was left, warn when it cleaned leftovers, fail when a process could not
+ * be stopped. Call under the canary lock before starting a sandbox: every root this process did not start counts as
+ * abandoned.
  */
-export async function sweepSandboxes(rec: Recorder, opts: { dir?: string; liveAuthDir?: string; graceMs?: number } = {}): Promise<void> {
+export async function sweepSandboxes(rec: Recorder, opts: { dir?: string; graceMs?: number } = {}): Promise<void> {
   const dir = opts.dir ?? SANDBOXES;
   await rec.time({ tier: 'candidate', target: 'canary', name: 'sandbox-sweep' }, async () => {
     const active = new Set([...ACTIVE].map((s) => s.root));
@@ -781,7 +631,7 @@ export async function sweepSandboxes(rec: Recorder, opts: { dir?: string; liveAu
     let status: Status = 'warn';
     const notes: Array<string> = [];
     for (const root of roots) {
-      const r = await sweepRoot(root, opts.liveAuthDir ?? LIVE_AUTH_DIR, opts.graceMs ?? ROUTER_STOP_MS);
+      const r = await sweepRoot(root, opts.graceMs ?? ROUTER_STOP_MS);
       if (r.status === 'fail') status = 'fail';
       notes.push(`${basename(root)}: ${r.notes.join(', ')}`);
     }

@@ -5,11 +5,8 @@ import { join } from 'node:path';
 import { REPO } from './env';
 import { Recorder } from './report';
 import {
-  anchorHash,
   auditSource,
   compareVersions,
-  goFiles,
-  goFunc,
   hostTarget,
   normalizeGo,
   parseChecksums,
@@ -17,10 +14,7 @@ import {
   parseVendoredChecksums,
   pickCandidate,
   pinnedVersion,
-  refreshAnchors,
-  REVIEWED_REFRESH,
   routerYamlKeys,
-  serviceTierAnchors,
   vendoredChecksums,
 } from './upstream';
 
@@ -99,260 +93,36 @@ test('router-written YAML keys come from string literals in supervisor.rs, not f
   for (const k of ['served', 'pinned', 'exclusions', 'yaml', 'provider']) expect(keys).not.toContain(k);
 });
 
-test('goFunc takes a gofmt func through its closing brace; normalizeGo drops comments and spacing', () => {
-  const src = 'package x\n\n// doc\nfunc a() int {\n\t// inner\n\treturn 1 // trailing\n}\n\nfunc b() {}\n';
-  const body = goFunc([{ path: 'x.go', text: src }], /^func a\(/m)!;
-  expect(normalizeGo(body)).toEqual(['func a() int {', 'return 1', '}']);
-  expect(goFunc([{ path: 'x.go', text: src }], /^func c\(/m)).toBeUndefined();
+test('normalizeGo drops comments, blank lines and spacing', () => {
+  const src = 'package x\n\n// doc\nfunc a() int {\n\t// inner\n\treturn   1 // trailing\n}\n';
+  expect(normalizeGo(src)).toEqual(['package x', 'func a() int {', 'return 1', '}']);
 });
 
-// A minimal source tree holding every refresh anchor, the identity lines, exclusion reads and all router YAML keys.
-function fakeSource(dir: string, edits: { lead?: string; siwcGuard?: string; siwcTail?: string; ua?: string; dropKey?: string; speed?: string; effort?: string; finalize?: string; contributor?: boolean } = {}): string {
+// A minimal source tree defining every YAML key the router writes, less `dropKey`.
+function fakeSource(dir: string, dropKey?: string): string {
   const root = join(dir, 'CLIProxyAPI-x');
-  mkdirSync(join(root, 'sdk/cliproxy/auth'), { recursive: true });
-  mkdirSync(join(root, 'internal/runtime/executor/helps'), { recursive: true });
-  mkdirSync(join(root, 'internal/translator/codex/claude'), { recursive: true });
-  mkdirSync(join(root, 'internal/translator/openai/claude'), { recursive: true });
-  mkdirSync(join(root, 'internal/thinking'), { recursive: true });
-  writeFileSync(
-    join(root, 'sdk/cliproxy/auth/types.go'),
-    `package auth
-
-const CodexOuterRefreshLead = ${edits.lead ?? '96 * time.Hour'}
-
-const CodexSIWCRefreshLead = 5 * time.Minute
-
-func CodexOuterNeedsRefresh(a *Auth, now time.Time) (time.Time, bool, bool) {
-\treturn now, true, false
-}
-
-func CodexSIWCNeedsRefresh(a *Auth, now time.Time) (time.Time, bool, bool) {
-\tsiwcMap, ok := a.Metadata["siwc"].(map[string]any)
-\tif !ok || len(siwcMap) == 0${edits.siwcGuard ?? ''} {
-\t\treturn time.Time{}, false, false
-\t}
-\treturn now, true, ${edits.siwcTail ?? 'false'}
-}
-`,
-  );
-  writeFileSync(
-    join(root, 'sdk/cliproxy/auth/conductor_refresh.go'),
-    `package auth
-
-func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duration) {
-\tgo m.loop(interval)
-}
-
-func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
-\treturn false
-}
-
-func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool) (*Auth, bool) {
-\treturn auth, false
-}
-
-func isUnauthorizedError(err error) bool {
-\treturn strings.Contains(err.Error(), "status 401")
-}
-
-func authPreferredInterval(a *Auth) time.Duration {
-\treturn 0
-}
-`,
-  );
-  writeFileSync(join(root, 'sdk/cliproxy/codex.go'), 'package cliproxy\n\nfunc (a *CodexAuthenticator) RefreshLead() *time.Duration {\n\treturn new(coreauth.CodexOuterRefreshLead)\n}\n');
-  if (edits.contributor) writeFileSync(join(root, 'internal/runtime/executor/meta.go'), 'package executor\n\nfunc stamp(req *http.Request) {\n\treq.Header.Set("X-Tbh-Contributor-Mode", "1")\n}\n');
-  writeFileSync(
-    join(root, 'sdk/cliproxy/service_lifecycle.go'),
-    'package cliproxy\n\nfunc run() {\n\tinterval := 15 * time.Minute\n\ts.coreManager.StartAutoRefresh(ctx, interval)\n\tif val, ok := a.Attributes["excluded_models"]; ok {\n\t\texcluded = val\n\t}\n}\n',
-  );
-  writeFileSync(
-    join(root, 'internal/runtime/executor/codex_executor_request.go'),
-    `package executor\n\nconst codexUserAgent = "${edits.ua ?? 'codex-tui/0.154.0'}"\nconst codexOriginator = "codex-tui"\n\n` +
-      'func applyCodexRoutingHint(headers http.Header, body []byte) {\n\tif tier := gjson.GetBytes(body, "service_tier"); tier.Type == gjson.String {\n\t\theaders.Set(hint, "tier="+tier.String())\n\t}\n}\n\n' +
-      `func (e *CodexExecutor) cacheHelper(ctx context.Context, rawJSON []byte) []byte {\n\t${edits.finalize ?? 'rawJSON = normalize(rawJSON)'}\n\trawJSON = helps.FinalizePayload(ctx, rawJSON)\n\treturn rawJSON\n}\n`,
-  );
-  writeFileSync(
-    join(root, 'internal/runtime/executor/helps/payload_helpers.go'),
-    'package helps\n\nfunc payloadHeadersMatch(headers http.Header, rules map[string]string) bool {\n\treturn len(rules) == 0\n}\n',
-  );
-  writeFileSync(
-    join(root, 'internal/translator/codex/claude/codex_claude_request.go'),
-    `package claude
-
-func ConvertClaudeRequestToCodex(rootResult gjson.Result) {
-\treasoningEffort := "medium"
-\tif v := rootResult.Get("output_config.effort"); v.Exists() && ${edits.effort ?? 'true'} {
-\t\treasoningEffort = v.String()
-\t}
-\ttemplate, _ = sjson.SetBytes(template, "reasoning.effort", reasoningEffort)
-\tserviceTier := normalizeCodexServiceTier(rootResult.Get("service_tier"))
-\tif speed := rootResult.Get("speed"); speed.Type == gjson.String && speed.String() == "${edits.speed ?? 'fast'}" {
-\t\tserviceTier = "priority"
-\t}
-\tif serviceTier != "" {
-\t\ttemplate, _ = sjson.SetBytes(template, "service_tier", serviceTier)
-\t}
-}
-
-func normalizeCodexServiceTier(result gjson.Result) string {
-\tswitch strings.ToLower(result.String()) {
-\tcase "fast", "priority":
-\t\treturn "priority"
-\t}
-\treturn ""
-}
-`,
-  );
-  writeFileSync(
-    join(root, 'internal/translator/openai/claude/openai_claude_request.go'),
-    'package claude\n\nfunc ConvertClaudeRequestToOpenAI(root gjson.Result) {\n\tif v := root.Get("output_config.effort"); v.Exists() {\n\t\tout, _ = sjson.SetBytes(out, "reasoning_effort", v.String())\n\t}\n}\n',
-  );
-  writeFileSync(
-    join(root, 'internal/thinking/apply.go'),
-    'package thinking\n\nfunc extractClaudeConfig(body []byte) ThinkingConfig {\n\treturn ThinkingConfig{}\n}\n',
-  );
-  const keys = routerYamlKeys(readFileSync(join(REPO, 'crates/model-router/src/supervisor.rs'), 'utf8')).filter((k) => k !== edits.dropKey);
-  writeFileSync(
-    join(root, 'internal/config.go'),
-    'package config\n\ntype Config struct {\n' + keys.map((k, i) => `\tF${i} string \`yaml:"${k}" json:"${k}"\``).join('\n') + '\n}\n',
-  );
+  mkdirSync(join(root, 'internal'), { recursive: true });
+  const keys = routerYamlKeys(readFileSync(join(REPO, 'crates/model-router/src/supervisor.rs'), 'utf8')).filter((k) => k !== dropKey);
+  writeFileSync(join(root, 'internal/config.go'), 'package config\n\ntype Config struct {\n' + keys.map((k, i) => `\tF${i} string \`yaml:"${k}" json:"${k}"\``).join('\n') + '\n}\n');
   return root;
 }
 
-function audit(edits: Parameters<typeof fakeSource>[1]): Record<string, { status: string; detail: string }> {
+function audit(dropKey?: string): Record<string, { status: string; detail: string }> {
   const dir = mkdtempSync(join(tmpdir(), 'canary-upstream-'));
   try {
-    const pinned = fakeSource(join(dir, 'a'));
-    const cand = fakeSource(join(dir, 'b'), edits);
-    const checks = auditSource(pinned, cand, new Recorder());
+    const checks = auditSource(fakeSource(join(dir, 'a')), fakeSource(join(dir, 'b'), dropKey), new Recorder());
     return Object.fromEntries(checks.map((c) => [c.name, { status: c.status, detail: c.detail }]));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test('an unchanged candidate passes every audit check', () => {
-  const r = audit({});
-  expect(Object.values(r).map((c) => c.status)).toEqual(['pass', 'pass', 'pass', 'pass', 'pass', 'pass', 'pass']);
-  expect(r['refresh-lead']!.detail).toBe('unchanged (12 anchors)');
-  expect(r['service-tier']!.detail).toBe('unchanged (5 anchors)');
-  expect(r['claude-effort']!.detail).toBe('unchanged (3 anchors)');
-});
-
-test("a change to how the Claude translator reads effort warns claude-effort", () => {
-  const r = audit({ effort: 'thinkingSet' });
-  expect(r['claude-effort']!.status).toBe('warn');
-  expect(r['claude-effort']!.detail).toContain('Codex translator');
-  expect(r['claude-effort']!.detail).toContain('$.model.complete sends it, still reaches the upstream');
-});
-
-test("a change to the Claude translator's speed mapping warns service-tier", () => {
-  const r = audit({ speed: 'priority' });
-  expect(r['service-tier']!.status).toBe('warn');
-  expect(r['service-tier']!.detail).toContain('speed mapping');
-});
-
-test('a change before the Codex payload finalizer warns service-tier for the -ultrafast relay', () => {
-  const r = audit({ finalize: 'rawJSON = stripTier(rawJSON)' });
-  expect(r['service-tier']!.status).toBe('warn');
-  expect(r['service-tier']!.detail).toContain('payload finalize');
-  expect(r['service-tier']!.detail).toContain('an -ultrafast one as ultrafast');
-});
-
-test('service-tier anchors read the Claude translator, not the OpenAI one of the same name', () => {
-  const tier = 'func normalizeCodexServiceTier(result gjson.Result) string {\n\treturn ""\n}\n';
-  const files = [
-    { path: 'internal/translator/codex/openai/chat-completions/codex_openai_request.go', text: `package chat\n\n${tier}` },
-    { path: 'internal/translator/codex/claude/codex_claude_request.go', text: `package claude\n\n${tier.replace('""', '"priority"')}` },
-  ];
-  expect(serviceTierAnchors(files).normalizeCodexServiceTier).toContain('return "priority"');
-  expect(serviceTierAnchors(files.slice(0, 1)).normalizeCodexServiceTier).toBeUndefined();
-});
-
-test('missing pinned anchors keep each check’s own verdict', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-upstream-'));
-  try {
-    const pinned = fakeSource(join(dir, 'a'));
-    const cand = fakeSource(join(dir, 'b'));
-    const refresh = join(pinned, 'sdk/cliproxy/auth/types.go');
-    const tier = join(pinned, 'internal/translator/codex/claude/codex_claude_request.go');
-    writeFileSync(refresh, readFileSync(refresh, 'utf8').replace('func CodexOuterNeedsRefresh(', 'func oldRefresh('));
-    writeFileSync(tier, readFileSync(tier, 'utf8').replace('func normalizeCodexServiceTier(', 'func oldTier('));
-    const checks = auditSource(pinned, cand, new Recorder());
-    const byName = Object.fromEntries(checks.map((c) => [c.name, c]));
-    expect(byName['refresh-lead']!.status).toBe('fail');
-    expect(byName['refresh-lead']!.detail).toContain('audit anchors not found in the pinned source (CodexOuterNeedsRefresh)');
-    expect(byName['service-tier']!.status).toBe('warn');
-    expect(byName['service-tier']!.detail).toBe('service-tier anchors not found in the pinned source (normalizeCodexServiceTier); update upstream.ts serviceTierAnchors');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('a changed refresh lead fails refresh-lead', () => {
-  const r = audit({ lead: '120 * time.Hour' });
-  expect(r['refresh-lead']!.status).toBe('fail');
-  expect(r['refresh-lead']!.detail).toMatch(/CodexOuterRefreshLead [0-9a-f]{16}/);
-});
-
-test('a refresh change reviewed by hand passes, and only for the reviewed body', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-upstream-'));
-  try {
-    const pinned = fakeSource(join(dir, 'a'));
-    const cand = fakeSource(join(dir, 'b'), { lead: '120 * time.Hour' });
-    const other = fakeSource(join(dir, 'c'), { lead: '200 * time.Hour' });
-    const body = refreshAnchors(goFiles(cand)).CodexOuterRefreshLead!;
-    const reviewed = { CodexOuterRefreshLead: { [anchorHash(body)]: 'test' } };
-    const ok = auditSource(pinned, cand, new Recorder(), undefined, reviewed)[0]!;
-    expect(ok.status).toBe('pass');
-    expect(ok.detail).toContain('reviewed by hand (CodexOuterRefreshLead');
-    expect(auditSource(pinned, other, new Recorder(), undefined, reviewed)[0]!.status).toBe('fail');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('a candidate that names the Muse Contributor-mode header fails', () => {
-  expect(audit({})['muse-contributor']!.status).toBe('pass');
-  const r = audit({ contributor: true })['muse-contributor']!;
-  expect(r.status).toBe('fail');
-  expect(r.detail).toContain('meta.go');
-});
-
-test('REVIEWED_REFRESH names real anchors by short hashes', () => {
-  for (const [k, hashes] of Object.entries(REVIEWED_REFRESH)) {
-    expect(Object.keys(refreshAnchors([])).includes(k)).toBe(true);
-    for (const h of Object.keys(hashes)) expect(h).toMatch(/^[0-9a-f]{16}$/);
-  }
-});
-
-test('a SIWC-only change warns, but a change to the guard every login passes through fails', () => {
-  expect(audit({ siwcTail: 'true' })['refresh-lead']!.status).toBe('warn');
-  expect(audit({ siwcGuard: ' || true' })['refresh-lead']!.status).toBe('fail');
-});
-
-test('comment and whitespace edits are not changes', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-upstream-'));
-  try {
-    const pinned = fakeSource(join(dir, 'a'));
-    const cand = fakeSource(join(dir, 'b'));
-    const f = join(cand, 'sdk/cliproxy/auth/conductor_refresh.go');
-    writeFileSync(f, readFileSync(f, 'utf8').replace('\treturn false', '\t// a new comment\n\treturn   false // why'));
-    expect(auditSource(pinned, cand, new Recorder())[0]!.status).toBe('pass');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('a new Codex user agent warns codex-identity with the new line', () => {
-  const r = audit({ ua: 'codex-tui/0.160.0' });
-  expect(r['codex-identity']!.status).toBe('warn');
-  expect(r['codex-identity']!.detail).toContain('0.160.0');
+test('an unchanged candidate passes config-keys', () => {
+  expect(audit()['config-keys']!.status).toBe('pass');
 });
 
 test('a router-written YAML key missing from the candidate fails config-keys', () => {
-  const r = audit({ dropKey: 'disable-claude-cloak-mode' });
+  const r = audit('disable-claude-cloak-mode');
   expect(r['config-keys']!.status).toBe('fail');
   expect(r['config-keys']!.detail).toContain('disable-claude-cloak-mode');
 });

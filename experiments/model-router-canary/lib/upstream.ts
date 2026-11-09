@@ -234,157 +234,6 @@ export function normalizeGo(code: string): Array<string> {
     .filter(Boolean);
 }
 
-/** The first top-level func matching `decl` (e.g. /^func \(m \*Manager\) shouldRefresh\(/m), through its closing brace. gofmt puts that brace alone at column 0. */
-export function goFunc(files: Array<GoFile>, decl: RegExp): string | undefined {
-  for (const f of files) {
-    const m = decl.exec(f.text);
-    if (!m) continue;
-    const end = f.text.indexOf('\n}\n', m.index);
-    return f.text.slice(m.index, end < 0 ? undefined : end + 2);
-  }
-  return undefined;
-}
-
-/** Each line matching `re`, with `before` and `after` lines of context, normalized; sorted so file moves don't count. */
-function linesAround(files: Array<GoFile>, re: RegExp, before = 0, after = 0): Array<string> {
-  const out: Array<string> = [];
-  for (const f of files) {
-    const lines = f.text.split('\n');
-    lines.forEach((l, i) => {
-      if (re.test(l)) out.push(normalizeGo(lines.slice(Math.max(0, i - before), i + after + 1).join('\n')).join(' ⏎ '));
-    });
-  }
-  return out.sort();
-}
-
-/** An audit anchor: the func `goFunc` finds, normalized; undefined when there is none. */
-function funcAnchor(files: Array<GoFile>, decl: RegExp): string | undefined {
-  const body = goFunc(files, decl);
-  return body === undefined ? undefined : normalizeGo(body).join('\n');
-}
-
-/** An audit anchor: each run of lines from one matching `start` through the next matching `end`, normalized. */
-function spanAnchor(files: Array<GoFile>, start: RegExp, end: RegExp): string | undefined {
-  const spans: Array<string> = [];
-  for (const f of files) {
-    const lines = f.text.split('\n');
-    lines.forEach((l, i) => {
-      if (!start.test(l)) return;
-      const j = lines.findIndex((m, k) => k > i && end.test(m));
-      if (j > i) spans.push(normalizeGo(lines.slice(i, j + 1).join('\n')).join(' ⏎ '));
-    });
-  }
-  return spans.length ? spans.sort().join('\n') : undefined;
-}
-
-/** An audit anchor: every match of `linesAround`; undefined when there are none. */
-function linesAnchor(files: Array<GoFile>, re: RegExp, before = 0, after = 0): string | undefined {
-  const xs = linesAround(files, re, before, after);
-  return xs.length ? xs.join('\n') : undefined;
-}
-
-/** What decides when a Codex login refreshes: lead constants, the due-time functions, the auto-refresh start. */
-export function refreshAnchors(files: Array<GoFile>): Record<string, string | undefined> {
-  const siwc = funcAnchor(files, /^func CodexSIWCNeedsRefresh\(/m)?.split('\n');
-  const guardEnd = siwc?.findIndex((l) => l.includes('len(siwcMap) == 0')) ?? -1;
-  return {
-    // sdk/cliproxy/auth/types.go: 96h before the nominal JWT expiry (8.0.34).
-    CodexOuterRefreshLead: linesAnchor(files, /^\s*(const\s+)?CodexOuterRefreshLead\s*=/),
-    CodexSIWCRefreshLead: linesAnchor(files, /^\s*(const\s+)?(Codex)?SIWCRefreshLead\s*=/),
-    CodexOuterNeedsRefresh: funcAnchor(files, /^func CodexOuterNeedsRefresh\(/m),
-    // shouldRefresh asks the SIWC function first for every login; its opening lines return for a login without a
-    // `siwc` section, so only they must hold for such a login. The rest is SIWC-only (SIWC_ONLY).
-    'CodexSIWCNeedsRefresh guard': siwc && guardEnd >= 0 ? siwc.slice(0, guardEnd + 3).join('\n') : undefined,
-    CodexSIWCNeedsRefresh: siwc?.join('\n'),
-    shouldRefresh: funcAnchor(files, /^func \(\w+ \*Manager\) shouldRefresh\(/m),
-    // A request that fails as unauthorized refreshes at once, whatever the token's age; what counts as one decides
-    // whether a sandbox request can rotate the copied login.
-    tryRefreshAfterUnauthorized: funcAnchor(files, /^func \(\w+ \*Manager\) tryRefreshAfterUnauthorized\(/m),
-    isUnauthorizedError: funcAnchor(files, /^func isUnauthorizedError\(/m),
-    authPreferredInterval: funcAnchor(files, /^func authPreferredInterval\(/m),
-    StartAutoRefresh: funcAnchor(files, /^func \(\w+ \*Manager\) StartAutoRefresh\(/m),
-    'CodexAuthenticator.RefreshLead': funcAnchor(files, /^func \(\w+ \*?CodexAuthenticator\) RefreshLead\(/m),
-    // service_lifecycle.go starts the loop on every service start (interval 15m in 8.0.34); the call and the lines
-    // before it show the interval and any new refresh-on-start step.
-    'StartAutoRefresh call': linesAnchor(files, /\.StartAutoRefresh\(/, 2),
-  };
-}
-
-/** Anchors that only matter for a login with a `siwc` section, which credentialPrecheck refuses to copy. */
-export const SIWC_ONLY = new Set(['CodexSIWCRefreshLead', 'CodexSIWCNeedsRefresh']);
-
-/**
- * Refresh anchor bodies reviewed by hand and found safe for sandbox copies: anchor → `anchorHash` of the candidate's
- * body → the release and why. A changed anchor whose body is listed here doesn't fail refresh-lead; a further change
- * to it does. Entries are moot once the pin reaches their release; drop them at that re-pin.
- */
-export const REVIEWED_REFRESH: Record<string, Record<string, string>> = {
-  shouldRefresh: {
-    d0666c6776766507: '8.0.51: returns false for a Codex login with no refresh_token and no SIWC section (95f125ff). A login that can be copied has one, so it is not affected.',
-    '5ab5e6bdba298721':
-      '8.0.53: a new branch for a login whose refresh token was already rejected as terminal (RequiresSignIn, and the token equals RejectedRefreshToken; both in-memory only, so a fresh copy never starts in it). It returns false while the access token is valid, else true, and refreshAuth then hits the unchanged guard that never resubmits a rejected grant. It can only stop or reschedule refreshes, never submit one.',
-  },
-};
-
-/** The short hash REVIEWED_REFRESH keys an anchor body by. */
-export const anchorHash = (body: string): string => createHash('sha256').update(body).digest('hex').slice(0, 16);
-
-/** Lines of the Codex executor that set the upstream identity (Originator, User-Agent, version strings). */
-export function codexIdentityLines(files: Array<GoFile>): Array<string> {
-  const codex = files.filter((f) => /^codex_.*\.go$/.test(basename(f.path)));
-  return linesAround(codex, /originator|user-?agent|x-codex|codex-tui|codex_cli_rs|"version"|client-?version/i);
-}
-
-/**
- * What turns the router's `service_tier: "priority"` into Codex's priority tier (8.0.34): the Claude translator's
- * tier normalization and its `speed` mapping, and the routing hint the Codex executor derives from the final body; and
- * what writes an `-ultrafast` route's tier into that body.
- */
-export function serviceTierAnchors(files: Array<GoFile>): Record<string, string | undefined> {
-  // The OpenAI chat translator has its own normalizeCodexServiceTier; the router's requests take the Claude one.
-  const claude = files.filter((f) => f.path.includes('translator/codex/claude/'));
-  const codexRequest = files.filter((f) => basename(f.path) === 'codex_executor_request.go');
-  return {
-    normalizeCodexServiceTier: funcAnchor(claude, /^func normalizeCodexServiceTier\(/m),
-    'speed mapping': linesAnchor(claude, /Get\("speed"\)/, 1, 3),
-    applyCodexRoutingHint: funcAnchor(files, /^func applyCodexRoutingHint\(/m),
-    // The `-ultrafast` relay (8.0.44): a payload rule matched on the router's header writes the tier into the final
-    // body, in the Codex executor's cacheHelper, before the routing hint reads it.
-    'payload finalize': linesAnchor(codexRequest, /helps\.FinalizePayload\(/, 2),
-    payloadHeadersMatch: funcAnchor(files, /^func payloadHeadersMatch\(/m),
-  };
-}
-
-/**
- * What turns a Claude request's `output_config.effort` into the upstream's reasoning effort: the Codex translator's
- * effort block (Muse shares it), the OpenAI-compatible translator's reads, and the Claude-format thinking reader, which
- * carries effort to openai-compat when there is no thinking block. Before 8.0.38 none of them took effort without a
- * `thinking` block, and a plugin's `$.model.complete` sends none, so hive recall's effort low ran at medium.
- */
-export function effortAnchors(files: Array<GoFile>): Record<string, string | undefined> {
-  const codex = files.filter((f) => f.path.includes('translator/codex/claude/'));
-  const openai = files.filter((f) => f.path.includes('translator/openai/claude/'));
-  return {
-    'Codex translator': spanAnchor(codex, /reasoningEffort := /, /"reasoning\.effort"/),
-    'OpenAI translator': linesAnchor(openai, /output_config\.effort/, 3, 6),
-    extractClaudeConfig: funcAnchor(files, /^func extractClaudeConfig\(/m),
-  };
-}
-
-/** The code around each read of a login's own `excluded_models` (8.0.33 made a nonempty one replace the global list). */
-export function excludedModelsLines(files: Array<GoFile>): Array<string> {
-  return linesAround(files, /Attributes\["excluded_models"\]/, 3, 3);
-}
-
-/**
- * The source files naming Muse's Contributor-mode header. Meta trains on that traffic, and Standard mode promises the
- * header never goes out (muse.rs); the router's opt-in relay lives in the login files, so the child's source has no
- * reason to name it. From 8.0.50 it sets the header to 1 on every Meta request, and no per-login setting can remove it.
- */
-export function museContributorFiles(files: Array<GoFile>): Array<string> {
-  return files.filter((f) => /X-Tbh-Contributor-Mode/i.test(f.text)).map((f) => basename(f.path));
-}
-
 /** Every YAML key model-router writes into the child's config, read from supervisor.rs `upstream_config_yaml`. */
 export function routerYamlKeys(supervisorRs: string): Array<string> {
   // The function and the helpers that render its sections.
@@ -419,43 +268,14 @@ export function goYamlTags(files: Array<GoFile>): Set<string> {
   return tags;
 }
 
-/** Added and removed entries between two sorted line lists, as a short summary. */
-function lineDiff(a: Array<string>, b: Array<string>): { added: Array<string>; removed: Array<string> } {
-  const count = (xs: Array<string>): Map<string, number> => {
-    const m = new Map<string, number>();
-    for (const x of xs) m.set(x, (m.get(x) ?? 0) + 1);
-    return m;
-  };
-  const ca = count(a);
-  const cb = count(b);
-  const added = b.filter((x) => {
-    const n = ca.get(x) ?? 0;
-    if (n > 0) ca.set(x, n - 1);
-    return n === 0;
-  });
-  const removed = a.filter((x) => {
-    const n = cb.get(x) ?? 0;
-    if (n > 0) cb.set(x, n - 1);
-    return n === 0;
-  });
-  return { added, removed };
-}
-
-/** Missing pinned anchors, changed anchors and the pinned count, in the pinned anchors' order. */
-function anchorChanges(a: Record<string, string | undefined>, b: Record<string, string | undefined>) {
-  const keys = Object.keys(a);
-  return { stale: keys.filter((k) => a[k] === undefined), changed: keys.filter((k) => a[k] !== b[k]), count: keys.length };
-}
-
 const clip = (s: string, n = 200): string => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
 /**
- * Compare the candidate's source with the pin's where a change would hurt model-router: Codex refresh timing (a
- * sandbox copy of the login could rotate the live refresh token), the config keys the router writes, the Codex
- * identity (load-shedding history), the priority tier the `-fast` routes ask for, how Claude-format effort is read,
- * per-login exclusions, and Muse's Contributor-mode header. Returns the checks it recorded.
+ * Compare the candidate's source with the pin's for a change the probes may not reach: a config key the router writes
+ * that the candidate no longer defines. What else changed is for the judge and the re-pin session to read in the
+ * diff. Returns the checks it recorded.
  */
-export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, repo = REPO, reviewedRefresh = REVIEWED_REFRESH): Array<Check> {
+export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, repo = REPO): Array<Check> {
   const base = { tier: 'candidate' as const, target: 'candidate' };
   const timed = (name: string, fn: () => Pick<Check, 'status' | 'detail' | 'metrics'>): Check => {
     const t0 = performance.now();
@@ -468,23 +288,7 @@ export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, r
   const pinned = goFiles(pinnedSrc);
   const cand = goFiles(candSrc);
 
-  const checks = [
-    timed('refresh-lead', () => {
-      const candAnchors = refreshAnchors(cand);
-      const { stale, changed: all, count } = anchorChanges(refreshAnchors(pinned), candAnchors);
-      if (stale.length) return { status: 'fail', detail: clip(`audit anchors not found in the pinned source (${stale.join(', ')}); update upstream.ts refreshAnchors — review refresh behavior by hand`) };
-      const reviewed = all.filter((k) => {
-        const body = candAnchors[k];
-        return body !== undefined && reviewedRefresh[k]?.[anchorHash(body)] !== undefined;
-      });
-      const changed = all.filter((k) => !reviewed.includes(k));
-      if (!changed.length) {
-        return { status: 'pass', detail: reviewed.length ? clip(`changed, reviewed by hand (${reviewed.join(', ')}; see REVIEWED_REFRESH)`) : `unchanged (${count} anchors)` };
-      }
-      const hard = changed.filter((k) => !SIWC_ONLY.has(k));
-      if (!hard.length) return { status: 'warn', detail: clip(`only the SIWC refresh path changed (${changed.join(', ')}); a login without a siwc section returns before it, and the precheck refuses SIWC logins`) };
-      return { status: 'fail', detail: clip(`refresh behavior changed; credential copies could rotate the live login — review by hand (${hard.map((k) => `${k} ${anchorHash(candAnchors[k] ?? '')}`).join(', ')})`) };
-    }),
+  return [
     timed('config-keys', () => {
       const keys = routerYamlKeys(readFileSync(join(repo, 'crates/model-router/src/supervisor.rs'), 'utf8'));
       if (keys.length < 10) return { status: 'warn', detail: `parsed only ${keys.length} keys from supervisor.rs upstream_config_yaml; parser needs updating` };
@@ -496,40 +300,5 @@ export function auditSource(pinnedSrc: string, candSrc: string, rec: Recorder, r
       if (neither.length) return { status: 'warn', detail: clip(`keys found in neither source (check by hand): ${neither.join(', ')}`), metrics: { keys: keys.length } };
       return { status: 'pass', detail: `all ${keys.length} router-written keys present`, metrics: { keys: keys.length } };
     }),
-    timed('codex-identity', () => {
-      const a = codexIdentityLines(pinned);
-      const b = codexIdentityLines(cand);
-      if (!a.length) return { status: 'warn', detail: 'no Codex identity lines found in the pinned source; selector needs updating' };
-      const { added, removed } = lineDiff(a, b);
-      if (!added.length && !removed.length) return { status: 'pass', detail: `unchanged (${a.length} lines)` };
-      const sample = added[0] ?? `removed: ${removed[0]}`;
-      return { status: 'warn', detail: clip(`Codex identity code changed (+${added.length} −${removed.length}); first: ${sample}`), metrics: { added: added.length, removed: removed.length } };
-    }),
-    timed('service-tier', () => {
-      const { stale, changed, count } = anchorChanges(serviceTierAnchors(pinned), serviceTierAnchors(cand));
-      if (stale.length) return { status: 'warn', detail: clip(`service-tier anchors not found in the pinned source (${stale.join(', ')}); update upstream.ts serviceTierAnchors`) };
-      if (!changed.length) return { status: 'pass', detail: `unchanged (${count} anchors)` };
-      return { status: 'warn', detail: clip(`service-tier handling changed (${changed.join(', ')}); recheck that a -fast route still reaches Codex as service_tier priority, and an -ultrafast one as ultrafast (service_tier.rs)`, 260) };
-    }),
-    timed('claude-effort', () => {
-      const { stale, changed, count } = anchorChanges(effortAnchors(pinned), effortAnchors(cand));
-      if (stale.length) return { status: 'warn', detail: clip(`effort anchors not found in the pinned source (${stale.join(', ')}); update upstream.ts effortAnchors`) };
-      if (!changed.length) return { status: 'pass', detail: `unchanged (${count} anchors)` };
-      return { status: 'warn', detail: clip(`effort handling changed (${changed.join(', ')}); recheck that effort without a thinking block, as hive recall's $.model.complete sends it, still reaches the upstream`, 260) };
-    }),
-    timed('excluded-models', () => {
-      const a = excludedModelsLines(pinned);
-      const b = excludedModelsLines(cand);
-      if (!a.length) return { status: 'skip', detail: 'no per-login excluded_models reads found in the pinned source' };
-      const { added, removed } = lineDiff(a, b);
-      if (!added.length && !removed.length) return { status: 'pass', detail: `unchanged (${a.length} read sites)` };
-      return { status: 'warn', detail: clip(`per-login excluded_models handling changed (+${added.length} −${removed.length} sites); recheck exclusions.rs's override guard`) };
-    }),
-    timed('muse-contributor', () => {
-      const named = museContributorFiles(cand);
-      if (!named.length) return { status: 'pass', detail: 'the source never names X-Tbh-Contributor-Mode' };
-      return { status: 'fail', detail: clip(`the source names X-Tbh-Contributor-Mode (${named.join(', ')}); check by hand that Muse Standard mode still never sends it`) };
-    }),
   ];
-  return checks;
 }

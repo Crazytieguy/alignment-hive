@@ -19,9 +19,9 @@ import { changedGoFiles, judgePrompt, judgeRelease } from './lib/judge';
 import type { JudgeDecision } from './lib/judge';
 import { discoverModels, isFamilyCheck, liveTarget, parseMiniToml, routerHealth, runProbes } from './lib/probes';
 import type { ModelSet } from './lib/probes';
-import { Recorder, appendHistory, gates, hoistSignal, readHistory, renderMarkdown } from './lib/report';
+import { Recorder, appendHistory, readHistory, renderMarkdown } from './lib/report';
 import type { CandidateVerdict, Check, RunReport, Tier } from './lib/report';
-import { credentialPostcheck, credentialPrecheck, familyPrecheck, livePorts, startSandbox, sweepSandboxes } from './lib/sandbox';
+import { credentialPrecheck, familyPrecheck, livePorts, startSandbox, sweepSandboxes } from './lib/sandbox';
 import type { FamilyLogins, Sandbox } from './lib/sandbox';
 import { MAX_TRIES, MIN_AGE_DAYS, SUPERSEDED_LIMIT, isPatch, liveDue, newFindings, nextCandidate, supersededStreak } from './lib/schedule';
 import type { CandidateEntry, CandidateState, Finding, SessionLog } from './lib/schedule';
@@ -42,7 +42,7 @@ const CANDIDATES = join(DATA, 'candidates.json');
 /** Which findings started a session when, so an hourly tick doesn't start one per hour for the same finding. */
 const SESSIONS = join(DATA, 'sessions.json');
 /** Candidate-only failures that settle a verdict at once; any other single failure is retried once to rule out a blip. */
-const STRUCTURAL = /^(catalog|models|sandbox-start|config-keys|refresh-lead|bench-errors|bench-rerun-errors)$/;
+const STRUCTURAL = /^(catalog|models|sandbox-start|config-keys|bench-errors|bench-rerun-errors)$/;
 
 type DoctorCheck = { name: string; ok: boolean; warn: boolean; detail: string };
 type BenchMode = 'auto' | 'always' | 'never';
@@ -163,7 +163,7 @@ function pinnedModels(pinned: ModelSet, candidate: ModelSet, rec: Recorder): Mod
  * Non-structural regressions are retried before they settle 'fail': one has to fail on two tries in a row.
  */
 function verdictOf(rec: Recorder, previous: Array<string>): { verdict: CandidateVerdict; reason: string; regressions: Array<string> } {
-  const failed = (target: string) => new Set(rec.checks.filter((c) => gates(c) && c.tier !== 'live' && c.target === target && c.status === 'fail').map((c) => c.name));
+  const failed = (target: string) => new Set(rec.checks.filter((c) => c.tier !== 'live' && c.target === target && c.status === 'fail').map((c) => c.name));
   const pinned = failed('pinned');
   const candidate = failed('candidate');
   const regressions = [...candidate].filter((n) => !pinned.has(n));
@@ -179,7 +179,7 @@ function verdictOf(rec: Recorder, previous: Array<string>): { verdict: Candidate
   if (!ran) return { verdict: 'inconclusive', reason: `the candidate never ran: ${[...pinned].join(', ') || 'see the report'}`, regressions };
   const broke = rec.checks.find((c) => c.target === 'canary' && c.name === 'run' && c.status === 'fail');
   if (broke) return { verdict: 'inconclusive', reason: `the run broke off: ${broke.detail.slice(0, 160)}`, regressions };
-  const warns = rec.checks.filter((c) => gates(c) && c.target === 'candidate' && c.status === 'warn').map((c) => c.name);
+  const warns = rec.checks.filter((c) => c.target === 'candidate' && c.status === 'warn').map((c) => c.name);
   const down = allShared.length ? `; failing on the pin too: ${allShared.join(', ')}` : '';
   return { verdict: 'pass', reason: (warns.length ? `passed with warnings: ${warns.join(', ')}` : 'every check passed') + down, regressions };
 }
@@ -198,18 +198,6 @@ function compareLatency(rec: Recorder): void {
     detail: `median small request ${c.toFixed(2)}s vs pinned ${p.toFixed(2)}s`,
     metrics: { candidate_s: c, pinned_s: p },
   });
-}
-
-const MUSE_HEADER_REASON = "its source names Muse's Contributor-mode header, which Meta trains on and Standard mode promises never to send. Not a re-pin until that's checked by hand";
-const MUSE_HEADER_REPEAT_HOURS = 30 * 24;
-
-/** Audits the candidate's source; a changed Codex refresh path or the Muse Contributor header stops it before any login is copied. */
-async function auditGate(pinned: string, version: string, rec: Recorder): Promise<string | undefined> {
-  auditSource(await downloadSource(pinned), await downloadSource(version), rec);
-  const failed = (name: string) => rec.checks.some((c) => c.name === name && c.status === 'fail');
-  if (failed('refresh-lead')) return 'refresh behaviour changed; a sandbox copy of the Codex login could rotate the live one. Review it by hand, and list it in upstream.ts REVIEWED_REFRESH if it is safe';
-  if (failed('muse-contributor')) return MUSE_HEADER_REASON;
-  return undefined;
 }
 
 /** The precheck, recorded; a stale login it leaves out is a warning, since it otherwise lingers unnoticed. */
@@ -241,15 +229,9 @@ async function startBoth(rec: Recorder, routerVersion: string, binaries: Record<
   return sandboxes;
 }
 
-/** Stops sandboxes after checking their credential copies, keeping their logs in the run dir. */
-async function stopAll(sandboxes: Array<Sandbox>, rec: Recorder, dir: string): Promise<void> {
-  for (const s of sandboxes) {
-    try {
-      await credentialPostcheck(s, rec);
-    } finally {
-      await s.stop({ keepLogsIn: join(dir, `sandbox-${s.target.label}`) });
-    }
-  }
+/** Stops sandboxes, keeping their logs in the run dir. */
+async function stopAll(sandboxes: Array<Sandbox>, dir: string): Promise<void> {
+  for (const s of sandboxes) await s.stop({ keepLogsIn: join(dir, `sandbox-${s.target.label}`) });
 }
 
 /**
@@ -309,10 +291,9 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
   let pre: ReturnType<typeof precheck>;
   try {
     cpaBinary = await downloadCpa(version);
-    const blocked = await auditGate(pinned, version, rec);
-    if (blocked) return settle('fail', blocked);
+    auditSource(await downloadSource(pinned), await downloadSource(version), rec);
     pre = precheck(rec);
-    if (!pre.ok) return settle('skipped', pre.detail, { transientSkip: pre.transient });
+    if (!pre.ok) return settle('skipped', pre.detail);
     pinnedBinary = existsSync(cachedCpaBinary(pinned)) ? cachedCpaBinary(pinned) : await downloadCpa(pinned);
   } catch (e) {
     // A failed download or source audit counts as a try, so it waits for the retry window like any other.
@@ -360,7 +341,7 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
       rec.add({ tier: 'candidate', target: 'canary', name: 'run', status: 'fail', detail: (e instanceof Error ? e.message : String(e)).slice(0, 300) });
     }
   } finally {
-    await stopAll(sandboxes, rec, report.dir);
+    await stopAll(sandboxes, report.dir);
   }
   const v = verdictOf(rec, seen?.regressions ?? []);
   if (v.verdict === 'pass' && waitFor) return settle('superseded', `${waitFor.fixedIn} fixes it: ${waitFor.reason}`, { regressions: v.regressions, waitFor: waitFor.fixedIn });
@@ -414,8 +395,6 @@ async function benchOnly(report: RunReport, rec: Recorder): Promise<void> {
   if (blocker) throw new Error(blocker);
   report.versions.pinnedCpa = pinned;
   report.versions.candidateCpa = version;
-  const blocked = await auditGate(pinned, version, rec);
-  if (blocked) throw new Error(blocked);
   const pre = precheck(rec);
   if (!pre.ok) throw new Error(pre.detail);
   const binaries = { pinned: existsSync(cachedCpaBinary(pinned)) ? cachedCpaBinary(pinned) : await downloadCpa(pinned), candidate: await downloadCpa(version) };
@@ -426,7 +405,7 @@ async function benchOnly(report: RunReport, rec: Recorder): Promise<void> {
     const tasks = option('--tasks')?.split(',');
     await benchTier(report, rec, sandboxes, models.primary, { attempts: Number(option('--attempts') ?? 2), tasks });
   } finally {
-    await stopAll(sandboxes, rec, report.dir);
+    await stopAll(sandboxes, report.dir);
   }
 }
 
@@ -535,11 +514,8 @@ function findingsOf(report: RunReport, rec: Recorder): Array<Finding> {
   if (cand) {
     const state = readJson<CandidateState>(CANDIDATES, {});
     const entry = state[cand.version];
-    const signal = hoistSignal(rec.checks);
-    const text = `candidate CLIProxyAPI ${cand.version}: ${cand.verdict} (${cand.reason})${signal ? `; also, ${signal}` : ''}`;
-    // Every release fails this audit until upstream drops the header, so they share a finding that only reminds.
-    if (cand.verdict === 'fail' && cand.reason === MUSE_HEADER_REASON) out.push({ key: 'muse-contributor', text: `${text}; the pin stays below the header until upstream removes it (router-for-me/CLIProxyAPI#7272) or the user decides otherwise`, repeatAfterHours: MUSE_HEADER_REPEAT_HOURS });
-    else if (cand.verdict === 'pass' || cand.verdict === 'fail') out.push({ key: `candidate:${cand.version}:${cand.verdict}`, text });
+    const text = `candidate CLIProxyAPI ${cand.version}: ${cand.verdict} (${cand.reason})`;
+    if (cand.verdict === 'pass' || cand.verdict === 'fail') out.push({ key: `candidate:${cand.version}:${cand.verdict}`, text });
     // A superseded candidate needs nothing while the release that fixes it ages, unless the waits keep coming.
     if (cand.verdict === 'superseded') {
       const streak = supersededStreak(state, report.versions.pinnedCpa ?? '');
@@ -579,7 +555,7 @@ async function runCommand(): Promise<number> {
   const rec = new Recorder();
   const report: RunReport = { startedAt: new Date(now).toISOString(), dir, command, versions: {}, checks: rec.checks, attention: [] };
   try {
-    // A run killed hard leaves sandboxes behind, with a CLIProxyAPI that would refresh the copied login on its own.
+    // A run killed hard leaves sandboxes behind: their processes and the login copies they hold.
     await sweepSandboxes(rec);
     report.versions.claudeCode = plan ? plan.versions.claudeCode : await installedClaudeVersion();
     report.versions.router = plan ? plan.versions.router : await liveRouterVersion();

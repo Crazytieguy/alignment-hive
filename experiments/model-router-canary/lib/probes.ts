@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { LIVE, LIVE_ROUTER_LOG, LIVE_ROUTER_PORT, REPO, http, logMark, logSince, run, type HttpResponse } from './env';
-import { TOOL_ADDITION_DIRECT, historicalMedian, type Recorder, type RouterTarget, type Status, type Tier } from './report';
+import { historicalMedian, type Recorder, type RouterTarget, type Status, type Tier } from './report';
 
 /** Routing IDs (what Claude Code sends) per family, each served by the target's child. */
 export type ModelSet = { gpt: Array<string>; grok: Array<string>; muse: Array<string>; primary: string };
@@ -474,33 +474,6 @@ export function judgeToolAddition(r: Reply): Result {
   return { status: 'fail', detail: `the tool_addition never reached the model: ${got}` };
 }
 
-/**
- * The direct call to a child: offered when the model called get_code with the ticket only the definition carries (the
- * system text names the tool, so a bare get_code call can be a guess). Cached tokens on that request, which shares
- * its prefix with the request before the addition, show tools[] didn't change: CLIProxyAPI sent the tool as a Codex
- * `additional_tools` item. Informational (#122): never a fail, since pins before 8.0.48 drop the addition.
- */
-export function judgeToolAdditionDirect(before: Reply, added: Reply): Result {
-  const failed = before.error ? `request before the addition: ${before.error}` : added.error ? `request with the addition: ${added.error}` : undefined;
-  if (failed) return { status: 'warn', detail: `no answer: ${failed}` };
-  const m = added.message!;
-  const calls = m.content.filter((b) => b.type === 'tool_use');
-  const call = calls.find((b) => b.name === 'get_code');
-  const cache_read = cacheRead(m);
-  const offered = (call?.input as { ticket?: unknown } | undefined)?.ticket === DIRECT_TICKET;
-  const metrics = { offered: offered ? 1 : 0, cache_read };
-  if (!offered) {
-    const got = call
-      ? `get_code was called without its definition's ticket (${excerpt(JSON.stringify(call.input ?? null), 80)}), so the model guessed it from the text`
-      : calls.length
-        ? `called ${calls.map((b) => b.name).join(', ')}`
-        : `no tool call (stop_reason ${m.stop_reason}): "${excerpt(textOf(m), 80)}"`;
-    return { status: 'warn', detail: `not offered: this child drops a mid-conversation tool_addition; ${got}`, metrics };
-  }
-  if (cache_read > 0) return { status: 'pass', detail: `offered without a tools[] change: get_code called with the definition's ticket, and the request read ${cache_read} cached tokens`, metrics };
-  return { status: 'warn', detail: 'offered, but the request read no cached tokens, so a tools[] change is not ruled out', metrics };
-}
-
 export const cacheRead = (m?: Message): number => Number(m?.usage?.cache_read_input_tokens ?? 0) || 0;
 
 export function judgeCache(first: Reply, second: Reply): Result {
@@ -682,51 +655,6 @@ export function toolAdditionMessages(definition: object): Array<unknown> {
   ];
 }
 
-const DIRECT_TICKET = 'K7Q2';
-/** get_code with a required argument whose value only the definition gives, so a call with it proves the definition arrived. */
-const GET_CODE_TICKETED = {
-  ...GET_CODE_TOOL,
-  input_schema: {
-    type: 'object',
-    properties: { factor: { type: 'integer' }, ticket: { type: 'string', description: `Always the string "${DIRECT_TICKET}".` } },
-    required: ['factor', 'ticket'],
-  },
-};
-
-/** POST /v1/messages on the target's CLIProxyAPI child, past the router, with the gateway secret. */
-async function sendChild(t: RouterTarget, body: Body, headers: Record<string, string>): Promise<Reply> {
-  const secret = readFileSync(t.gatewaySecretFile, 'utf8').trim();
-  const r = await http(`http://127.0.0.1:${t.childPort}/v1/messages`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', authorization: `Bearer ${secret}`, 'x-api-key': secret, ...headers },
-    body: JSON.stringify(body),
-    timeoutMs: TIMEOUT_MS,
-  });
-  return toReply(r, body.stream === true);
-}
-
-/**
- * The tool-addition request sent straight to the child (#122): the router's hoist makes `tool-addition` pass whatever
- * the child does, and the hoist can go only once the pinned child declares the tool itself. First the conversation up
- * to the addition, then all of it, on one Claude Code session ID (the child keys the Codex prompt cache on it) behind
- * a ~5K-token system prompt, so the second request reads the first one's cache unless tools[] changed. A cache miss
- * gets one more pair on a fresh session. `model` is the upstream ID too: a sandbox routes models unrenamed.
- */
-async function probeToolAdditionDirect(t: RouterTarget, model: string): Promise<Result> {
-  let result: Result | undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const extra = { system: cacheSystemPrompt(`${t.label}-direct-${Date.now()}`), tools: TOOL_ADDITION_TOOLS, max_tokens: 1024 };
-    const headers = { 'x-claude-code-session-id': crypto.randomUUID() };
-    const messages = toolAdditionMessages(GET_CODE_TICKETED);
-    const before = await sendChild(t, messagesBody(model, messages.slice(0, 1), extra), headers);
-    const added = await sendChild(t, messagesBody(model, messages, extra), headers);
-    result = judgeToolAdditionDirect(before, added);
-    // Only an offered tool with no cache read is worth a second pair.
-    if (result.status !== 'warn' || result.metrics?.offered !== 1) break;
-  }
-  return result!;
-}
-
 /** ~5K o200k tokens of deterministic filler, distinct per run so the first request is a genuine miss. */
 export function cacheSystemPrompt(nonce: string): string {
   const words = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliett', 'kilo', 'lima'];
@@ -837,23 +765,20 @@ export async function runProbes(targets: Array<RouterTarget>, models: ModelSet, 
     name: string,
     model: string,
     fn: (t: RouterTarget) => Promise<Result>,
-    opts: { skip?: (t: RouterTarget) => string | undefined; info?: boolean } = {},
+    opts: { skip?: (t: RouterTarget) => string | undefined } = {},
   ): Promise<void> => {
-    const info = opts.info ? { info: true } : {};
     for (const t of targets) {
       const why = opts.skip?.(t);
       if (why) {
-        rec.add({ tier, target: t.label, name, status: 'skip', detail: why, ...info });
+        rec.add({ tier, target: t.label, name, status: 'skip', detail: why });
         continue;
       }
       const ok = served.get(t);
       if (!model || !ok?.has(model)) {
-        rec.add({ tier, target: t.label, name, status: 'skip', detail: !ok ? 'model list unavailable' : model ? `${model} not served by this target` : 'no GPT model served', ...info });
+        rec.add({ tier, target: t.label, name, status: 'skip', detail: !ok ? 'model list unavailable' : model ? `${model} not served by this target` : 'no GPT model served' });
         continue;
       }
-      // An informational check never fails: a throw becomes a warning.
-      const check = opts.info ? (x: RouterTarget) => fn(x).catch((e): Result => ({ status: 'warn', detail: `error: ${e instanceof Error ? e.message : String(e)}` })) : fn;
-      await rec.time({ tier, target: t.label, name, ...info }, () => check(t));
+      await rec.time({ tier, target: t.label, name }, () => fn(t));
     }
   };
   for (const t of targets) {
@@ -867,7 +792,6 @@ export async function runProbes(targets: Array<RouterTarget>, models: ModelSet, 
   const p = models.primary;
   await each('tool-replay', p, (t) => probeToolReplay(t, p));
   await each('tool-addition', p, (t) => probeToolAddition(t, p));
-  if (tier === 'candidate') await each(TOOL_ADDITION_DIRECT, p, (t) => probeToolAdditionDirect(t, p), { info: true });
   await each('prompt-cache', p, (t) => probePromptCache(t, p));
   await each('image', p, (t) => probeImage(t, p));
   await each('websearch', p, (t) => probeWebsearch(t, p), {
