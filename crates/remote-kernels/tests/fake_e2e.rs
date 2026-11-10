@@ -3386,8 +3386,11 @@ async fn an_old_marker_is_discovered_and_blocks_a_second_create_after_upgrade() 
     )
     .unwrap();
 
-    let session = remote_kernels::state::resolve_session_owner();
-    let server = server_for(dir.path(), &session, "", None);
+    // The server keeps the session it resolved for itself, as the binary does:
+    // the migrated marker has to block that session even when the client gives
+    // no CLAUDE_CODE_SESSION_ID and the owner is a fresh uuid.
+    let server =
+        RemoteKernelsServer::new(config_of(""), AppState::new(dir.path().to_path_buf()), None);
     let refused = text_of(&server.start(start_params("second", true)).await.unwrap());
     assert!(refused.contains("unclear outcome"), "{refused}");
     assert!(refused.contains(machine_id), "{refused}");

@@ -753,12 +753,13 @@ impl AppState {
     pub fn new_with_keys_root(project_dir: PathBuf, keys_root: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(state_dir(&project_dir));
         ensure_gitignore(&project_dir);
-        let migration_problems = migrate::run(&project_dir);
+        let session_owner = resolve_session_owner();
+        let migration_problems = migrate::run(&project_dir, &session_owner);
         let state = Self {
             project_dir,
             keys_root,
             instances: BTreeMap::new(),
-            session_owner: resolve_session_owner(),
+            session_owner,
             reattaching: std::collections::HashSet::new(),
             reattaching_in_background: std::collections::HashSet::new(),
             creating: std::collections::HashSet::new(),

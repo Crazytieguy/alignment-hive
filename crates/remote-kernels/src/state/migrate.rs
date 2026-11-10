@@ -75,10 +75,13 @@ struct OldUnconfirmed {
 }
 
 /// Run every migration; what comes back is the files whose spend is unknown.
-pub(super) fn run(project_dir: &Path) -> Vec<String> {
+///
+/// `session_owner` is the session this process serves: an old unconfirmed
+/// create goes to its pool, so that session is the one a second create waits on.
+pub(super) fn run(project_dir: &Path, session_owner: &str) -> Vec<String> {
     let mut problems = Vec::new();
     for machine_id in instance_ids(project_dir) {
-        problems.extend(migrate_machine(project_dir, &machine_id));
+        problems.extend(migrate_machine(project_dir, &machine_id, session_owner));
     }
     problems.extend(import_spend_once(project_dir));
     problems
@@ -88,7 +91,7 @@ fn owner_pool(owner: &str) -> String {
     format!("session:{owner}")
 }
 
-fn migrate_machine(project_dir: &Path, machine_id: &str) -> Option<String> {
+fn migrate_machine(project_dir: &Path, machine_id: &str, session_owner: &str) -> Option<String> {
     let dir = instance_dir(project_dir, machine_id);
     if dir.join(RECORD_FILE).exists() {
         return None;
@@ -99,7 +102,7 @@ fn migrate_machine(project_dir: &Path, machine_id: &str) -> Option<String> {
     }
     let marker_path = dir.join("unconfirmed.json");
     if marker_path.exists() {
-        return migrate_marker(project_dir, machine_id, &marker_path);
+        return migrate_marker(project_dir, machine_id, &marker_path, session_owner);
     }
     None
 }
@@ -177,7 +180,12 @@ fn migrate_state_file(
 
 /// A create whose outcome the old binary never settled: no `state.json`, and
 /// still possibly a billing machine.
-fn migrate_marker(project_dir: &Path, machine_id: &str, marker_path: &Path) -> Option<String> {
+fn migrate_marker(
+    project_dir: &Path,
+    machine_id: &str,
+    marker_path: &Path,
+    session_owner: &str,
+) -> Option<String> {
     let content = std::fs::read_to_string(marker_path).ok()?;
     let marker: OldUnconfirmed = match serde_json::from_str(&content) {
         Ok(marker) => marker,
@@ -192,7 +200,7 @@ fn migrate_marker(project_dir: &Path, machine_id: &str, marker_path: &Path) -> O
             created_at_epoch: marker.created_at_epoch,
             error: Some(marker.error),
         },
-        owner_pool(&super::resolve_session_owner()),
+        owner_pool(session_owner),
     );
     record.label = marker.label;
     record.remote_dirs = marker.remote_dirs;
