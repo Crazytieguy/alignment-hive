@@ -3,8 +3,8 @@ import type { EngineInterface, Hook, MatchedHook, RenderElement, RenderInput } f
 
 import { CliFailed, localReads } from './cli'
 import type { Read } from './cli'
-import { FAILED, INSTRUCTIONS, TOOL_FAILED, TOOL_FOUND_NOTHING, TOOL_REFUSED, budgetFor, entries, history, newThreads, noteText, promptBlocks, recalledIn, reportOf, sessionsFor } from './recall-text'
-import type { Ask, Listed, RECALL_TOOL, Row, Session } from './recall-text'
+import { FAILED, INSTRUCTIONS, TOOL_FAILED, TOOL_FOUND_NOTHING, TOOL_REFUSED, budgetFor, entries, history, newThreads, noteText, promptBlocks, recalledIn, reportOf, sessionsFor, withRewind } from './recall-text'
+import type { Ask, Held, Listed, RECALL_TOOL, Row, Session } from './recall-text'
 import type { HiveRecalled } from '../types'
 
 // Automatic recall (beta, opt-in through the `recall` option): before the main agent starts on a prompt the user
@@ -106,17 +106,27 @@ const endOf = (r: Completed) => (!r ? 'refused' : r.isAnswered ? 'answered' : r.
  */
 type AskOf = (rows: ReadonlyArray<Row> | undefined) => Ask | undefined
 
+/** What the main agent holds of its conversation; undefined when the engine does not say. */
+async function heldOf($: EngineInterface): Promise<Held | undefined> {
+  const messages = await $.session.messages({ as: 'api' }).catch(() => undefined)
+  if (!messages) return undefined
+  const replies = messages.flatMap(m => (m.role === 'assistant' ? m.content.flatMap(b => (b.type === 'text' && typeof b.text === 'string' ? [b.text] : [])) : []))
+  return { messages: messages.length, replies }
+}
+
 /**
  * Recall for what `askOf` makes of the current session (no ask: no call, and nothing found), until `deadline` (the
- * clock's time): past it, `signal` aborts and nothing new starts.
+ * clock's time): past it, `signal` aborts and nothing new starts. `mayRewind`: a prompt sent while the session was idle,
+ * after a rewind the transcript may not show yet (withRewind).
  */
-async function recall($: EngineInterface, choice: string, askOf: AskOf, deadline: number, signal: AbortSignal): Promise<Outcome> {
+async function recall($: EngineInterface, choice: string, askOf: AskOf, deadline: number, signal: AbortSignal, mayRewind: boolean): Promise<Outcome> {
   const session = (await $.session.id()).slice(0, 8)
   const models = modelsFor(choice)
   // A model chosen by name and found missing: no call could answer.
   if (!models.length) return FAILURE
   const started = await $.clock.now()
-  const sessions = await readRecallSessions(localReads($, signal), budgetFor(models[0]!))
+  const [read, held] = await Promise.all([readRecallSessions(localReads($, signal), budgetFor(models[0]!)), mayRewind ? heldOf($) : undefined])
+  const sessions = read.map(s => (s.loc === session && held ? { ...s, rows: withRewind(s.rows, held) } : s))
   $.ui.log(`hive recall: read ${sessions.length} sessions in ${(await $.clock.now()) - started} ms`, { to: 'debug' })
   const ask = askOf(sessions.find(s => s.loc === session)?.rows)
   if (!ask) return NOTHING
@@ -151,7 +161,7 @@ async function recall($: EngineInterface, choice: string, askOf: AskOf, deadline
 }
 
 /** Recall within TIMEOUT_MS, said on the status line meanwhile: past it, the CLI reads and model call still running stop. */
-async function recallInTime($: EngineInterface, choice: string, askOf: AskOf): Promise<Outcome> {
+async function recallInTime($: EngineInterface, choice: string, askOf: AskOf, mayRewind = false): Promise<Outcome> {
   $.ui.status('recalling past sessions…')
   const stop = new AbortController()
   const deadline = (await $.clock.now()) + TIMEOUT_MS
@@ -159,7 +169,7 @@ async function recallInTime($: EngineInterface, choice: string, askOf: AskOf): P
   // Recall's reads go before a warm's.
   recalls++
   warming?.abort()
-  const outcome = await Promise.race([recall($, choice, askOf, deadline, stop.signal), expired])
+  const outcome = await Promise.race([recall($, choice, askOf, deadline, stop.signal, mayRewind), expired])
     .catch(() => FAILURE)
     .finally(() => recalls--)
   stop.abort()
@@ -173,8 +183,8 @@ type Submit = Parameters<Hook<'prompt.submit'>>
 export async function submitWithRecall($: EngineInterface, e: Submit[1], next: Submit[2], choice: string) {
   // Only what the user typed, at the terminal or through Remote Control; never a slash command.
   if ((e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') || e.command) return next(e)
-  // Past the limit the prompt goes on.
-  const { report, shown } = await recallInTime($, choice, () => ({ prompt: e.text }))
+  // Past the limit the prompt goes on. Only a prompt sent while no turn runs can follow a rewind.
+  const { report, shown } = await recallInTime($, choice, () => ({ prompt: e.text }), e.turnId === undefined)
   // Only a prompt says when recall did not finish: it is where the main agent would have had the entries.
   const context = report ?? (shown === 'failed' ? FAILED : undefined)
   const waiting = { prompt: e.text, shown }

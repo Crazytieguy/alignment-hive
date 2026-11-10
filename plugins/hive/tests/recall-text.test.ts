@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { FAILED, citations, collapsePasted, history, newThreads, noteText, noteWords, promptBlocks, quotesIn, recalledIn, recalledOf, report, reportOf, sessionsFor } from '../hooks/recall-text'
+import { FAILED, citations, collapsePasted, history, newThreads, noteText, noteWords, promptBlocks, quotesIn, recalledIn, recalledOf, report, reportOf, sessionsFor, withRewind } from '../hooks/recall-text'
 import type { Row } from '../hooks/recall-text'
 
 const HOUR = 3_600_000
@@ -247,6 +247,66 @@ test("history: a note the user saved with /remember prints whole as their note, 
   // A note's words alone are kept whatever they hold, and a text without the header is its own words.
   expect(noteWords(noteText('a\n\nb'))).toBe('a\n\nb')
   expect(noteWords('plain')).toBe('plain')
+})
+
+const reply = (loc: string, hoursAgo: number, text: string): Row => ({ loc, time: at(hoursAgo), kind: 'assistant', text })
+
+test('history: the current session leaves out what it rewound, its reports with it; a past session keeps it, labelled', () => {
+  const reported = reportOf([{ loc: 'cccc0003:4', label: 'user', text: 'use tabs', date: '2026-09-01', context: '' }], '2026-09-01', { prompt: '' })
+  const sessions = [
+    {
+      loc: 'aaaa0001',
+      rows: [
+        user('aaaa0001:1', 3, 'format it'),
+        { loc: 'aaaa0001:2', time: at(3), kind: 'user', origin: 'recall', recall: true, text: reported, rewound: true },
+        { ...reply('aaaa0001:3', 2.9, 'formatted'), rewound: true },
+      ],
+    },
+    { loc: 'bbbb0002', rows: [{ ...user('bbbb0002:1', 5, 'never squash merge'), rewound: true }, user('bbbb0002:2', 4.9, 'squash merges are fine')] },
+    { loc: 'cccc0003', rows: [user('cccc0003:4', 6, 'use tabs')] },
+  ]
+  const h = history(sessions, NOW, 100_000, 'aaaa0001')
+  const text = h.closed.join('') + h.open
+  expect(text).not.toContain('formatted')
+  expect(text).toContain('[cccc0003:4] user: use tabs')
+  expect(h.isNew('cccc0003:4')).toBe(true)
+  expect(text).toContain('[bbbb0002:1] user (rewound): never squash merge')
+  expect(report('- bbbb0002:1 |', h)).toContain('> [user (rewound)] never squash merge (bbbb0002:1, ')
+  // In a past session, a rewound report prints as any report does.
+  const later = history(sessions, NOW, 100_000, 'bbbb0002')
+  expect(later.closed.join('') + later.open).toContain('[aaaa0001:2] recall:\n  cccc0003:4 again')
+})
+
+test('withRewind: what follows the replies the main agent holds is rewound, from the next prompt on', () => {
+  const rows: Array<Row> = [
+    user('aaaa0001:1', 3, 'format it'),
+    reply('aaaa0001:2', 2.9, 'Done.'),
+    user('aaaa0001:3', 2.8, 'and the tests'),
+    reply('aaaa0001:4', 2.7, 'They pass.'),
+    { loc: 'aaaa0001:5', time: at(2.6), kind: 'user', text: '[Request interrupted by user]' },
+    { loc: 'aaaa0001:6', time: at(2.6), kind: 'user', origin: 'note', text: noteText('deploys on Fridays') },
+    user('aaaa0001:7', 2.5, 'now lint'),
+    { loc: 'aaaa0001:8', time: at(2.5), kind: 'user', origin: 'recall', recall: true, text: '[hive recall] x' },
+    reply('aaaa0001:9', 2.4, 'Done.'),
+  ]
+  const locs = (marked: ReadonlyArray<Row>) => marked.flatMap(r => (r.rewound ? [r.loc] : []))
+  const rewound = (replies: Array<string>) => locs(withRewind(rows, { messages: 8, replies }))
+  expect(rewound(['Done.', 'They pass.'])).toEqual(['aaaa0001:7', 'aaaa0001:8', 'aaaa0001:9'])
+  // Holding all of it, or replies the transcript does not have, or messages but no reply: nothing.
+  expect(rewound(['Done.', 'They pass.', 'Done.'])).toEqual([])
+  expect(rewound(['Something else.'])).toEqual([])
+  expect(rewound([])).toEqual([])
+  // Holding no message at all (rewound to before the first prompt): all of it, from that prompt on.
+  expect(locs(withRewind(rows, { messages: 0, replies: [] }))).toEqual(rows.map(r => r.loc))
+  // A reply the rewound part repeats is placed by the ones before it; one reply alone, at its latest place.
+  expect(rewound(['Done.'])).toEqual([])
+  expect(locs(withRewind([...rows.slice(0, 4), user('aaaa0001:5', 2.6, 'again'), reply('aaaa0001:6', 2.5, 'They pass.')], { messages: 4, replies: ['Done.', ' They pass.\n'] }))).toEqual([
+    'aaaa0001:5',
+    'aaaa0001:6',
+  ])
+  // A reply the CLI marked rewound already places nothing.
+  const marked = rows.map(r => (r.loc === 'aaaa0001:4' ? { ...r, rewound: true } : r))
+  expect(withRewind(marked, { messages: 4, replies: ['Done.', 'They pass.'] })).toEqual(marked)
 })
 
 test('promptBlocks: one block per closed chunk; the last marked for the cache, or each of them for GPT', () => {

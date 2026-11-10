@@ -59,6 +59,8 @@ function world(on: On, { isSolMissing = false } = {}) {
     // What an ArtifactComments read answers, and this session's rows an outline prints after its prompt.
     comments: COMMENTS,
     sessionRows: [] as Array<unknown>,
+    // The main agent's conversation, as `$.session.messages({ as: 'api' })` gives it: by default, this session's prompt.
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'Format the file.' }] }] as Array<unknown>,
     isScripted: false,
     fails: (isSolMissing ? { [SOL]: { status: 404 } } : {}) as Record<string, { status: number; afterMs?: number }>,
     server: 'none' as 'none' | 'up' | 'down' | 'stuck',
@@ -70,6 +72,7 @@ function world(on: On, { isSolMissing = false } = {}) {
   on('turn.complete', async () => ({ text: '' }) as never)
   on('session.id', async () => ({ value: SESSION }))
   on('session.root', async () => ({ value: '/tmp/project' }))
+  on('session.messages', async () => ({ value: state.messages }) as never)
   const registered: Array<{ name: string; isDeferred?: boolean }> = []
   on('tool.register', async (_$, e) => {
     registered.push(e as never)
@@ -187,6 +190,34 @@ describe('automatic recall', () => {
     state.recalledBefore = true
     await $.prompt.submit(typed('And the other one.'))
     expect(contexts).toEqual([[], []])
+  })
+
+  test('on: after a rewind the transcript does not show yet, what a recall reported on the rewound part is reported again', { options: { recall: true } }, async ($, on) => {
+    const { contexts, state } = world(on)
+    await start($)
+    const report = { loc: 'abcd1234:4', time: '2026-10-20T15:29:20Z', kind: 'user', origin: 'recall', recall: true, text: '[hive recall] Entries.\n\n> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)' }
+    state.sessionRows = [
+      { loc: 'abcd1234:2', time: '2026-10-20T15:29:10Z', kind: 'assistant', text: 'Formatted.' },
+      { loc: 'abcd1234:3', time: '2026-10-20T15:29:20Z', kind: 'user', text: 'And the other one.' },
+      report,
+      { loc: 'abcd1234:5', time: '2026-10-20T15:29:30Z', kind: 'assistant', text: 'Done, with tabs.' },
+    ]
+    const replied = (...texts: Array<string>) => texts.map(text => ({ role: 'assistant', content: [{ type: 'text', text }] }))
+    // Holding all of it: nothing new.
+    state.messages = replied('Formatted.', 'Done, with tabs.')
+    await $.prompt.submit(typed('Now the tests.'))
+    expect(contexts[0]).toEqual([])
+    // Rewound to before "And the other one.": the entry is news again.
+    state.messages = replied('Formatted.')
+    await $.prompt.submit(typed('Now the tests.'))
+    expect(contexts[1]?.join('')).toContain('(feed0001:7, 2026-10-19)')
+    // A prompt typed during a turn follows no rewind.
+    await $.prompt.submit({ text: 'Also the docs.', origin: { kind: 'composer' }, turnId: 'turn-1' } as never)
+    expect(contexts[2]).toEqual([])
+    // Rewound to before the first prompt, the main agent holds nothing: the entry is news again.
+    state.messages = []
+    await $.prompt.submit(typed('Format the other file.'))
+    expect(contexts[3]?.join('')).toContain('(feed0001:7, 2026-10-19)')
   })
 
   test('on, auto without model-router: Sonnet answers, and Sol is not asked again', { options: { recall: true } }, async ($, on) => {
