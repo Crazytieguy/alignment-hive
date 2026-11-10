@@ -44,9 +44,11 @@ Check the four settings files for these keys (a key declared only in `~/.claude/
 
 Record a keep in `.claude/hive/align-rejected.md` (e.g. "Kept autopilot") so it is not asked again. If neither key is present, skip silently.
 
-### Bundled-binary Migration (remote-kernels, model-router)
+### Bundled-binary Migration (remote-kernels, model-router, precis)
 
 For each plugin listed under **Platform entries available for** in Status, offer the switch wherever the plain `<plugin>@alignment-hive` key is enabled in any of the four settings files (rationale and rules under Platform-specific entries below). If the plain key is in `.claude/settings.json`, say so prominently: that file is usually checked in, so removing it takes the plugin away from collaborators, who each need the platform entry for their own machine — the user can decline and keep the shared key. On yes, run the install-then-clean procedure with `<plugin><suffix>@alignment-hive`.
+
+**precis:** where `precis@precis` is enabled in any of the four settings files and Status reports a **Platform entry suffix**, offer the switch to `precis<suffix>@precis` the same way; the plain `precis` plugin is superseded by these per-machine builds. One difference: where `.claude/settings.json` enables `precis@precis`, leave that file alone, since the plain plugin keeps working for collaborators. Install the build with `--scope local`, run `claude plugin disable precis@precis --scope local`, and clean only the other three files. After the switch, `precis` is no longer on PATH in Claude's shell unless the standalone CLI is installed: if a `CLAUDE.md` tells Claude to run `precis`, offer to remove that instruction. The plugin's `summarize` tool describes itself, so nothing needs to replace it.
 
 **Repair:** a platform-specific key in `~/.claude/settings.local.json` (stale even if a working copy exists elsewhere), or one enabled anywhere but failing with a "not cached" error, is broken. Offer the same install-then-clean procedure; no plain key needs to exist.
 
@@ -76,7 +78,7 @@ Propose all relevant plugins in **batched AskUserQuestion calls**. Each plugin g
 
 - **Literature review**: `lit-review@alignment-hive` — Literature review pipeline (arXiv, Semantic Scholar, LessWrong)
 - **Python + GPU compute**: `remote-kernels@alignment-hive` — Cloud GPU instances with Jupyter kernels; supports RunPod, vast.ai and Kubernetes
-- **Codebase exploration**: `precis` — Gives Claude a summary of your codebase at the start of each session
+- **Codebase exploration**: `precis<suffix>@precis` (the build for this machine, see below) — Gives Claude a summary of your codebase at the start of each session, and a tool to summarize any directory or file
 - **Cross-model review** (both need a ChatGPT subscription; offer as one choice):
   - `codex@codex-plugin-cc` — Delegate tasks and adversarial code review to Codex from Claude Code; the stable alternative
   - `model-router@alignment-hive` — Recommended, in beta. GPT models as regular Claude Code subagents (parallel, in workflows), plus optional Grok and open-weights models
@@ -92,12 +94,14 @@ Ask one follow-up, Yes / No:
 
 On Yes, set `AGENT_SANITIZER_SECRETS_ENABLED` to `"1"` in the `env` block of the settings file the install scope wrote to (`.claude/settings.json`, `.claude/settings.local.json`, or `~/.claude/settings.json`). On No, record it in `.claude/hive/align-rejected.md`.
 
-#### Platform-specific entries for remote-kernels and model-router
+#### Platform-specific entries for remote-kernels, model-router and precis
 
-These two plugins ship a compiled binary; the plain key downloads it separately, so a plugin update briefly runs against the previous binary, while the marketplace's per-platform entry bundles it. For every plugin listed under **Platform entries available for** in Status, install `<plugin><suffix>@alignment-hive` with the suffix reported there (e.g. `remote-kernels-aarch64-apple-darwin@alignment-hive`) instead of the plain key; a plugin not listed there has no entry for this platform, so use the plain key. If Status says the catalog could not be consulted, add the marketplace and re-run `align-status.sh` before choosing.
+remote-kernels and model-router ship a compiled binary; the plain key downloads it separately, so a plugin update briefly runs against the previous binary, while the marketplace's per-platform entry bundles it. For every plugin listed under **Platform entries available for** in Status, install `<plugin><suffix>@alignment-hive` with the suffix reported there (e.g. `remote-kernels-aarch64-apple-darwin@alignment-hive`) instead of the plain key; a plugin not listed there has no entry for this platform, so use the plain key. If Status says the catalog could not be consulted, add the marketplace and re-run `align-status.sh` before choosing.
 
 - **Never `--scope project`.** The key names a platform, so it must never land in a checked-in file — a teammate on another OS would get an archive that refuses to run. If the chosen scope is `project`, install these with `--scope local`.
 - **Never both.** A platform-specific entry and its plain counterpart define the same commands, skills and hooks. Exactly one key per plugin across the four settings files — use the install-then-clean procedure above.
+
+**precis** follows both rules, in its own marketplace. It has a build for every suffix Status can report, so install `precis<suffix>@precis` with the **Platform entry suffix** from Status (e.g. `precis-aarch64-apple-darwin@precis`); never recommend the plain `precis@precis`, which is superseded. Either key enabled counts as installed (the plain one is handled under Bundled-binary Migration, whose one exception to "never both" is a plain key in `.claude/settings.json` that is disabled locally). If Status reports no suffix, there is no build for this platform: skip the plugin and mention the standalone CLI from the precis README.
 
 #### Installing and "Tell me more"
 
@@ -112,7 +116,7 @@ claude plugin install <coordinate> --scope <scope>
 
 | Plugin | `<coordinate>` | `<github-repo>` | README |
 |---|---|---|---|
-| precis | `precis@precis` | `Crazytieguy/precis` | `https://raw.githubusercontent.com/Crazytieguy/precis/main/README.md` |
+| precis | `precis<suffix>@precis` | `Crazytieguy/precis` | `https://raw.githubusercontent.com/Crazytieguy/precis/main/README.md` |
 | codex | `codex@codex-plugin-cc` | `Crazytieguy/codex-plugin-cc` | `https://raw.githubusercontent.com/Crazytieguy/codex-plugin-cc/main/README.md` |
 | agent-sanitizer | `agent-sanitizer@agent-sanitizer` | `AlexanderMattTurner/agent-sanitizer` | `https://raw.githubusercontent.com/AlexanderMattTurner/agent-sanitizer/main/README.md` |
 
