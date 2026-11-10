@@ -38,9 +38,9 @@ jobs:
         # includes the runner's OS and architecture, so a mismatch is a miss.
         include:
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
           - target: x86_64-apple-darwin
-            runner: macos-14
+            runner: macos-15
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
           - target: x86_64-unknown-linux-gnu
