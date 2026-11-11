@@ -245,6 +245,11 @@ usage-statistics-enabled: false
 
 disable-claude-cloak-mode: true
 
+# One login per provider leaves a cooldown nothing to fail over to: it only
+# refuses requests locally. A Codex usage limit cooled the login until its
+# `resets_at`, so a raised limit stayed refused until a restart.
+disable-cooling: true
+
 routing:
   strategy: {strategy}
   session-affinity: false
@@ -1348,6 +1353,7 @@ mod tests {
                 value["usage-statistics-enabled"],
                 serde_yaml::Value::from(false)
             );
+            assert_eq!(value["disable-cooling"], serde_yaml::Value::from(true));
             // With Muse off, Meta logins serve nothing.
             assert_eq!(
                 value["oauth-excluded-models"]["meta"],
