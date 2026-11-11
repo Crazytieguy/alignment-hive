@@ -87,4 +87,4 @@ Install a plugin by adding it to `enabledPlugins` in `settings.json`, e.g.:
 
 ## Contributing
 
-Feedback and suggestions welcome. Open an [issue](https://github.com/Crazytieguy/alignment-hive/issues) or email yoav.tzfati@gmail.com.
+Feedback and suggestions welcome. Run `/hive:feedback` in Claude Code, open an [issue](https://github.com/Crazytieguy/alignment-hive/issues) or email yoav.tzfati@gmail.com.
