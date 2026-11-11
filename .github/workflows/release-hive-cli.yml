@@ -116,7 +116,9 @@ jobs:
         working-directory: dist
         run: sha256sum hive-cli-* > SHA256SUMS
 
-      - name: Create tag and release
+      # A draft, so that nobody is handed the release before its check: install.sh and bootstrap.sh
+      # fetch a public release at once, and Promote to stable takes one to be good.
+      - name: Create tag and draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -124,20 +126,31 @@ jobs:
           TAG="hive-cli-v${VERSION}"
           git tag "$TAG"
           git push origin "$TAG"
+          # A draft that an earlier attempt left would stay beside the new one: creating a draft
+          # doesn't look for an existing release.
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
+            gh release delete "$TAG" --yes
+          fi
           gh release create "$TAG" dist/hive-cli-* dist/SHA256SUMS \
+            --draft \
             --title "hive-cli v${VERSION}" \
             --generate-notes
 
-      # Fetches what install.sh and bootstrap.sh will: a release whose SHA256SUMS is missing, incomplete or
-      # wrong would block every install of it, so fail here instead.
-      - name: Check the published checksums
+      # A release whose SHA256SUMS is missing, incomplete or wrong would block every install of it, so
+      # check what was uploaded before publishing it.
+      - name: Check the uploaded checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          BASE="https://github.com/${{ github.repository }}/releases/download/hive-cli-v${{ needs.check.outputs.version }}"
-          mkdir published && cd published
-          curl -fsSL "$BASE/SHA256SUMS" -o SHA256SUMS
+          gh release download "hive-cli-v${{ needs.check.outputs.version }}" --dir uploaded
+          cd uploaded
           [ "$(wc -l < SHA256SUMS)" -eq "$(ls ../dist/hive-cli-* | wc -l)" ]
-          for name in $(awk '{ print $2 }' SHA256SUMS); do curl -fsSL "$BASE/$name" -o "$name"; done
           sha256sum -c SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "hive-cli-v${{ needs.check.outputs.version }}" --draft=false
 
   promote-stable:
     needs: release

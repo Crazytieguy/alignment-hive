@@ -11,7 +11,8 @@
 # binary can't be downloaded yet, however long the release takes to build and
 # whether or not it succeeds. All of main waits together. Public is enough,
 # because every release workflow makes its release with `gh release create
-# <tag> <files>`, which keeps it a draft until the files are uploaded.
+# <tag> <files>`, which keeps it a draft until the files are uploaded, and
+# hive-cli's stays a draft until its checksums are checked as well.
 #
 # The per-platform zips of model-router and remote-kernels don't come from
 # `stable`: plugin-archives.yml publishes each from main once its own binary
