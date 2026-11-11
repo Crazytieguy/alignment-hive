@@ -138,3 +138,8 @@ jobs:
           [ "$(wc -l < SHA256SUMS)" -eq "$(ls ../dist/hive-cli-* | wc -l)" ]
           for name in $(awk '{ print $2 }' SHA256SUMS); do curl -fsSL "$BASE/$name" -o "$name"; done
           sha256sum -c SHA256SUMS
+
+  promote-stable:
+    needs: release
+    uses: ./.github/workflows/promote-stable.yml
+    secrets: inherit

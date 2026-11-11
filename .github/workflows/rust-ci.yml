@@ -13,7 +13,7 @@ on:
       - 'plugins/remote-kernels/binary-version'
       - '.github/workflows/rust-ci.yml'
       - '.github/workflows/model-router-release.yml'
-      - '.github/workflows/model-router-autotag.yml'
+      - '.github/workflows/binary-autotag.yml'
       - '.github/workflows/remote-kernels-release.yml'
   pull_request:
     branches: [main]
@@ -27,7 +27,7 @@ on:
       - 'plugins/remote-kernels/binary-version'
       - '.github/workflows/rust-ci.yml'
       - '.github/workflows/model-router-release.yml'
-      - '.github/workflows/model-router-autotag.yml'
+      - '.github/workflows/binary-autotag.yml'
       - '.github/workflows/remote-kernels-release.yml'
 
 jobs:
@@ -41,16 +41,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compare model-router versions
+      # A pin on a version that is never released would hold stable back for
+      # good (promote-stable.yml).
+      - name: Compare each plugin's binary-version with its crate
         shell: bash
         run: |
-          binary_version=$(tr -d '[:space:]' < plugins/model-router/binary-version)
-          crate_version=$(grep -m1 '^version = ' crates/model-router/Cargo.toml | cut -d'"' -f2)
-          echo "binary-version=$binary_version Cargo.toml=$crate_version"
-          if [ "$binary_version" != "$crate_version" ]; then
-            echo "::error::plugins/model-router/binary-version ($binary_version) != crates/model-router/Cargo.toml ($crate_version) — bump them together"
-            exit 1
-          fi
+          status=0
+          for name in model-router remote-kernels; do
+            binary_version=$(tr -d '[:space:]' < "plugins/$name/binary-version")
+            crate_version=$(grep -m1 '^version = ' "crates/$name/Cargo.toml" | cut -d'"' -f2)
+            echo "$name: binary-version=$binary_version Cargo.toml=$crate_version"
+            if [ "$binary_version" != "$crate_version" ]; then
+              echo "::error::plugins/$name/binary-version ($binary_version) != crates/$name/Cargo.toml ($crate_version) — bump them together"
+              status=1
+            fi
+          done
+          exit $status
   check:
     name: Check crates
     runs-on: ubuntu-latest

@@ -1,6 +1,6 @@
 ---
 name: release-plugins
-description: Release considerations special to alignment-hive (version bumps, checks, the remote-kernels tag, what CI a push triggers, plugin archives, rollback, troubleshooting). Use when releasing this repo, bumping versions, or when a release workflow, binary release, or plugin archive looks wrong.
+description: Release considerations special to alignment-hive (version bumps, checks, what CI a push triggers, plugin archives, rollback, troubleshooting). Use when releasing this repo, bumping versions, or when a release workflow, binary release, or plugin archive looks wrong.
 ---
 
 # alignment-hive release considerations
@@ -42,39 +42,45 @@ component's commits since its version last changed on `origin/main`.
   with `cargo test --features fake-runtime --test fake_e2e -- --ignored
   --test-threads=1`.
 
-## Tags
-
-A remote-kernels binary release needs the tag `remote-kernels-vX.Y.Z` on the
-bump commit. Nothing else is tagged by hand.
-
 ## What a push triggers
 
-- Plain plugins are path sources, so the push itself is the release.
-- A model-router `binary-version` change auto-tags and releases the binary; a
-  remote-kernels binary releases from its tag. Either binary workflow then calls
-  *Plugin archives*.
+- Users' marketplaces follow `stable`, the default branch, not `main`. The
+  *Promote to stable* workflow moves `stable` up to `main` once every binary
+  `main` pins is released; `.github/workflows/promote-stable.yml` says how
+  and why. Nothing is tagged by hand.
+- A `binary-version` change auto-tags and releases that binary. The binary
+  workflow then calls *Plugin archives* and *Promote to stable*.
 - A content change to model-router or remote-kernels triggers *Plugin
   archives*, which rebuilds the per-platform zips.
 - *Release hive-cli* runs on hive-cli source changes and, only when
   `packages/hive-cli/package.json` has a new version, attaches compiled
-  binaries to a `hive-cli-vX.Y.Z` GitHub release (it isn't on npm). To roll
-  hive-cli back, release the old code under a higher version: the hive plugin
-  never moves `hive` on the PATH to an older CLI.
+  binaries to a `hive-cli-vX.Y.Z` GitHub release (it isn't on npm), then calls
+  *Promote to stable*. To roll hive-cli back, release the old code under a
+  higher version: the hive plugin never moves `hive` on the PATH to an older
+  CLI.
+- *Release Notes* posts to Slack when a plugin version reaches `stable`.
 
 ## After the push
 
-Once the push's runs succeed (for model-router or remote-kernels, that
-includes *Plugin archives*, since the update downloads their zips), run
-`bash .claude/skills/release-plugins/scripts/update-local.sh`. It installs the
-release on this machine now instead of at the next auto-update pass.
+The release has reached users once `stable` holds the bump commit:
+`git fetch origin stable && git merge-base --is-ancestor <sha> origin/stable`.
+Wait for that, however long the push's runs take (`gh run list --commit
+<sha>`); a *Promote to stable* job that shows as cancelled only gave way to a
+newer one. If the runs are over and `stable` still lacks the commit, see
+Troubleshooting. Then run
+`bash .claude/skills/release-plugins/scripts/update-local.sh`, which installs
+the release on this machine now instead of at the next auto-update pass.
+
+`gh workflow run` without `--ref` runs a workflow as it is on `stable`; pass
+`--ref main` to anything that builds or publishes.
 
 ## Binary-shipping plugins (model-router, remote-kernels)
 
 These are also published as `archive` marketplace entries: one zip per
 platform, with that platform's released binary bundled inside, so a plugin
-update and its binary install as one artifact. `plugins/<name>/` stays the
-single source. CI enforces that model-router's `binary-version` matches its
-`Cargo.toml`.
+update and its binary install as one artifact. *Plugin archives* builds them
+from `main`, not `stable`, each as soon as its own binary is released.
+`plugins/<name>/` stays the single source.
 
 **Rollback:** revert the commit and push. The build is byte-deterministic, so
 CI reproduces the previous zips exactly (unless that binary release was re-run
@@ -86,22 +92,29 @@ bad version move back on their next update pass.
 
 ## Troubleshooting
 
-**A binary release is missing its assets.** Re-run *Auto-tag model-router
-release* against `main`; for remote-kernels, re-run *Release* at the
-`remote-kernels-vX.Y.Z` tag. Each publishes the plugin archives when it
-finishes. The release is created with all its assets in one `gh release
-create`, so a re-run fails if a partial release exists; delete that release
-(keep the tag) first.
+**`stable` is behind `main`, so users aren't getting a release.** A warning
+on the last *Promote to stable* run's page names the release it waits for. Fix
+that release (next entry); its workflow promotes when it finishes. If nothing
+is missing, re-run *Promote to stable* against `main`. It fails, rather than
+waits, when `stable` holds commits `main` doesn't, which a PR merged into
+`stable` causes: ask the user before touching either branch.
+
+**A binary release failed or is missing its assets.** For model-router or
+remote-kernels, re-run *Auto-tag binary releases* against `main`; for the
+CLI, re-run the failed jobs of *Release hive-cli*. Each promotes when it
+finishes, and the first two also publish the plugin archives. The release is
+created with all its assets in one `gh release create`, so a re-run fails if
+a partial release exists; delete that release (keep the tag) first.
 
 **The zips are missing but the binary release is fine.** Re-run *Plugin
 archives* against `main`. It skips any plugin whose binary release is missing
 rather than failing, so check the run's log rather than only its status.
 
 **A binary release's builds are slow again.** They restore cargo caches that
-*Release build cache* saves from `main`, because a cache saved at one tag can't
-be read at another. Look for `Restored from cache key` in a build job's log. A
-new Rust stable on the runners is a miss until that workflow next runs (every 6
-days); run it against `main` to refill sooner.
+*Release build cache* saves from `stable`, because a cache saved at one tag
+can't be read at another. Look for `Restored from cache key` in a build job's
+log. A new Rust stable on the runners is a miss until that workflow next runs
+(every 6 days); run it against `stable` to refill sooner.
 
 **A push seems to have triggered nothing.** Check
 [githubstatus.com](https://www.githubstatus.com/history), then

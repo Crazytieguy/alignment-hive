@@ -4,7 +4,8 @@
 #
 # Restore only. A release runs at its tag, and GitHub keeps a cache saved at one
 # tag from runs at any other, so anything saved here would never be read again.
-# release-build-cache.yml saves these caches from main, which every tag can read.
+# release-build-cache.yml saves these caches from stable, the default branch,
+# which every tag can read.
 #
 # The key hashes the root Cargo.toml because rust-cache's own key ignores
 # [profile.*]: after a profile change the old cache still matches exactly, its

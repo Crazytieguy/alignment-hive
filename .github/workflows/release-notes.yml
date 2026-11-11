@@ -1,10 +1,12 @@
 name: Release Notes
 
-# Posts when a push changes a plugin version. (GitHub's schedule trigger
-# started this workflow one to eight hours late.)
+# Posts when a plugin version reaches stable, the branch users' marketplaces
+# follow (.github/workflows/promote-stable.yml), which is when users can
+# install it. (GitHub's schedule trigger started this workflow one to eight
+# hours late.)
 on:
   push:
-    branches: [main]
+    branches: [stable]
     paths:
       - 'plugins/*/.claude-plugin/plugin.json'
   workflow_dispatch:

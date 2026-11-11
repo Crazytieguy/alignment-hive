@@ -1,0 +1,78 @@
+# Users' marketplaces follow `stable`, the repository's default branch: Claude
+# Code re-clones a marketplace from the default branch whenever that branch has
+# moved. Pushes go to `main`, where the binary releases are built, and this
+# workflow fast-forwards `stable` to `main` once the release behind every pin
+# on main is public:
+#
+# - plugins/*/cli-version (hive):   release hive-cli-v<version>
+# - plugins/*/binary-version:       release <plugin>-v<version>
+#
+# Until then `stable` stays where it is, so no one is handed a plugin whose
+# binary can't be downloaded yet, however long the release takes to build and
+# whether or not it succeeds. All of main waits together. Public is enough,
+# because every release workflow makes its release with `gh release create
+# <tag> <files>`, which keeps it a draft until the files are uploaded.
+#
+# The per-platform zips of model-router and remote-kernels don't come from
+# `stable`: plugin-archives.yml publishes each from main once its own binary
+# is released, with that binary inside.
+#
+# Runs on each push to main, and from each binary release workflow once its
+# release is public.
+
+name: Promote to stable
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: Promote main to stable
+    runs-on: ubuntu-latest
+    # One job runs and one waits; a newer arrival cancels the one waiting,
+    # which loses nothing because every run promotes whatever main is by then.
+    concurrency:
+      group: promote-stable
+      cancel-in-progress: false
+    steps:
+      # Always main, never the caller's ref: a release workflow calls us from
+      # its tag. The deploy key, not the workflow's token, because that token
+      # may not push commits that change workflow files, and its pushes start
+      # no workflows, which Release Notes and Release build cache rely on.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          ssh-key: ${{ secrets.STABLE_DEPLOY_KEY }}
+
+      - name: Promote
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tags=()
+          for pin in plugins/*/cli-version; do
+            tags+=("hive-cli-v$(tr -d '[:space:]' < "$pin")")
+          done
+          for pin in plugins/*/binary-version; do
+            tags+=("$(basename "$(dirname "$pin")")-v$(tr -d '[:space:]' < "$pin")")
+          done
+          for tag in "${tags[@]}"; do
+            # This endpoint answers only for a published release, never a draft.
+            if ! error=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --silent 2>&1); then
+              # Only a 404 means "not released"; anything else must not pass for it.
+              if [[ "$error" != *"HTTP 404"* ]]; then
+                echo "::error::could not look up release $tag: $error"
+                exit 1
+              fi
+              echo "::warning::stable is not moved: main pins $tag, which is not released"
+              exit 0
+            fi
+          done
+          # A fast-forward: git refuses if stable holds anything main doesn't.
+          git push origin HEAD:refs/heads/stable

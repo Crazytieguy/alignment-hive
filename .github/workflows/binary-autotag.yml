@@ -1,20 +1,23 @@
-# Cuts the model-router release automatically: when a push to main changes
-# plugins/model-router/binary-version, create the model-router-v<version> tag
-# and dispatch the release workflow at it. Dispatching explicitly is required
-# because tag pushes made with GITHUB_TOKEN never trigger tag-push workflows.
+# Cuts each binary release automatically: when a push to main changes
+# plugins/<plugin>/binary-version, create the <plugin>-v<version> tag and
+# dispatch that plugin's release workflow at it. Dispatching explicitly is
+# required because tag pushes made with GITHUB_TOKEN never trigger tag-push
+# workflows. Both plugins are checked on every run; one whose release already
+# exists is left alone.
 #
 # Idempotent and failure-recoverable: gated on the RELEASE WITH ASSETS
 # existing, not on the tag — if an earlier release run failed after tagging,
 # re-running this workflow re-dispatches instead of skipping forever.
 # (Re-run it from the Actions tab against main.)
 
-name: Auto-tag model-router release
+name: Auto-tag binary releases
 
 on:
   push:
     branches: [main]
     paths:
       - 'plugins/model-router/binary-version'
+      - 'plugins/remote-kernels/binary-version'
   workflow_dispatch:
 
 permissions:
@@ -23,9 +26,15 @@ permissions:
 
 jobs:
   autotag:
+    name: autotag (${{ matrix.plugin }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [model-router, remote-kernels]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PLUGIN: ${{ matrix.plugin }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,17 +42,17 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          binary_version=$(tr -d '[:space:]' < plugins/model-router/binary-version)
-          crate_version=$(grep -m1 '^version = ' crates/model-router/Cargo.toml | cut -d'"' -f2)
+          binary_version=$(tr -d '[:space:]' < "plugins/$PLUGIN/binary-version")
+          crate_version=$(grep -m1 '^version = ' "crates/$PLUGIN/Cargo.toml" | cut -d'"' -f2)
           if [ -z "$binary_version" ]; then
-            echo "::error::plugins/model-router/binary-version is empty"
+            echo "::error::plugins/$PLUGIN/binary-version is empty"
             exit 1
           fi
           if [ "$binary_version" != "$crate_version" ]; then
-            echo "::error::binary-version ($binary_version) != crates/model-router Cargo.toml version ($crate_version); bump them together"
+            echo "::error::binary-version ($binary_version) != crates/$PLUGIN Cargo.toml version ($crate_version); bump them together"
             exit 1
           fi
-          echo "tag=model-router-v${binary_version}" >> "$GITHUB_OUTPUT"
+          echo "tag=$PLUGIN-v${binary_version}" >> "$GITHUB_OUTPUT"
 
       - name: Skip when the release and its assets already exist
         id: gate
@@ -74,6 +83,6 @@ jobs:
       - name: Dispatch release workflow at the tag
         if: steps.gate.outputs.done == 'false'
         run: |
-          gh workflow run model-router-release.yml \
+          gh workflow run "$PLUGIN-release.yml" \
             --repo "$GITHUB_REPOSITORY" \
             --ref 'refs/tags/${{ steps.version.outputs.tag }}'

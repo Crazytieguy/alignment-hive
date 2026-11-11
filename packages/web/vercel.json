@@ -1,4 +1,5 @@
 {
+  "git": { "deploymentEnabled": { "stable": false } },
   "buildCommand": "bunx convex deploy --cmd 'bun run build'",
   "devCommand": "bun dev",
   "installCommand": "bun install",

@@ -300,6 +300,13 @@ jobs:
     with:
       plugin: remote-kernels
 
+  promote-stable:
+    needs:
+      - host
+    if: ${{ always() && needs.host.result == 'success' }}
+    uses: ./.github/workflows/promote-stable.yml
+    secrets: inherit
+
   announce:
     needs:
       - plan

@@ -105,7 +105,7 @@ remote-kernels and model-router ship a compiled binary; the plain key downloads 
 
 #### Installing and "Tell me more"
 
-alignment-hive plugins: README at `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/main/plugins/<plugin>/README.md`; install with `claude plugin install <plugin>@alignment-hive --scope <scope>`. If that fails because the alignment-hive marketplace is missing, run `claude plugin marketplace add Crazytieguy/alignment-hive --scope <scope>` first, and add `"autoUpdate": true` to the declaration it writes.
+alignment-hive plugins: README at `https://raw.githubusercontent.com/Crazytieguy/alignment-hive/stable/plugins/<plugin>/README.md`; install with `claude plugin install <plugin>@alignment-hive --scope <scope>`. If that fails because the alignment-hive marketplace is missing, run `claude plugin marketplace add Crazytieguy/alignment-hive --scope <scope>` first, and add `"autoUpdate": true` to the declaration it writes.
 
 Other plugins — add the marketplace (harmless if already known), then install:
 

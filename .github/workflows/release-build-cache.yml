@@ -2,8 +2,9 @@
 #
 # A release runs at its tag, and a run can only restore caches saved at its own
 # ref or on the default branch, so one release can never reuse what another
-# saved. This workflow saves them from main instead. It builds and throws the
-# result away: nothing here uploads or publishes, and its token is read-only.
+# saved. This workflow saves them from stable, the default branch, instead. It
+# builds and throws the result away: nothing here uploads or publishes, and
+# its token is read-only.
 #
 # One cache per target holds the dependencies of both packages, because the two
 # release workflows restore the same key (.github/build-setup.yml).
@@ -15,7 +16,7 @@ permissions:
 
 on:
   push:
-    branches: [main]
+    branches: [stable]
     paths:
       - '.github/build-setup.yml'
       - '.github/workflows/release-build-cache.yml'
