@@ -96,8 +96,9 @@ bad version move back on their next update pass.
 on the last *Promote to stable* run's page names the release it waits for. Fix
 that release (next entry); its workflow promotes when it finishes. If nothing
 is missing, re-run *Promote to stable* against `main`. It fails, rather than
-waits, when `stable` holds commits `main` doesn't, which a PR merged into
-`stable` causes: ask the user before touching either branch.
+waits, when `stable` holds commits `main` doesn't, which a ruleset that lets
+only the deploy key update `stable` should prevent: ask the user before
+touching either branch.
 
 **A binary release failed or is missing its assets.** For model-router or
 remote-kernels, re-run *Auto-tag binary releases* against `main`; for the
