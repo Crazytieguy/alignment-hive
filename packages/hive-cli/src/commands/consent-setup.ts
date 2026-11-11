@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { ReadStream } from 'node:tty';
@@ -162,6 +162,7 @@ async function consentSetupInner(): Promise<number> {
       ...toDisable.map((p) => ({ identifier: p.identifiers, sessionSharing: false })),
     ]);
     for (const project of toEnable) {
+      rmSync(statePaths(getStateDir(project.path)).sharingDisabled, { force: true });
       console.log(`  ✓ ${msg.enableSuccess(project.displayName)}`);
     }
     for (const project of toDisable) {
