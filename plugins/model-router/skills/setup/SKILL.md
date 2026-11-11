@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up, configure, verify, repair, or uninstall the model-router Claude/GPT routing gateway, including any of its config options — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI) and Muse (Meta) families, Ultrafast GPT models, OS service, and Claude Code settings wiring.
+description: Set up, configure, verify, repair, or uninstall model-router, the local gateway that routes Claude Code to non-Claude models, including any of its config options — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI), Muse (Meta) and open-weights models, Ultrafast GPT models, OS service, and Claude Code settings wiring.
 ---
 
 # model-router setup
@@ -13,9 +13,9 @@ macOS and Linux only.
 ## Wrong platform (check this first)
 
 `$ROUTER platform-check` — silent and exit 0 means all is well, go on to the
-install flow. It only fails when a platform-specific plugin entry for a
-*different* machine is enabled: those bundle one target's binary, so the wrong
-one cannot run. It prints the entry that should be there, e.g.
+section the request needs (the install flow for a new setup). It only fails
+when a platform-specific plugin entry for a *different* machine is enabled:
+those bundle one target's binary, so the wrong one cannot run. It prints the entry that should be there, e.g.
 `model-router-aarch64-apple-darwin`.
 
 Fix it with the claude CLI — editing `enabledPlugins` by hand installs
@@ -230,8 +230,11 @@ desktop app are what it costs. Then step 6's restart and smoke test.
 ## Configuration
 
 `$ROUTER config-template` prints the annotated template of every
-`~/.config/model-router/config.toml` option. After changing the file,
-`$ROUTER service restart`, then `$ROUTER doctor`.
+`~/.config/model-router/config.toml` option. Options with a step above
+(GPT auth, Grok, Muse, open-weights providers, the auto-mode classifier)
+follow that step. After any other change, run `$ROUTER doctor` before
+restarting (its `config` check catches a file the service would refuse to
+start with), then `$ROUTER service restart` and `$ROUTER doctor` again.
 
 ## Repair
 
