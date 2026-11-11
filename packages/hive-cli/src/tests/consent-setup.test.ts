@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import * as realOs from 'node:os';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -25,27 +26,21 @@ mockForFile('../lib/convex', realConvex, {
 mockForFile('../lib/transcript-discovery', realDiscovery, { extractCwd: () => project });
 mockForFile('@inquirer/prompts', realPrompts, { checkbox: () => Promise.resolve(ticked) });
 
+let home = '';
+// Bun resolves os.homedir() from the OS rather than $HOME.
+mockForFile('node:os', realOs, { homedir: () => home });
+
 const { consentSetup } = await import('../commands/consent-setup');
 const { statePaths } = await import('../lib/config');
-
-let home = '';
-let originalHome: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
   home = await realpath(await mkdtemp(join(tmpdir(), 'hive-consent-home-')));
   project = join(home, 'work', 'proj');
   await mkdir(project, { recursive: true });
   await mkdir(join(home, '.claude', 'projects', '-work-proj'), { recursive: true });
-  originalHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
-  process.env.HOME = home;
-  process.env.USERPROFILE = home;
 });
 
 afterAll(async () => {
-  for (const [name, value] of Object.entries(originalHome)) {
-    if (value === undefined) delete process.env[name];
-    else process.env[name] = value;
-  }
   await rm(home, { recursive: true, force: true });
 });
 
