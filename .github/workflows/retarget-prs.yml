@@ -1,0 +1,31 @@
+# `stable` is the default branch only so that users' marketplaces follow it
+# (promote-stable.yml), which also makes it the base GitHub offers for a new
+# pull request. Changes land on `main`, and nothing but the promotion may
+# update `stable`, so a pull request opened against it is moved to `main`.
+#
+# pull_request_target, so that the token may edit a pull request from a fork.
+# That is safe because nothing from the pull request is checked out or run.
+#
+# The move starts no workflows, as nothing this token does can, which is why
+# ci.yml and rust-ci.yml run for pull requests opened against `stable` too,
+# with `main` merged in (.github/actions/merge-main).
+
+name: Retarget pull requests to main
+
+on:
+  pull_request_target:
+    types: [opened]
+    branches: [stable]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  retarget:
+    name: Retarget to main
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR" -f base=main --silent

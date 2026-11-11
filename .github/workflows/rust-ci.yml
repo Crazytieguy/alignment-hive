@@ -16,7 +16,9 @@ on:
       - '.github/workflows/binary-autotag.yml'
       - '.github/workflows/remote-kernels-release.yml'
   pull_request:
-    branches: [main]
+    # `stable` too: GitHub offers it as the base, and retarget-prs.yml moves the
+    # pull request to `main` without starting this workflow again.
+    branches: [main, stable]
     paths:
       - 'crates/**'
       - 'Cargo.toml'
@@ -40,6 +42,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/merge-main
 
       # A pin on a version that is never released would hold stable back for
       # good (promote-stable.yml).
@@ -63,6 +66,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/merge-main
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -96,6 +100,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/merge-main
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -126,6 +131,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/merge-main
 
       - name: Install dist
         shell: bash

@@ -1,0 +1,17 @@
+# A pull request opened against `stable` is moved to `main` without its checks
+# starting again (retarget-prs.yml), so they have to test it merged with
+# `main`, which `stable` trails while a release is being built. Use it right
+# after actions/checkout; for any other event it does nothing.
+
+name: Merge main
+description: Merges main into the checkout of a pull request opened against stable
+
+runs:
+  using: composite
+  steps:
+    - if: github.base_ref == 'stable'
+      shell: bash
+      # --unshallow, because a merge needs the history the checkout left out.
+      run: |
+        git fetch --no-tags --unshallow origin main
+        git -c user.name=ci -c user.email=ci@invalid merge --no-edit FETCH_HEAD
