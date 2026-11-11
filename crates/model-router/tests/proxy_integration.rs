@@ -1641,6 +1641,101 @@ async fn gpt_branch_rewrites_cache_identity_headers_to_the_shared_prefix_key() {
     assert_ne!(forwarded[2].headers["x-claude-code-session-id"], key);
 }
 
+/// Claude Code's `message-threads` beta: a routed model can't continue a
+/// thread (the backend stores nothing), so a continuation is refused with the
+/// error code Claude Code answers by resending in full; a `create` is
+/// forwarded without its `thread`; the Claude branch forwards both untouched.
+#[tokio::test]
+async fn message_threads_are_refused_for_routed_models_and_untouched_for_claude() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        Response::new(Body::from(
+            r#"{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"m","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ))
+    }
+    let (fake_address, observed) = spawn_fake(handler).await;
+    let config = Config {
+        anthropic_upstream_base: format!("http://{fake_address}"),
+        upstreams: external_upstreams(format!("http://{fake_address}")),
+        models: vec![ModelRoute {
+            routing_id: "claude-gpt-test".to_string(),
+            upstream: "cliproxy".to_string(),
+            upstream_model: "gpt-test".to_string(),
+            display_name: "GPT Test".to_string(),
+            ..Default::default()
+        }],
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let send = |body: String| {
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("anthropic-beta", "message-threads-2026-08-12")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+    };
+
+    for thread in [
+        r#"{"type":"continue","previous_message_id":"msg_1"}"#,
+        r#"{"type":"continue_no_save","previous_message_id":"msg_1"}"#,
+        r#"{"type":"something_new"}"#,
+    ] {
+        let response = send(format!(
+            r#"{{"model":"claude-gpt-test","thread":{thread},"messages":[{{"role":"user","content":"only the delta"}}]}}"#
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{thread}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            error["error"]["details"]["error_code"],
+            "thread_unsupported_request"
+        );
+        // Naming the beta would make Claude Code drop threads for Claude
+        // models too.
+        assert!(
+            !error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("message-threads"),
+            "{error}"
+        );
+    }
+    assert!(
+        observed.lock().await.is_empty(),
+        "a refused continuation must never reach the upstream"
+    );
+
+    let response = send(
+        r#"{"model":"claude-gpt-test","thread":{"type":"create"},"messages":[{"role":"user","content":"hi"}]}"#
+            .to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let claude_body = r#"{"model":"claude-opus-5-5","thread":{"type":"continue","previous_message_id":"msg_1"},"messages":[]}"#;
+    let response = send(claude_body.to_string()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let observed = observed.lock().await;
+    assert_eq!(observed.len(), 2);
+    let routed: serde_json::Value = serde_json::from_slice(&observed[0].body).unwrap();
+    assert_eq!(routed["model"], "gpt-test");
+    assert!(routed.get("thread").is_none(), "{routed}");
+    assert_eq!(routed["messages"][0]["content"], "hi");
+    assert_eq!(observed[1].body, claude_body.as_bytes());
+    assert_eq!(
+        observed[1].headers["anthropic-beta"],
+        "message-threads-2026-08-12"
+    );
+}
+
 // ---- Grok-origin WebSearch: xAI-native search ----
 
 /// A config with both a Grok route and a GPT route, so the gate is exercised

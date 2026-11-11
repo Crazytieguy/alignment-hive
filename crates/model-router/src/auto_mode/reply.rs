@@ -37,8 +37,6 @@ use crate::websearch::contains;
 pub(crate) enum ReplyMode {
     /// Remove upstream `safeguard_results`; add nothing.
     StripOnly,
-    /// Answer `unsupported` (a thread continuation).
-    Unsupported,
     /// Judge every tool call.
     Judge(Arc<Judge>),
 }
@@ -74,10 +72,6 @@ fn available(verdicts: &[(String, CallVerdict)]) -> Value {
         .map(|(id, verdict)| (id.clone(), verdict.to_json()))
         .collect();
     results_json(&json!({"type": "available", "tool_uses": tool_uses}))
-}
-
-fn unsupported() -> Value {
-    results_json(&json!({"type": "unsupported"}))
 }
 
 /// An MCP tool's server key, normalised the way Claude Code tells its
@@ -436,8 +430,6 @@ impl HeldDelta {
 struct Stage {
     /// The reply's calls, tracked only while judging.
     calls: Option<Calls>,
-    /// The first `message_delta` gets `unsupported`.
-    unsupported: bool,
     framer: SseFramer,
     /// Framing was abandoned on a reply not judged; bytes pass through raw
     /// from here, guarded.
@@ -456,14 +448,12 @@ struct Stage {
 
 impl Stage {
     fn new(mode: ReplyMode) -> Self {
-        let (calls, unsupported) = match mode {
-            ReplyMode::Judge(judge) => (Some(Calls::new(judge)), false),
-            ReplyMode::Unsupported => (None, true),
-            ReplyMode::StripOnly => (None, false),
+        let calls = match mode {
+            ReplyMode::Judge(judge) => Some(Calls::new(judge)),
+            ReplyMode::StripOnly => None,
         };
         Self {
             calls,
-            unsupported,
             framer: SseFramer::default(),
             framing_lost: None,
             cut: false,
@@ -590,9 +580,9 @@ impl Stage {
     /// Processes one complete event; returns it (maybe rewritten) unless
     /// it is held.
     fn event(&mut self, event: Vec<u8>) -> Option<Bytes> {
-        // With nothing to judge or inject, only an upstream verdict needs
-        // the payload read.
-        if self.calls.is_none() && !self.unsupported && !may_carry_verdict(&event) {
+        // With nothing to judge, only an upstream verdict needs the payload
+        // read.
+        if self.calls.is_none() && !may_carry_verdict(&event) {
             return self.emit(Bytes::from(event));
         }
         let Ok(text) = std::str::from_utf8(&event) else {
@@ -773,7 +763,7 @@ impl Stage {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
         }
-        let mut held = HeldDelta {
+        let held = HeldDelta {
             original: event,
             range,
             data,
@@ -782,9 +772,6 @@ impl Stage {
         if first && self.calls.is_some() {
             self.held_delta = Some(held);
             return None;
-        }
-        if first && self.unsupported {
-            held.set_results(unsupported());
         }
         self.emit(held.render())
     }
@@ -888,7 +875,6 @@ pub(crate) async fn json(mode: &ReplyMode, body: &[u8]) -> Option<Vec<u8>> {
     let stripped = object.remove("safeguard_results").is_some();
     let results = match mode {
         ReplyMode::StripOnly => None,
-        ReplyMode::Unsupported => Some(unsupported()),
         ReplyMode::Judge(judge) => judge_message(judge, &message).await,
     };
     match results {
@@ -994,24 +980,12 @@ mod tests {
         assert!(stage.calls.is_none() && stage.blocks.is_empty());
     }
 
-    #[test]
-    fn unsupported_is_injected_into_the_first_message_delta_only() {
-        let mut stage = Stage::new(ReplyMode::Unsupported);
-        let delta = event(&json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}));
-        let first = stage.push(&Bytes::from(delta.clone()));
-        let second = stage.push(&Bytes::from(delta.clone()));
-        assert!(String::from_utf8_lossy(&first[0]).contains(
-            r#""safeguard_results":[{"status":{"type":"unsupported"},"type":"dangerous_tool_use"}]"#
-        ));
-        assert_eq!(second[0], delta);
-    }
-
     /// A payload over several `data:` lines is rebuilt as one.
     #[test]
-    fn a_multi_line_message_delta_is_rebuilt_with_the_results() {
-        let mut stage = Stage::new(ReplyMode::Unsupported);
+    fn a_multi_line_message_delta_is_rebuilt_without_the_upstream_results() {
+        let mut stage = Stage::new(ReplyMode::StripOnly);
         let out = stage.push(&Bytes::from_static(
-            b"event: message_delta\ndata: {\"type\": \"message_delta\",\ndata: \"delta\": {\"stop_reason\": \"end_turn\"}}\n\n",
+            b"event: message_delta\ndata: {\"type\": \"message_delta\",\ndata: \"delta\": {\"stop_reason\": \"end_turn\", \"safeguard_results\": []}}\n\n",
         ));
         let text = String::from_utf8(out[0].to_vec()).unwrap();
         assert!(text.starts_with("event: message_delta\ndata: {"), "{text}");
@@ -1026,7 +1000,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(data["delta"]["stop_reason"], "end_turn");
-        assert_eq!(data["delta"]["safeguard_results"], unsupported());
+        assert!(data["delta"].get("safeguard_results").is_none(), "{text}");
     }
 
     #[tokio::test]

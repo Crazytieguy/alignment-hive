@@ -96,6 +96,42 @@ fn requested_effort(body: &[u8]) -> Option<String> {
     (!effort.is_empty() && !effort.contains(['(', ')'])).then_some(effort)
 }
 
+/// What a request's top-level `thread` field (Claude Code's
+/// `message-threads` beta) asks of the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadRequest {
+    /// No `thread` (or `null`): a stateless request.
+    Absent,
+    /// `{"type": "create"}`: the full conversation, which the server is asked
+    /// to store.
+    Create,
+    /// Anything else, `continue` and `continue_no_save` included: a request
+    /// that relies on history the server stored, or a shape not understood.
+    Other,
+}
+
+/// Reads the top-level `thread` field with the same DOM-free scan as the
+/// model lookup. A malformed `thread` is [`ThreadRequest::Other`], never
+/// [`ThreadRequest::Absent`], so it can't pass as a stateless request.
+#[must_use]
+pub fn thread_request(body: &[u8]) -> ThreadRequest {
+    #[derive(serde::Deserialize)]
+    struct Thread {
+        r#type: String,
+    }
+    let Some(range) = find_top_level_value_range(body, "thread") else {
+        return ThreadRequest::Absent;
+    };
+    let raw = &body[range];
+    if raw == b"null" {
+        return ThreadRequest::Absent;
+    }
+    match serde_json::from_slice::<Thread>(raw) {
+        Ok(thread) if thread.r#type == "create" => ThreadRequest::Create,
+        _ => ThreadRequest::Other,
+    }
+}
+
 /// Replaces only the encoded top-level `model` string token.
 ///
 /// # Errors
@@ -334,5 +370,45 @@ mod tests {
         let grok = route(ModelFamily::Grok, "grok-4.5");
         let body = br#"{"model":"r","output_config":{"effort":"high)(evil"},"messages":[]}"#;
         assert_eq!(effort_qualified_model(&grok, body), "grok-4.5");
+    }
+
+    #[test]
+    fn thread_request_tells_absent_from_create_from_everything_else() {
+        let cases: [(&[u8], ThreadRequest); 9] = [
+            (br#"{"model":"m","messages":[]}"#, ThreadRequest::Absent),
+            (br#"{"model":"m","thread":null}"#, ThreadRequest::Absent),
+            (
+                br#"{"thread":{"type":"create"},"model":"m"}"#,
+                ThreadRequest::Create,
+            ),
+            (
+                br#"{"thread":{"type":"continue","previous_message_id":"msg_1"}}"#,
+                ThreadRequest::Other,
+            ),
+            (
+                br#"{"thread":{"type":"continue_no_save","previous_message_id":"msg_1"}}"#,
+                ThreadRequest::Other,
+            ),
+            (br#"{"thread":{}}"#, ThreadRequest::Other),
+            (br#"{"thread":"create"}"#, ThreadRequest::Other),
+            // Last key wins, as for `model`.
+            (
+                br#"{"thread":{"type":"create"},"thread":{"type":"continue"}}"#,
+                ThreadRequest::Other,
+            ),
+            // A nested `thread` is not the request's.
+            (
+                br#"{"metadata":{"thread":{"type":"continue"}},"messages":[]}"#,
+                ThreadRequest::Absent,
+            ),
+        ];
+        for (body, expected) in cases {
+            assert_eq!(
+                thread_request(body),
+                expected,
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 }

@@ -27,7 +27,7 @@ use crate::capture::{CaptureSink, RequestCapture, StreamingCapture, redact_heade
 use crate::config::{Config, ModelFamily, MuseMode, UpstreamMode, WebSearchMode};
 use crate::headers;
 use crate::overflow::OverflowRewrite;
-use crate::routing::{RoutingDecision, decide, substitute_model};
+use crate::routing::{RoutingDecision, ThreadRequest, decide, substitute_model};
 use crate::service_tier::ServiceTier;
 use crate::stub;
 use crate::ultrafast::Verdict;
@@ -695,8 +695,9 @@ const COMPACTION_HEADER: &str = "x-claude-code-compaction";
 /// ([`crate::identity`]), the service tier the route asks for
 /// ([`crate::service_tier`]), the removal of tool-schema patterns the Codex
 /// validator cannot compile ([`crate::tool_schema`]), and on a compaction
-/// request a text-only reply. With the auto-mode classifier on, `safeguards`
-/// is removed too: the router answers it, not the upstream.
+/// request a text-only reply. A message-thread `create` loses its `thread`
+/// field. With the auto-mode classifier on, `safeguards` is removed too: the
+/// router answers it, not the upstream.
 ///
 /// Compaction is a one-turn fork that keeps the conversation's tools (for the
 /// prompt cache) and asks for a text summary. A GPT subagent answers it by
@@ -721,8 +722,13 @@ fn rewrite_gpt_body(
     // First: the compaction branch below reads whether `tools` is empty, and
     // the schema shim must reach the declared tools.
     crate::tool_changes::apply(&mut document, route.family);
-    if strip_safeguards && let Some(object) = document.as_object_mut() {
-        object.remove("safeguards");
+    if let Some(object) = document.as_object_mut() {
+        // A thread `create` (anything else was refused in `gpt_response`):
+        // only Anthropic keeps threads, so the field means nothing upstream.
+        object.remove("thread");
+        if strip_safeguards {
+            object.remove("safeguards");
+        }
     }
     crate::identity::inject_identity_into(
         &mut document,
@@ -782,6 +788,13 @@ async fn gpt_response(
     route: &crate::config::ModelRoute,
     capture: Option<RequestCapture>,
 ) -> Response {
+    if crate::routing::thread_request(&body) == ThreadRequest::Other {
+        tracing::info!(
+            route = %route.routing_id,
+            "refused a message-thread continuation for a routed model"
+        );
+        return thread_refusal(state, capture).await;
+    }
     // Grok carries reasoning effort in the model ID: the `output_config`
     // field Claude Code sends never reaches xAI (see
     // `routing::effort_qualified_model`).
@@ -1519,6 +1532,38 @@ async fn local_error_response(
         json!({"type":"error","error":{"type":error_type,"message":message}}).to_string(),
     );
     local_response(state, status, json_headers(), vec![bytes], capture).await
+}
+
+/// The answer to a routed request that continues one of Claude Code's
+/// message threads (the `message-threads` beta). A continuation carries only
+/// the messages after a reply the Anthropic server stored, and leaves out the
+/// tools; a routed backend stores nothing, so forwarding it would silently
+/// drop the conversation. Claude Code reads this error code as "threads are
+/// unsupported here": it resends the turn in full and sends that agent's
+/// later requests to this model without a thread. A refused
+/// `continue_no_save` (side queries such as prompt suggestions) instead stops
+/// those no-save continuations for the whole session, Claude models included;
+/// they then send the full history, as before threads. The message must not
+/// name the beta header: Claude Code reads a 400 that does as "the beta is
+/// rejected" and stops threading every model.
+async fn thread_refusal(state: &AppState, capture: Option<RequestCapture>) -> Response {
+    let bytes = Bytes::from(
+        json!({"type": "error", "error": {
+            "type": "invalid_request_error",
+            "message": "model-router: message threads aren't supported for routed models; \
+                        resend the full conversation without `thread`",
+            "details": {"error_code": "thread_unsupported_request"},
+        }})
+        .to_string(),
+    );
+    local_response(
+        state,
+        StatusCode::BAD_REQUEST,
+        json_headers(),
+        vec![bytes],
+        capture,
+    )
+    .await
 }
 
 async fn local_response(

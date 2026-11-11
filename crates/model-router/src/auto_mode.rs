@@ -225,7 +225,6 @@ impl Runtime {
         };
         let context = match context::inspect(&document) {
             context::Gate::Engage(context) => context,
-            context::Gate::Unsupported => return ReplyMode::Unsupported,
             context::Gate::StayOut(reason) => {
                 tracing::debug!(reason, "auto-mode classifier: not judging this reply");
                 return ReplyMode::StripOnly;

@@ -14,10 +14,6 @@ use serde_json::Value;
 pub(super) enum Gate {
     /// Judge the reply's tool calls.
     Engage(Box<ClassifierContext>),
-    /// A thread continuation: the request holds only the newest messages,
-    /// so the reply gets `unsupported`, which makes Claude Code resend
-    /// without threads.
-    Unsupported,
     /// Leave the reply alone, for the logged reason.
     StayOut(&'static str),
 }
@@ -161,14 +157,6 @@ pub(super) fn inspect(body: &Value) -> Gate {
     if reminders_may_be_partial(&context, raw) {
         return Gate::StayOut("system_reminders may be missing its oldest entries");
     }
-    if body
-        .get("thread")
-        .and_then(|thread| thread.get("type"))
-        .and_then(Value::as_str)
-        == Some("continue")
-    {
-        return Gate::Unsupported;
-    }
     Gate::Engage(Box::new(context))
 }
 
@@ -204,7 +192,6 @@ pub(super) mod tests {
     fn reason(gate: &Gate) -> &'static str {
         match gate {
             Gate::Engage(_) => "engage",
-            Gate::Unsupported => "unsupported",
             Gate::StayOut(reason) => reason,
         }
     }
@@ -281,19 +268,5 @@ pub(super) mod tests {
         let mut context = context_json();
         context["shed"] = json!(["prior_turn_context", "git_state.status.porcelain"]);
         assert_eq!(reason(&inspect(&body_with(&context))), "engage");
-    }
-
-    #[test]
-    fn a_thread_continuation_is_unsupported_but_a_new_thread_is_judged() {
-        let mut body = body_with(&context_json());
-        body["thread"] = json!({"type": "continue", "previous_message_id": "msg_1"});
-        assert_eq!(reason(&inspect(&body)), "unsupported");
-        body["thread"] = json!({"type": "create"});
-        assert_eq!(reason(&inspect(&body)), "engage");
-        // Without a judgeable safeguard a continuation gets nothing.
-        let mut plain = json!({"thread": {"type": "continue"}});
-        assert!(reason(&inspect(&plain)).contains("no safeguards"));
-        plain["safeguards"] = json!([]);
-        assert!(reason(&inspect(&plain)).contains("exactly one"));
     }
 }

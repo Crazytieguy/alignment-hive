@@ -652,7 +652,7 @@ async fn unavailable_defaults_leave_the_reply_alone() {
 }
 
 #[tokio::test]
-async fn a_thread_continuation_is_answered_unsupported() {
+async fn a_thread_continuation_is_refused_before_the_classifier() {
     let fake = Fake::new(
         |_| sse(&tool_events(&[("toolu_1", "ls")], &json!({}))),
         judge_rm,
@@ -663,13 +663,10 @@ async fn a_thread_continuation_is_answered_unsupported() {
         .unwrap();
     let mut body = turn_body(true);
     body["thread"] = json!({"type": "continue", "previous_message_id": "msg_0"});
-    let (_, reply) = send(&app, &body).await;
-    assert_eq!(
-        read_stream(&reply).0,
-        [Some(
-            json!([{"type": "dangerous_tool_use", "status": {"type": "unsupported"}}])
-        )]
-    );
+    let (status, reply) = send(&app, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(reply.contains("thread_unsupported_request"), "{reply}");
+    assert!(fake.turns.lock().await.is_empty());
     assert!(fake.classifications.lock().await.is_empty());
 }
 
