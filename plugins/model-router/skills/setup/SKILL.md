@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI) and Muse (Meta) families, Ultrafast GPT models, OS service, and Claude Code settings wiring.
+description: Set up, configure, verify, repair, or uninstall the model-router Claude/GPT routing gateway, including any of its config options — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI) and Muse (Meta) families, Ultrafast GPT models, OS service, and Claude Code settings wiring.
 ---
 
 # model-router setup
@@ -226,6 +226,12 @@ that macOS asks for a password, mark Linux and WSL as untested, and on a
 `reason`, keep the base-URL wiring rather than touching the user's own
 proxy settings. Staying on the base URL is fine too; Remote Control and the
 desktop app are what it costs. Then step 6's restart and smoke test.
+
+## Configuration
+
+`$ROUTER config-template` prints the annotated template of every
+`~/.config/model-router/config.toml` option. After changing the file,
+`$ROUTER service restart`, then `$ROUTER doctor`.
 
 ## Repair
 
