@@ -252,7 +252,13 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
 
     if let Some(config) = config {
         if let Some(home) = home.as_deref() {
-            checks.push(wiring_check(dirs, &config, home, &project));
+            checks.push(wiring_check(
+                dirs,
+                &config,
+                home,
+                &project,
+                base_url.as_deref(),
+            ));
         }
         checks.extend(legacy_models_block_check(&config));
         checks.push(shipped_agent_routes_check(&config));
@@ -283,28 +289,39 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
     }
 }
 
+/// What a fix to stale wiring leaves for the person.
+const STALE_RESTART: &str =
+    "Running Claude Code sessions keep the wiring they started with until restarted.";
+
 /// How Claude Code reaches the router, from the settings files and the
 /// environment (`settings proxy`'s report): the HTTPS-proxy wiring passes
 /// unless the next session would skip or fail it (an untrusted CA fails
 /// every request); the base-URL wiring passes with a note that it keeps
 /// Remote Control off and the desktop app away; no wiring is a note too,
-/// as setup wires last.
+/// as setup wires last. Either wiring fails once it points at an address
+/// or token the config has moved off (`base_url`: the one it serves now).
 fn wiring_check(
     dirs: &Dirs,
     config: &Config,
     home: &std::path::Path,
     project: &std::path::Path,
+    base_url: Option<&str>,
 ) -> Check {
     let ca_cert = crate::mitm::ca_cert_path(&crate::mitm::ca_dir(dirs));
+    let (served_tokens, served) =
+        crate::settings_edit::served_history(&crate::state::served_base_urls(dirs));
     let tokens: Vec<String> = config
         .ingress_token
         .clone()
         .into_iter()
         .chain(crate::state::load_ingress_token(dirs))
+        .chain(served_tokens)
         .collect();
     let install = crate::settings_edit::Install {
         address: std::net::SocketAddr::new(config.bind_address, config.port),
         tokens: &tokens,
+        served: &served,
+        base_url,
         launcher: &dirs.launcher_dir().join("bootstrap.sh"),
         ca_cert: &ca_cert,
         trust: crate::settings_edit::Trust::of(&ca_cert),
@@ -322,14 +339,23 @@ fn wiring_check(
         }
     };
     let reason = report["reason"].as_str();
-    let (ok, warn, detail) = match (report["wiring"].as_str(), reason) {
-        (Some("proxy"), None) => (
+    let stale = report["stale"].as_str();
+    let (ok, warn, detail) = match (report["wiring"].as_str(), reason, stale) {
+        (Some("proxy"), None, None) => (
             true,
             false,
             "HTTPS proxy (Remote Control and the desktop app included)".to_string(),
         ),
-        (Some("proxy"), Some(reason)) => (false, false, format!("HTTPS proxy, but {reason}")),
-        (Some("base-url"), _) => (
+        // Its reason is the stale proxy itself (another port) or one that
+        // shows again once that is fixed.
+        (Some("proxy"), _, Some(stale)) => (
+            false,
+            false,
+            format!("HTTPS proxy, but {stale} {STALE_RESTART}"),
+        ),
+        (Some("proxy"), Some(reason), None) => (false, false, format!("HTTPS proxy, but {reason}")),
+        (_, _, Some(stale)) => (false, false, format!("{stale} {STALE_RESTART}")),
+        (Some("base-url"), _, None) => (
             true,
             true,
             format!(

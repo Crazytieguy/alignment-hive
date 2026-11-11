@@ -104,6 +104,12 @@ impl Dirs {
         self.state_dir.join("ingress-token")
     }
 
+    /// The base URLs `serve` has listened under, one per line, newest last.
+    #[must_use]
+    pub fn served_file(&self) -> PathBuf {
+        self.state_dir.join("served-base-urls")
+    }
+
     /// Single-instance lock for `serve`.
     #[must_use]
     pub fn lock_file(&self) -> PathBuf {
@@ -230,6 +236,43 @@ pub fn load_or_create_secret(dirs: &Dirs) -> anyhow::Result<String> {
 /// or read.
 pub fn load_or_create_ingress_token(dirs: &Dirs) -> anyhow::Result<String> {
     load_or_create_hex_file(dirs, &dirs.ingress_token_file(), 16)
+}
+
+/// How many base URLs the served history keeps.
+const SERVED_KEPT: usize = 16;
+
+/// Records `base_url` (address and ingress token) as one `serve` listens
+/// under, so settings still wired to an older one are recognised as this
+/// install's, stale rather than someone else's, after the config moves off
+/// it.
+///
+/// # Errors
+/// Returns an error when the history cannot be written.
+pub fn record_served_base_url(dirs: &Dirs, base_url: &str) -> anyhow::Result<()> {
+    let mut urls = served_base_urls(dirs);
+    urls.retain(|url| url != base_url);
+    urls.push(base_url.to_string());
+    let kept = &urls[urls.len().saturating_sub(SERVED_KEPT)..];
+    create_private_dir(&dirs.state_dir)?;
+    write_private_atomic(
+        &dirs.served_file(),
+        format!("{}\n", kept.join("\n")).as_bytes(),
+    )
+}
+
+/// The base URLs `serve` has listened under ([`record_served_base_url`]),
+/// oldest first; none when the history is missing or unreadable.
+#[must_use]
+pub fn served_base_urls(dirs: &Dirs) -> Vec<String> {
+    fs::read_to_string(dirs.served_file())
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The ingress token `serve` created, if any; never creates one.
@@ -429,6 +472,34 @@ impl Dirs {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn the_served_history_moves_a_repeat_last_and_keeps_the_newest() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(root.path());
+        assert_eq!(served_base_urls(&dirs), Vec::<String>::new());
+        record_served_base_url(&dirs, "http://127.0.0.1:8787/t/a").unwrap();
+        record_served_base_url(&dirs, "http://127.0.0.1:9000/t/a").unwrap();
+        record_served_base_url(&dirs, "http://127.0.0.1:8787/t/a").unwrap();
+        assert_eq!(
+            served_base_urls(&dirs),
+            ["http://127.0.0.1:9000/t/a", "http://127.0.0.1:8787/t/a"]
+        );
+        for port in 0..SERVED_KEPT + 3 {
+            record_served_base_url(&dirs, &format!("http://127.0.0.1:{port}/t/a")).unwrap();
+        }
+        let urls = served_base_urls(&dirs);
+        assert_eq!(urls.len(), SERVED_KEPT);
+        assert_eq!(
+            urls.last().unwrap(),
+            &format!("http://127.0.0.1:{}/t/a", SERVED_KEPT + 2)
+        );
+        let mode = fs::metadata(dirs.served_file())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     #[test]
     fn secret_is_created_once_and_stable() {

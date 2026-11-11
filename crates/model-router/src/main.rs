@@ -348,11 +348,23 @@ fn settings(
             .filter(|output| output.status.success())?;
         settings_edit::Version::parse(&String::from_utf8_lossy(&output.stdout))
     };
-    // The token the service minted, and one pinned in the config.
+    // The token the service minted, one pinned in the config, and those the
+    // service listened under before.
+    let (served_tokens, served) = settings_edit::served_history(&state::served_base_urls(dirs));
+    // The base URL the service serves now.
+    let serving = |config: &Config| -> Option<String> {
+        let address = std::net::SocketAddr::new(config.bind_address, config.port);
+        config
+            .ingress_token
+            .clone()
+            .or_else(|| state::load_ingress_token(dirs))
+            .map(|token| model_router::proxy::tokened_base_url(&address, &token))
+    };
     let tokens = |config: &Config| -> Vec<String> {
         state::load_ingress_token(dirs)
             .into_iter()
             .chain(config.ingress_token.clone())
+            .chain(served_tokens.iter().cloned())
             .collect()
     };
     let project = |project_dir: Option<PathBuf>| match project_dir {
@@ -421,9 +433,12 @@ fn settings(
             let project = project(project_dir)?;
             let config = config.map_err(|error| anyhow::anyhow!(error))?;
             let ca_cert = model_router::mitm::ca_cert_path(&model_router::mitm::ca_dir(dirs));
+            let base_url = serving(&config);
             let install = settings_edit::Install {
                 address: std::net::SocketAddr::new(config.bind_address, config.port),
                 tokens: &tokens(&config),
+                served: &served,
+                base_url: base_url.as_deref(),
                 launcher: &dirs.launcher_dir().join("bootstrap.sh"),
                 ca_cert: &ca_cert,
                 trust: settings_edit::Trust::of(&ca_cert),
@@ -439,7 +454,12 @@ fn settings(
         }
         SettingsCommand::Bypass { project_dir } => {
             let tokens = config.map_or_else(
-                |_| state::load_ingress_token(dirs).into_iter().collect(),
+                |_| {
+                    state::load_ingress_token(dirs)
+                        .into_iter()
+                        .chain(served_tokens.iter().cloned())
+                        .collect()
+                },
                 |config| tokens(&config),
             );
             settings_edit::bypass(home.as_deref(), &project_dir, &tokens, &lock)
@@ -516,10 +536,11 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
             )
         })?;
     tracing::info!(%address, "model-router listening");
-    tracing::info!(
-        "gateway base URL (for ANTHROPIC_BASE_URL): {}",
-        proxy::tokened_base_url(&address, &token)
-    );
+    let base_url = proxy::tokened_base_url(&address, &token);
+    tracing::info!("gateway base URL (for ANTHROPIC_BASE_URL): {base_url}");
+    if let Err(error) = state::record_served_base_url(dirs, &base_url) {
+        tracing::warn!(%error, "could not record the served base URL");
+    }
     // A CA that cannot be loaded leaves the base-URL wiring working; only
     // Claude Code's tunnels through the proxy wiring are refused.
     match model_router::mitm::Interceptor::load(&model_router::mitm::ca_dir(dirs), &token) {

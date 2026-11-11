@@ -45,6 +45,87 @@ fn is_our_proxy(url: &str, port: u16) -> bool {
             .is_ok_and(|url| url.port_or_known_default() == Some(port))
 }
 
+/// Whether `url` (an `HTTPS_PROXY` or `ANTHROPIC_BASE_URL` value) reaches a
+/// router listening on `address`: the same port, on a host that is not
+/// another IP. A name (`localhost`) or an unspecified address (`0.0.0.0`)
+/// reaches it on this machine.
+fn points_at(url: &str, address: std::net::SocketAddr) -> bool {
+    reqwest::Url::parse(url.trim()).is_ok_and(|url| {
+        url.port_or_known_default() == Some(address.port())
+            && url.host_str().is_some_and(|host| {
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .map_or(true, |ip| ip.is_unspecified() || ip == address.ip())
+            })
+    })
+}
+
+/// Whether `value` (an `HTTPS_PROXY` from `file`) looks like this install's
+/// proxy wiring left on an address the router listened on before: `settings
+/// proxy` writes it beside the router's `proxyAuthHelper`, in one file. For
+/// the diagnosis only: a listen address in the history does not show who
+/// points the variable there now, so `--apply` never replaces it.
+fn is_our_old_proxy(
+    settings: &Settings,
+    install: &Install<'_>,
+    value: &str,
+    file: Option<&Path>,
+) -> bool {
+    let helper_beside = file.is_some_and(|file| {
+        settings.iter().any(|(path, settings)| {
+            path.as_path() == file
+                && settings
+                    .get(HELPER)
+                    .and_then(Value::as_str)
+                    .is_some_and(is_our_helper)
+        })
+    });
+    helper_beside
+        && is_loopback_proxy(value)
+        && install.served.iter().any(|old| points_at(value, *old))
+}
+
+/// The ingress tokens and listen addresses in `serve`'s history of base
+/// URLs (`http://<address>/t/<token>`); an entry that does not parse is
+/// skipped.
+#[must_use]
+pub fn served_history(urls: &[String]) -> (Vec<String>, Vec<std::net::SocketAddr>) {
+    let mut tokens = Vec::new();
+    let mut addresses = Vec::new();
+    for url in urls {
+        let Ok(url) = reqwest::Url::parse(url) else {
+            continue;
+        };
+        if let Some(token) = url
+            .path()
+            .strip_prefix("/t/")
+            .filter(|token| !token.is_empty())
+        {
+            tokens.push(token.to_string());
+        }
+        let ip = url.host_str().and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        });
+        if let (Some(ip), Some(port)) = (ip, url.port_or_known_default()) {
+            addresses.push(std::net::SocketAddr::new(ip, port));
+        }
+    }
+    (tokens, addresses)
+}
+
+/// Where a wiring value comes from, for a reason: its settings file, or
+/// the environment.
+fn source(file: Option<&Path>) -> String {
+    file.map_or_else(
+        || "the environment".to_string(),
+        |file| file.display().to_string(),
+    )
+}
+
 /// Whether `url` (an `HTTPS_PROXY` value) is a plain-HTTP proxy on this
 /// machine.
 pub(crate) fn is_loopback_proxy(url: &str) -> bool {
@@ -194,8 +275,14 @@ impl Trust {
 pub struct Install<'a> {
     /// Where the router listens.
     pub address: std::net::SocketAddr,
-    /// The ingress tokens a base URL of this install may carry.
+    /// The ingress tokens a base URL of this install may carry, including
+    /// those it listened under before.
     pub tokens: &'a [String],
+    /// The addresses the router listened on before ([`served_history`]): a
+    /// proxy wiring left on one is reported as stale.
+    pub served: &'a [std::net::SocketAddr],
+    /// The base URL the router serves now (none: no token yet).
+    pub base_url: Option<&'a str>,
     /// The stable launcher's `bootstrap.sh`, which the helper runs.
     pub launcher: &'a Path,
     pub ca_cert: &'a Path,
@@ -226,12 +313,6 @@ fn blocker(
     install: &Install<'_>,
 ) -> Option<String> {
     let ours = |value: &str| is_our_proxy(value, install.address.port());
-    let from = |file: Option<&Path>| {
-        file.map_or_else(
-            || "the environment".to_string(),
-            |file| file.display().to_string(),
-        )
-    };
     match install.trust {
         Trust::Unsupported => {
             return Some("the HTTPS-proxy wiring needs macOS or Linux".to_string());
@@ -261,7 +342,7 @@ fn blocker(
                     "{EXTRA_CA} is already {value} (from {}), and Claude Code reads one file: \
                      keep the base-URL wiring, or add the router's CA ({ca}) to that file \
                      and remove the variable",
-                    from(file)
+                    source(file)
                 ));
             }
         }
@@ -279,7 +360,7 @@ fn blocker(
         return Some(format!(
             "https_proxy is {value} (from {}), which Claude Code prefers over {PROXY}: \
              keep the base-URL wiring, or remove it",
-            from(file)
+            source(file)
         ));
     }
     // The base URL left once this install's goes: another gateway would take
@@ -303,7 +384,7 @@ fn blocker(
         return Some(format!(
             "{BASE_URL} is {url} (from {}), another gateway the proxy cannot route: keep it, \
              or remove it first",
-            from(file)
+            source(file)
         ));
     }
     if let Some((value, file)) = env.effective(settings, PROXY)
@@ -312,7 +393,7 @@ fn blocker(
         return Some(format!(
             "{PROXY} is already {value} (from {}): the router would replace your proxy, and \
              it connects directly; keep the base-URL wiring",
-            from(file)
+            source(file)
         ));
     }
     for name in ["no_proxy", "NO_PROXY"] {
@@ -322,11 +403,50 @@ fn blocker(
             return Some(format!(
                 "{name} ({value}, from {}) exempts {ANTHROPIC_HOST} from the proxy: \
                  keep the base-URL wiring, or take it out",
-                from(file)
+                source(file)
             ));
         }
     }
     None
+}
+
+/// Why the wiring the next session takes no longer reaches this router,
+/// although it is this install's: the config's `port`, `bind-address` or
+/// `ingress-token` changed after it was written.
+fn stale_wiring(
+    env: &ProxyEnv,
+    home: &Path,
+    project: &Path,
+    install: &Install<'_>,
+) -> Option<String> {
+    let settings = settings_by_precedence(Some(home), project);
+    if proxy_file(&settings).is_some() {
+        let (value, file) = env.effective(&settings, PROXY)?;
+        let old =
+            !points_at(value, install.address) && is_our_old_proxy(&settings, install, value, file);
+        return old.then(|| {
+            format!(
+                "{PROXY} is {value} (from {}), where the router listened before; it now \
+                 listens at http://{}. If {value} is still meant for the router, set {PROXY} \
+                 to http://{} there.",
+                source(file),
+                install.address,
+                install.address
+            )
+        });
+    }
+    let (url, file) = env.effective(&settings, BASE_URL)?;
+    let expected = install.base_url?;
+    let path = |url: &str| {
+        reqwest::Url::parse(url.trim()).map(|url| url.path().trim_end_matches('/').to_string())
+    };
+    let current = points_at(url, install.address) && path(url).ok() == path(expected).ok();
+    (is_our_base_url(url, install.tokens) && !current).then(|| {
+        format!(
+            "{BASE_URL} is {url} (from {}), not the router's {expected}: set it to that.",
+            source(file)
+        )
+    })
 }
 
 /// What the migration would do.
@@ -466,7 +586,9 @@ fn wiring_name(home: &Path, project: &Path, tokens: &[String]) -> &'static str {
 /// `settings proxy`: reports the HTTPS-proxy wiring's state (`wiring`, and
 /// `needed` when `--apply` would change a file), or with `apply` (the lock
 /// that orders model-router's settings edits) writes it. `reason` is set
-/// whenever the next session would not reach the router through it.
+/// whenever the next session would not reach the router through it, and
+/// `stale` when this install's wiring points at an address or token the
+/// config has moved off.
 ///
 /// # Errors
 /// Returns an error only when locking or writing a settings file fails.
@@ -491,6 +613,7 @@ fn proxy_with(
     before_commit: &mut dyn FnMut(),
 ) -> anyhow::Result<Value> {
     let wiring = wiring_name(home, project, install.tokens);
+    let stale = stale_wiring(env, home, project, install);
     let report = |plan: &Plan, file: &Path| {
         let mut report = json!({
             "wiring": wiring,
@@ -498,6 +621,9 @@ fn proxy_with(
             "needed": matches!(plan, Plan::Edits(_)),
             "canApply": matches!(plan, Plan::Edits(_)),
         });
+        if let Some(stale) = &stale {
+            report["stale"] = json!(stale);
+        }
         if let Plan::Blocked(reason) = plan {
             report["needed"] = json!(wiring != "proxy");
             report["reason"] = json!(reason);
@@ -555,6 +681,7 @@ mod tests {
         launcher: PathBuf,
         ca: PathBuf,
         tokens: Vec<String>,
+        served: Vec<std::net::SocketAddr>,
     }
 
     impl Fixture {
@@ -572,12 +699,15 @@ mod tests {
                 launcher,
                 ca,
                 tokens: vec![TOKEN.to_string()],
+                served: Vec::new(),
             }
         }
         fn install(&self, trust: Trust) -> Install<'_> {
             Install {
                 address: "127.0.0.1:8787".parse().unwrap(),
                 tokens: &self.tokens,
+                served: &self.served,
+                base_url: Some(URL),
                 launcher: &self.launcher,
                 ca_cert: &self.ca,
                 trust,
@@ -842,5 +972,111 @@ mod tests {
         assert_eq!(written["env"], json!({"KEEP": "x", HINTS: "1"}));
         assert!(written.get(HELPER).is_none());
         assert!(written.get("model").is_none());
+    }
+
+    /// The config's port moved after the proxy wiring was written: doctor
+    /// says so and names the fix, which is a hand edit; `--apply` still
+    /// refuses a proxy on another port.
+    #[test]
+    fn names_its_own_proxy_left_on_an_old_port() {
+        let fixture = Fixture {
+            served: vec!["127.0.0.1:9000".parse().unwrap()],
+            ..Fixture::new()
+        };
+        let helper = format!("{} {HELPER_COMMAND}", fixture.launcher.display());
+        let wiring = |proxy: &str| {
+            fixture.user(&format!(
+                r#"{{"env":{{"{PROXY}":"{proxy}","{HELPER_GATE}":"1","{HINTS}":"1"}},"{HELPER}":"{helper}"}}"#
+            ));
+        };
+        wiring("http://127.0.0.1:9000");
+        let env = ProxyEnv::default();
+        let report = fixture.run(&env, TRUSTED, true);
+        assert_eq!(report["applied"], false);
+        let stale = report["stale"].as_str().unwrap();
+        assert!(stale.contains("http://127.0.0.1:9000"), "{stale}");
+        assert!(stale.contains("to http://127.0.0.1:8787 there"), "{stale}");
+        assert_eq!(fixture.user_json()["env"][PROXY], "http://127.0.0.1:9000");
+
+        wiring("http://127.0.0.1:8787");
+        let report = fixture.run(&env, TRUSTED, false);
+        assert_eq!(report["needed"], false, "{report}");
+        assert!(report.get("stale").is_none(), "{report}");
+    }
+
+    /// Beside the router's helper, a loopback proxy on a port the router
+    /// never listened on is the person's own (they pointed the variable at
+    /// their own proxy): refused, as one without the helper is.
+    #[test]
+    fn a_proxy_the_router_never_served_is_someone_elses() {
+        let fixture = Fixture {
+            served: vec!["127.0.0.1:9000".parse().unwrap()],
+            ..Fixture::new()
+        };
+        let helper = format!("{} {HELPER_COMMAND}", fixture.launcher.display());
+        fixture.user(&format!(
+            r#"{{"env":{{"{PROXY}":"http://127.0.0.1:8080"}},"{HELPER}":"{helper}"}}"#
+        ));
+        let env = ProxyEnv::default();
+        let report = fixture.run(&env, TRUSTED, true);
+        assert_eq!(report["applied"], false);
+        assert!(report["reason"].as_str().unwrap().contains("already"));
+        assert!(report.get("stale").is_none(), "{report}");
+        assert_eq!(fixture.user_json()["env"][PROXY], "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn a_loopback_proxy_without_its_helper_is_someone_elses() {
+        let fixture = Fixture::new();
+        fixture.user(&format!(
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{PROXY}":"http://127.0.0.1:9000"}}}}"#
+        ));
+        let report = fixture.run(&ProxyEnv::default(), TRUSTED, true);
+        assert_eq!(report["applied"], false);
+        assert!(report["reason"].as_str().unwrap().contains("already"));
+        assert_eq!(fixture.user_json()["env"][PROXY], "http://127.0.0.1:9000");
+    }
+
+    #[test]
+    fn served_history_yields_tokens_and_addresses() {
+        let urls = [
+            "http://127.0.0.1:8787/t/abc".to_string(),
+            "http://[::1]:9000/t/def".to_string(),
+            "not a url".to_string(),
+        ];
+        let (tokens, addresses) = served_history(&urls);
+        assert_eq!(tokens, ["abc", "def"]);
+        assert_eq!(
+            addresses,
+            [
+                "127.0.0.1:8787".parse::<std::net::SocketAddr>().unwrap(),
+                "[::1]:9000".parse().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_base_url_left_on_an_old_address_or_token_is_stale() {
+        let stale = |url: &str| {
+            let fixture = Fixture {
+                tokens: vec![TOKEN.to_string(), "old".to_string()],
+                ..Fixture::new()
+            };
+            fixture.user(&format!(r#"{{"env":{{"{BASE_URL}":"{url}"}}}}"#));
+            stale_wiring(
+                &ProxyEnv::default(),
+                fixture.home.path(),
+                fixture.project.path(),
+                &fixture.install(TRUSTED),
+            )
+        };
+        assert!(stale(URL).is_none());
+        assert!(stale("http://localhost:8787/t/abc123/").is_none());
+        assert!(stale("http://0.0.0.0:8787/t/abc123").is_none());
+        let moved = stale("http://127.0.0.1:9000/t/abc123").unwrap();
+        assert!(moved.contains(URL), "{moved}");
+        assert!(stale("http://127.0.0.1:8787/t/old").is_some());
+        // Another gateway is not this install's to call stale.
+        assert!(stale("https://gateway.example.com/v1").is_none());
     }
 }

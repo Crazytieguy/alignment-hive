@@ -32,7 +32,7 @@ mod ultrafast;
 use file::create_temp;
 use file::{Doc, Read, lock, read, same_file, write};
 use proxy::{EXTRA_CA, HELPER, HELPER_GATE, PROXY, is_our_helper, wired_file};
-pub use proxy::{Install, ProxyEnv, Trust, proxy};
+pub use proxy::{Install, ProxyEnv, Trust, proxy, served_history};
 pub use ultrafast::ultrafast;
 
 const BASE_URL: &str = "ANTHROPIC_BASE_URL";
