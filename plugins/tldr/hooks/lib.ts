@@ -4,7 +4,8 @@ export const GUIDELINES = `The user's screen will show the message below, an AI 
 
 - One plain sentence, aim for under 30 words, no prefix.
 - Lead with its main point, keeping its hedges and status (proposed vs done, verified vs not).
-- If it puts a question or decision to the user that one sentence can't carry, end by saying what to look at in the full message.
+- Carry any short handle the reader would otherwise expand just to copy or click: the URL of a page they should open (debrief, review, comparison, playlist, localhost), a file path, a branch or commit, a command to run. Write URLs with their scheme (https:// or http://) so they stay clickable. Prefer the handle over extra background, not over hedges or the ask; never replace it with "see the full message for the link". Skip supporting citations (docs, changelogs, sources) and extra links they don't need next.
+- If it puts a question or decision to the user, keep that ask. If one sentence can't carry it, end by saying what to look at in the full message — without dropping the handle.
 
 Reply with the sentence only.`
 
