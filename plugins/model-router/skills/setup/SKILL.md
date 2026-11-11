@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI) and Muse (Meta) families, Ultrafast GPT models, the experimental [auto-mode-classifier] setting, OS service, and Claude Code settings wiring.
+description: Set up, verify, repair, or uninstall the model-router Claude/GPT routing gateway — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI) and Muse (Meta) families, Ultrafast GPT models, OS service, and Claude Code settings wiring.
 ---
 
 # model-router setup
@@ -193,8 +193,7 @@ here works until the binary resolves.
    `references/custom-agents.md`.
 8. **Auto-mode classifier (experimental, ask once).** Skip this step when
    `~/.config/model-router/config.toml` already has an
-   `[auto-mode-classifier]` section: the user has answered, unless they
-   are asking about the setting now. Also skip it
+   `[auto-mode-classifier]` section: the user has answered. Also skip it
    while `$ROUTER doctor` fails `router-version`, until `$ROUTER service
    refresh` fixes that: a router older than this plugin refuses a config
    with the section and does not start. Otherwise ask, saying it is
