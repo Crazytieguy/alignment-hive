@@ -15,7 +15,9 @@ describe("feedback tokens", () => {
   test("tampered tokens are rejected", () => {
     const token = newFeedbackToken();
     const [id, sig] = token.split(".");
-    expect(verifyFeedbackToken(`${id}.${sig.slice(0, -1)}0`)).toBeNull();
+    // A last digit that differs from the real one, whatever that is.
+    const lastDigit = sig.endsWith("0") ? "1" : "0";
+    expect(verifyFeedbackToken(`${id}.${sig.slice(0, -1)}${lastDigit}`)).toBeNull();
     expect(verifyFeedbackToken(`${id}x.${sig}`)).toBeNull();
     expect(verifyFeedbackToken(id)).toBeNull();
     expect(verifyFeedbackToken(`${id}.`)).toBeNull();
