@@ -35,6 +35,8 @@ use crate::usage::{GptPolicies, SseUsageTransformer, estimate_input_tokens};
 use crate::websearch;
 
 mod connect;
+#[cfg(test)]
+mod keepalive_tests;
 mod search;
 
 pub use search::SearchStreams;
@@ -113,6 +115,42 @@ impl CliproxyUpstream {
     }
 }
 
+/// How long an upstream HTTP/2 connection may go without a frame read from
+/// it before the client pings it.
+const H2_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long the client then waits for the ping's answer before it drops the
+/// connection. Generous, as a large upload ahead of the ping on a slow link
+/// delays its answer too.
+const H2_PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The client every upstream request goes through.
+///
+/// Every Claude request shares one pooled HTTP/2 connection to
+/// api.anthropic.com. Should that connection stop answering without
+/// closing (a laptop waking on another network, a middlebox dropping the
+/// flow), each later Claude request would be sent on it and hang: until the
+/// OS gives up retransmitting, or, on a path that keeps TCP alive (a VPN or
+/// a proxy), until the router restarts. With GPT as the main model, that is
+/// only Claude Code's auto-mode classifier calls, so auto mode stops
+/// allowing anything. The pings drop such a connection, and the next
+/// request opens a fresh one.
+fn upstream_client(
+    ping_interval: std::time::Duration,
+    ping_timeout: std::time::Duration,
+) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // Idle-read timeout: resets on every received chunk, so long SSE
+        // streams are fine while a blackholed upstream still times out.
+        .read_timeout(std::time::Duration::from_mins(10))
+        .http2_keep_alive_interval(ping_interval)
+        .http2_keep_alive_timeout(ping_timeout)
+        // An idle connection is checked too: the request that would reuse
+        // it after a wake should find it already gone.
+        .http2_keep_alive_while_idle(true)
+}
+
 impl AppState {
     async fn new(
         mut config: Config,
@@ -128,20 +166,14 @@ impl AppState {
         } else {
             None
         };
-        let mut client = reqwest::Client::builder();
+        let mut client = upstream_client(H2_PING_INTERVAL, H2_PING_TIMEOUT);
         if proxies_through_self(&config) {
             // Launched from a shell that routes through this router: honoring
             // it would loop every Claude request back in.
             tracing::warn!("ignoring HTTPS_PROXY: it points at this router");
             client = client.no_proxy();
         }
-        let client = client
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(std::time::Duration::from_secs(10))
-            // Idle-read timeout: resets on every received chunk, so long SSE
-            // streams are fine while a blackholed upstream still times out.
-            .read_timeout(std::time::Duration::from_mins(10))
-            .build()?;
+        let client = client.build()?;
         let search_streams = Arc::new(SearchStreams::new());
         // What the child is about to load: an override or a header there may
         // outlive a fix made before the first request that relies on it.
