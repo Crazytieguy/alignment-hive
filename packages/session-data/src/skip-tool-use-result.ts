@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // Skipping toolUseResult: the byte scanner behind readRecords' lean read of a file's bytes, which
 // never decodes or parses a line's top-level toolUseResult. Claude Code writes a record's
 // toolUseResult as a top-level key after its message, so only a few short keys and the record's

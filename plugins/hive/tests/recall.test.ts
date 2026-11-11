@@ -115,7 +115,7 @@ function world(on: On, { isSolMissing = false } = {}) {
   })
   on('http.fetch', async (_$, e) => {
     // `argv`: what follows `hive local`, its only verbs served.
-    const { argv, cwd, sessionId } = JSON.parse(e.init?.body ?? '{}') as { argv: Array<string>; cwd: string; sessionId: string | null }
+    const { argv, cwd, sessionId } = JSON.parse((e.init?.body as string | undefined) ?? '{}') as { argv: Array<string>; cwd: string; sessionId: string | null }
     const isWarm = e.init?.headers?.['x-hive-warm'] === '1'
     served.push({ argv, cwd, sessionId, socket: e.init?.socketPath, isWarm })
     if (state.server === 'stuck' || (state.held > 0 && state.held--)) await clock.sleep(600_000)

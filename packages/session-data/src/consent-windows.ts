@@ -22,7 +22,7 @@ export interface ConsentWindow {
 export function computeConsentWindows(events: Array<ConsentEvent>): Array<ConsentWindow> {
   const windows: Array<ConsentWindow> = [];
   for (const event of [...events].sort((a, b) => a.timestamp - b.timestamp)) {
-    const open = windows.at(-1)?.end === Infinity;
+    const open = windows[windows.length - 1]?.end === Infinity;
     if (event.sessionSharing && !open) {
       windows.push({ start: windows.length === 0 ? 0 : event.timestamp, end: Infinity });
     } else if (!event.sessionSharing && open) {

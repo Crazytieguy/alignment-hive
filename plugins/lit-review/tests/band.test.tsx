@@ -4,7 +4,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 const BAND = {
   plugin: 'lit-review',
   component: 'AbovePrompt' as const,
-  props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 140, scroll: { offset: 0, bodyRows: 19 }, view: {} },
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 20, bodyColumns: 140, scroll: { offset: 0, bodyRows: 19 }, view: {} },
 }
 
 const NOT_INSTALLED = JSON.stringify({

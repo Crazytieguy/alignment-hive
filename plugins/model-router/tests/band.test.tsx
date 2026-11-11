@@ -7,7 +7,7 @@ import { fitsToast } from '../hooks/register'
 const BAND = {
   plugin: 'model-router',
   component: 'AbovePrompt' as const,
-  props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 140, scroll: { offset: 0, bodyRows: 19 }, view: {} },
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 20, bodyColumns: 140, scroll: { offset: 0, bodyRows: 19 }, view: {} },
 }
 
 const setup = [{ id: 'setup', label: 'Run setup', kind: 'command', command: '/model-router:setup' }]

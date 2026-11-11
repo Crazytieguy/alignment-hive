@@ -5,7 +5,7 @@ import type { Engine } from 'claude-code/testing'
 const BAND = {
   plugin: 'hive',
   component: 'AbovePrompt' as const,
-  props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 140, scroll: { offset: 0, bodyRows: 19 }, view: {} },
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 20, bodyColumns: 140, scroll: { offset: 0, bodyRows: 19 }, view: {} },
 }
 
 const FOOTER = { plugin: 'hive', component: 'SessionMode' as const, props: { modes: [] as string[] } }

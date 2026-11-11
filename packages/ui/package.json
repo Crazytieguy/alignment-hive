@@ -5,6 +5,9 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
+  "scripts": {
+    "lint": "tsc --noEmit"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./components/*": "./src/components/*.tsx",

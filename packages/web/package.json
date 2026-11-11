@@ -11,7 +11,7 @@
     "build": "vite build",
     "start": "vite start",
     "format": "prettier --write .",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit && tsc -p convex --noEmit",
     "test": "bun test"
   },
   "dependencies": {

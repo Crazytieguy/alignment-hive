@@ -68,6 +68,8 @@ const REQUEST_BYTES = ascii(REQUEST_PREFIX);
  * requests, they took 75 ms of a 930 ms cold fill and held its peak RSS at 67 MB, against 350 MB without.
  */
 const COLLECT_EVERY = 16 * 2 ** 20;
+// Read off globalThis, not as the global `Bun`, so the package type-checks in the web app and Convex too.
+const bun = (globalThis as { Bun?: { gc(force: boolean): void } }).Bun;
 let parsed = 0;
 
 /** Time spent in forced collections so far, in ms. */
@@ -141,10 +143,10 @@ export function readRecords(
     }
     if (record) records.push(map(record));
     parsed += length;
-    if (parsed >= COLLECT_EVERY && typeof Bun !== 'undefined') {
+    if (parsed >= COLLECT_EVERY && bun) {
       parsed = 0;
       const began = performance.now();
-      Bun.gc(true);
+      bun.gc(true);
       forcedCollections.ms += performance.now() - began;
     }
     if (end < 0) break;
