@@ -34,7 +34,7 @@ const settle = () => new Promise<void>(resolve => setTimeout(resolve, 20))
 /** Starts a session whose check prints these rows. */
 async function start($: Engine, on: On, rows: unknown[], stored: Record<string, unknown> = {}) {
   mock.store(on, stored)
-  on('classic.SessionStart', async () => ({}))
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('process.run', async () => ({
     value: {
       exitCode: 0,
@@ -45,7 +45,7 @@ async function start($: Engine, on: On, rows: unknown[], stored: Record<string, 
     },
   }))
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
-  await $.classic.SessionStart({ source: 'startup', cwd: '/tmp/project' })
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
 }
 
 /**
@@ -59,7 +59,7 @@ async function startWithSettings($: Engine, on: On, rows: unknown[], settings: u
   const commands: string[] = []
   mock.env(on, { HOME: '/home/me' })
   mock.store(on, {})
-  on('classic.SessionStart', async () => ({}))
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('process.run', async (_$, e) => {
     const isSettings = e.argv[2] === 'settings'
     if (isSettings) settingsCalls.push(e.argv.slice(2))
@@ -76,7 +76,7 @@ async function startWithSettings($: Engine, on: On, rows: unknown[], settings: u
     return { value: undefined } as never
   })
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
-  await $.classic.SessionStart({ source: 'startup', cwd: '/proj' })
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
   return { toasts, settingsCalls, checks, commands }
 }
 
@@ -379,19 +379,43 @@ describe('model-router settings buttons', () => {
 })
 
 describe('model-router check', () => {
-  test('runs, awaited, at startup and again at /clear, not at a resume', async ($, on) => {
-    let runs = 0
+  test('runs, awaited, at startup and again after /clear, in the directory the session then runs in', async ($, on) => {
+    const dirs: string[] = []
+    const clock = mock.clock(on)
     mock.store(on, {})
-    on('classic.SessionStart', async () => ({}))
+    on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+    on('session.end', async (_$, e) => ({ sessionId: e.sessionId }))
+    on('session.cwd', async () => ({ value: '/tmp/moved' }))
+    on('process.run', async (_$, e) => {
+      dirs.push(e.init?.env?.CLAUDE_PROJECT_DIR ?? '')
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+    expect(dirs).toEqual(['/tmp/project'])
+    await $.session.end({ reason: 'resume', sessionId: 'a', resume: { id: 'a' } })
+    await clock.settle()
+    expect(dirs).toEqual(['/tmp/project'])
+    await $.session.end({ reason: 'clear', sessionId: 'a', resume: { id: 'a' } })
+    await clock.settle()
+    expect(dirs).toEqual(['/tmp/project', '/tmp/moved'])
+  })
+
+  test('runs after /clear even when the end step beneath fails', async ($, on) => {
+    let runs = 0
+    const clock = mock.clock(on)
+    mock.store(on, {})
+    on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+    on('session.end', async () => {
+      throw new Error('cut short')
+    })
+    on('session.cwd', async () => ({ value: '/tmp/project' }))
     on('process.run', async () => {
       runs++
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     })
-    await $.classic.SessionStart({ source: 'startup', cwd: '/tmp/project' })
-    expect(runs).toBe(1)
-    await $.classic.SessionStart({ source: 'resume', cwd: '/tmp/project' })
-    expect(runs).toBe(1)
-    await $.classic.SessionStart({ source: 'clear', cwd: '/tmp/project' })
+    await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+    await $.session.end({ reason: 'clear', sessionId: 'a', resume: { id: 'a' } }).catch(() => undefined)
+    await clock.settle()
     expect(runs).toBe(2)
   })
 })
@@ -434,7 +458,7 @@ describe('model-router band', () => {
     let runs = 0
     const gate: { release?: () => void } = {}
     mock.store(on, {})
-    on('classic.SessionStart', async () => ({}))
+    on('session.start', async (_$, e) => ({ cwd: e.cwd }))
     on('process.run', async () => {
       runs++
       if (runs === 2) await new Promise<void>(resolve => (gate.release = resolve))
@@ -442,7 +466,7 @@ describe('model-router band', () => {
       return { value: { exitCode: 0, stdout: JSON.stringify({ notices: rows }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     })
     on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
-    await $.classic.SessionStart({ source: 'startup', cwd: '/tmp/project' })
+    await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
 
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     const pressed = ui.press({ key: 'model-router:down:retry' })
@@ -472,7 +496,7 @@ describe('model-router rows that overlap', () => {
     const checks: Record<string, string>[] = []
     let edited = false
     mock.store(on, stored)
-    on('classic.SessionStart', async () => ({}))
+    on('session.start', async (_$, e) => ({ cwd: e.cwd }))
     on('process.run', async (_$, e) => {
       const isSettings = e.argv[2] === 'settings'
       if (isSettings) edited = true
@@ -484,7 +508,7 @@ describe('model-router rows that overlap', () => {
     })
     on('ui.toast', async () => ({ value: undefined }) as never)
     on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
-    await $.classic.SessionStart({ source: 'startup', cwd: '/proj' })
+    await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
     return checks
   }
 
@@ -514,7 +538,7 @@ describe('model-router rows that overlap', () => {
     expect(checks.map(env => env.FAST_MODELS_DISMISSED)).toEqual(['', 'declined'])
     expect(await ui.find({ key: 'model-router:windows:windows' })).toBeDefined()
     await ui.unmount()
-    await $.classic.SessionStart({ source: 'startup', cwd: '/other-project' })
+    await $.session.start({ cwd: '/other-project', surface: 'terminal', isInteractive: true })
     expect(checks.at(-1)?.CLAUDE_PROJECT_DIR).toBe('/other-project')
     expect(checks.at(-1)?.FAST_MODELS_DISMISSED).toBe('declined')
     const later = await $.ui.mount({ ...BAND, surface: 'terminal' })

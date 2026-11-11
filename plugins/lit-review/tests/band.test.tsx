@@ -1,5 +1,5 @@
 import type { On } from 'claude-code'
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 
 const BAND = {
   plugin: 'lit-review',
@@ -20,7 +20,7 @@ const NOT_INSTALLED = JSON.stringify({
 
 /** A session with these slash commands whose check reports the CLI missing. */
 function fake(on: On, commands: string[]) {
-  on('classic.SessionStart', async () => ({}))
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('command.list', async () => ({ value: commands.map(name => ({ name, description: '' })) }) as never)
   on('process.run', async () => ({
     value: { exitCode: 0, stdout: NOT_INSTALLED, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
@@ -35,7 +35,7 @@ describe('lit-review install row', () => {
   ] as const) {
     test(label, async ($, on) => {
       fake(on, [...commands])
-      await $.classic.SessionStart({ source: 'startup', cwd: '/tmp/project' })
+      await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
       for (const surface of ['terminal', 'desktop'] as const) {
         const ui = await $.ui.mount({ ...BAND, surface })
         expect((await ui.find({ key: 'lit-review:install:install' })) !== undefined).toBe(isShown)
@@ -43,4 +43,26 @@ describe('lit-review install row', () => {
       }
     })
   }
+})
+
+describe('lit-review check', () => {
+  test('runs at startup and again after /clear, in the directory the session then runs in, not at other ends', async ($, on) => {
+    const dirs: string[] = []
+    const clock = mock.clock(on)
+    on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+    on('session.end', async (_$, e) => ({ sessionId: e.sessionId }))
+    on('session.cwd', async () => ({ value: '/tmp/moved' }))
+    on('command.list', async () => ({ value: [] }) as never)
+    on('process.run', async (_$, e) => {
+      dirs.push(e.init?.env?.CLAUDE_PROJECT_DIR ?? '')
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+    await $.session.end({ reason: 'resume', sessionId: 'a', resume: { id: 'a' } })
+    await clock.settle()
+    expect(dirs).toEqual(['/tmp/project'])
+    await $.session.end({ reason: 'clear', sessionId: 'a', resume: { id: 'a' } })
+    await clock.settle()
+    expect(dirs).toEqual(['/tmp/project', '/tmp/moved'])
+  })
 })

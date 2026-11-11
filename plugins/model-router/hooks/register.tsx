@@ -165,14 +165,30 @@ async function editSettings($: EngineInterface, args: readonly string[]): Promis
 }
 
 export const register: Register = on => {
-  // The SessionStart hook's lifecycle, startup and /clear, awaited: a stopped router's restart
-  // finishes before the session's first request.
-  on('classic.SessionStart', async ($, e, next) => {
-    if (e.source === 'startup' || e.source === 'clear') {
-      projectDir = e.cwd
-      await check($)
-    }
+  // At startup, awaited: a stopped router's restart finishes before the session's first request.
+  // Not a classic.SessionStart hook: Claude Code's built-in cc-plugin-sec-default, on for Team and
+  // Enterprise organizations and on machines with managed settings, passes every classic event
+  // over the plugins a person installs.
+  on('session.start', async ($, e, next) => {
+    projectDir = e.cwd
+    await check($)
     return next(e)
+  })
+
+  // `/clear` starts a session without a session.start; the one it ends says so. The end's hooks
+  // share a short time bound, so the check runs from a timer set once the end step is done (set
+  // before it, the timer runs in the ending session), or once the bound cut it short.
+  on('session.end', async ($, e, next) => {
+    try {
+      return await next(e)
+    } finally {
+      if (e.reason === 'clear') {
+        $.clock.after(0, async () => {
+          projectDir = await $.session.cwd().catch(() => projectDir)
+          await check($)
+        })
+      }
+    }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
