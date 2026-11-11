@@ -63,7 +63,7 @@ test("a subagent's turn starting after the main turn ended does not hold back a 
   await $.turn.start({ text: 'background work', agentId: 'a1', turnId: 't2' } as never)
 
   const ui = await $.ui.mount(draw('r1'))
-  expect(await eventually(clock, () => ui.find({ type: 'Text', text: SUMMARY }))).toBeDefined()
+  expect(await eventually(clock, () => ui.find({ type: 'Markdown', text: SUMMARY }))).toBeDefined()
   await ui.unmount()
 })
 
@@ -77,7 +77,7 @@ test("a subagent's turn is not this load's first turn: blocks drawn before the m
   await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1, isAborted: false, turnId: 't4' } as never)
   await clock.advance(5_000)
   await settle(500)
-  expect(await ui.find({ type: 'Text', text: SUMMARY })).toBeUndefined()
+  expect(await ui.find({ type: 'Markdown', text: SUMMARY })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /summarizing/ })).toBeUndefined()
   await ui.unmount()
 })
@@ -98,7 +98,7 @@ async function drawFinished($: Engine, requestId: string) {
 test('a summary cut short (its render superseded while the call was sent) is sent again, not shown as failed', async ($, on) => {
   const engine = fakeEngine(on, [ABORTED, SENTENCE])
   const ui = await drawFinished($, 'r5')
-  expect(await eventually(engine.clock, () => ui.find({ type: 'Text', text: SUMMARY }))).toBeDefined()
+  expect(await eventually(engine.clock, () => ui.find({ type: 'Markdown', text: SUMMARY }))).toBeDefined()
   expect(engine.asked()).toBe(2)
   expect(await ui.find({ type: 'Text', text: /unavailable/ })).toBeUndefined()
   await ui.unmount()
@@ -132,7 +132,7 @@ test('a block whose answer was empty is summarized again on a redraw a minute la
   await engine.clock.advance(60_000)
   await settle()
   await finishTurn($, 't8b')
-  expect(await eventually(engine.clock, () => ui.find({ type: 'Text', text: SUMMARY }))).toBeDefined()
+  expect(await eventually(engine.clock, () => ui.find({ type: 'Markdown', text: SUMMARY }))).toBeDefined()
   expect(engine.asked()).toBe(2)
   await ui.unmount()
 })

@@ -188,7 +188,7 @@ export const register: Register = on => {
     // the engine's own drawing, untouched.
     if (!t && !fin) return next(e)
 
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     const indent = e.surface === 'terminal' ? 2 : 0 // under the message text, past the bullet
     if (t.startsWith(FAIL)) {
       return (
@@ -216,15 +216,10 @@ export const register: Register = on => {
       <Box flexDirection="column" marginTop={1}>
         <Box flexDirection="row">
           {bullet ? <Text>{bullet}</Text> : null}
-          <Box flexGrow={1} flexShrink={1}>
-            {t ? (
-              <Text>
-                <Text dimColor>tl;dr </Text>
-                {t}
-              </Text>
-            ) : (
-              <Text dimColor italic>summarizing…</Text>
-            )}
+          {t ? <Text dimColor>tl;dr</Text> : null}
+          <Box flexGrow={1} flexShrink={1} marginLeft={t ? 1 : 0}>
+            {/* Drawn as the reply's own text is: its links, code spans and emphasis. */}
+            {t ? <Markdown text={t} /> : <Text dimColor italic>summarizing…</Text>}
           </Box>
         </Box>
         <Box marginTop={1} paddingLeft={indent}>
