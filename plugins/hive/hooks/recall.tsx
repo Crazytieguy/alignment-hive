@@ -3,14 +3,14 @@ import type { EngineInterface, Hook, MatchedHook, RenderElement, RenderInput } f
 
 import { CliFailed, localReads } from './cli'
 import type { Read } from './cli'
-import { FAILED, INSTRUCTIONS, TOOL_FAILED, TOOL_FOUND_NOTHING, TOOL_REFUSED, budgetFor, entries, history, newThreads, noteText, promptBlocks, recalledIn, reportOf, sessionsFor, withRewind } from './recall-text'
+import { FAILED, INSTRUCTIONS, TOOL_FAILED, TOOL_FOUND_NOTHING, budgetFor, entries, history, newThreads, noteText, promptBlocks, recalledIn, reportOf, sessionsFor, withRewind } from './recall-text'
 import type { Ask, Held, Listed, RECALL_TOOL, Row, Session } from './recall-text'
 import type { HiveRecalled } from '../types'
 
-// Automatic recall (beta, opt-in through the `recall` option): before the main agent starts on a prompt the user
-// typed, one model call over the project's recent sessions picks the entries that bear on it, and their text comes
-// with the prompt; likewise for comment threads new to the main agent, with the read that brought them; and for what
-// the main agent describes through the recall tool, as the tool's result.
+// Recall (beta, opt-in): one model call over the project's recent sessions picks the entries that bear on what an agent
+// describes through the recall tool (the `recall` option), as the tool's result. Automatic recall (the `automaticRecall`
+// option) does the same before the main agent starts on a prompt the user typed, and their text comes with the prompt;
+// likewise for comment threads new to the main agent, with the read that brought them.
 
 const SOL = 'gpt-6.2-sol'
 const FALLBACK = 'sonnet'
@@ -160,9 +160,12 @@ async function recall($: EngineInterface, choice: string, askOf: AskOf, deadline
   return FAILURE
 }
 
-/** Recall within TIMEOUT_MS, said on the status line meanwhile: past it, the CLI reads and model call still running stop. */
-async function recallInTime($: EngineInterface, choice: string, askOf: AskOf, mayRewind = false): Promise<Outcome> {
-  $.ui.status('recalling past sessions…')
+/**
+ * Recall within TIMEOUT_MS: past it, the CLI reads and model call still running stop. `isShown`: the status line says so
+ * meanwhile, as automatic recall holds what the person sent; a tool call shows as a tool call already.
+ */
+async function recallInTime($: EngineInterface, choice: string, askOf: AskOf, { mayRewind = false, isShown = true } = {}): Promise<Outcome> {
+  if (isShown) $.ui.status('recalling past sessions…')
   const stop = new AbortController()
   const deadline = (await $.clock.now()) + TIMEOUT_MS
   const expired = $.clock.sleep(TIMEOUT_MS, { signal: stop.signal }).then(() => FAILURE)
@@ -173,18 +176,18 @@ async function recallInTime($: EngineInterface, choice: string, askOf: AskOf, ma
     .catch(() => FAILURE)
     .finally(() => recalls--)
   stop.abort()
-  $.ui.status(undefined)
+  if (isShown) $.ui.status(undefined)
   return outcome
 }
 
 type Submit = Parameters<Hook<'prompt.submit'>>
 
-/** While recall is on, register.tsx's prompt.submit hook ends here: the prompt goes on with recall's report. */
+/** While automatic recall is on, register.tsx's prompt.submit hook ends here: the prompt goes on with recall's report. */
 export async function submitWithRecall($: EngineInterface, e: Submit[1], next: Submit[2], choice: string) {
   // Only what the user typed, at the terminal or through Remote Control; never a slash command.
   if ((e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') || e.command) return next(e)
   // Past the limit the prompt goes on. Only a prompt sent while no turn runs can follow a rewind.
-  const { report, shown } = await recallInTime($, choice, () => ({ prompt: e.text }), e.turnId === undefined)
+  const { report, shown } = await recallInTime($, choice, () => ({ prompt: e.text }), { mayRewind: e.turnId === undefined })
   // Only a prompt says when recall did not finish: it is where the main agent would have had the entries.
   const context = report ?? (shown === 'failed' ? FAILED : undefined)
   const waiting = { prompt: e.text, shown }
@@ -214,7 +217,7 @@ const recalledThisTurn = new Set<string>()
 export const endRecallTurn = () => recalledThisTurn.clear()
 
 /**
- * While recall is on, register.tsx's hook on ArtifactComments ends here: a read by the main agent that brings comment
+ * While automatic recall is on, register.tsx's hook on ArtifactComments ends here: a read by the main agent that brings comment
  * threads new to it comes with recall's report on them, as the person's comments are much like their prompts. A
  * recall that found nothing, or did not finish, adds nothing. A session a script ran gets none, as its prompts do not.
  */
@@ -236,18 +239,17 @@ export async function readWithRecall($: EngineInterface, e: Call[1], next: Call[
 type Asked = Parameters<MatchedHook<'tool.call', { tool: typeof RECALL_TOOL }>>[1]
 
 /**
- * While recall is on, register.tsx's hook on the recall tool ends here: recall for what the main agent describes.
- * Unlike a prompt or a comments read, a session a script ran gets one too, since its agent asked. A subagent is refused:
- * a registered tool can't be hidden from it, and its context may be limited on purpose.
+ * While the recall tool is on, register.tsx's hook on the recall tool ends here: recall for what the agent describes.
+ * Unlike a prompt or a comments read, a session a script ran gets one too, since its agent asked. A subagent may call it
+ * as well; like the main agent's, its call gets nothing from the current session (recall-text's history).
  */
 export async function answerRecallTool($: EngineInterface, e: Asked, choice: string) {
-  if (e.agentId !== undefined) return { deny: TOOL_REFUSED }
-  const { report, shown } = await recallInTime($, choice, () => ({ about: e.about as string }))
+  const { report, shown } = await recallInTime($, choice, () => ({ about: e.about as string }), { isShown: false })
   return { result: report ?? (shown === 'failed' ? TOOL_FAILED : TOOL_FOUND_NOTHING) }
 }
 
 /** What the typeahead says of `/remember <note>`, which register.tsx's session.start registers. */
-export const REMEMBER_DESCRIPTION = 'Save a note for automatic recall in later sessions, without starting a turn'
+export const REMEMBER_DESCRIPTION = 'Save a note for recall in later sessions, without starting a turn'
 
 /**
  * `/remember <note>`: the note joins the session as a user row the main agent reads with its next request, and starts
@@ -256,13 +258,13 @@ export const REMEMBER_DESCRIPTION = 'Save a note for automatic recall in later s
  */
 export async function remember($: EngineInterface, words: string, isRecallOn: boolean): Promise<{ text: string }> {
   const note = words.trim()
-  if (!note) return { text: 'Usage: /remember <note>. Saves the note for automatic recall in later sessions, without starting a turn.' }
+  if (!note) return { text: 'Usage: /remember <note>. Saves the note for recall in later sessions, without starting a turn.' }
   // A plugin above refuses with `{ deny }`; the engine's own refusal rejects.
   const added = await $.session
     .append({ message: { type: 'user', content: [{ type: 'text', text: noteText(note) }] } })
     .catch((error: unknown) => ({ deny: error instanceof Error ? error.message : String(error) }))
   if (added.deny !== undefined) return { text: `Not saved: ${added.deny}` }
-  return { text: isRecallOn ? 'Saved for recall' : 'Saved. Automatic recall is off, so only the hive:retrieval agent will find it; /config turns recall on.' }
+  return { text: isRecallOn ? 'Saved for recall' : 'Saved. Recall is off, so only the hive:retrieval agent will find it; /config turns recall on.' }
 }
 
 type Append = Parameters<Hook<'session.append'>>

@@ -43,6 +43,26 @@ fi
 
 register_transcript_dir "$STATE_DIR" "$TRANSCRIPT_PATH"
 
+# --- Recall's memory guidance, on every source ---
+# The module's system-prompt section (hooks/register.tsx) reads the same file, but a policy such as
+# Claude Code's sec-default drops plugins' system-prompt sections and keeps hook context. A
+# compaction drops what an earlier start added, so it goes out again; on a resume Claude Code
+# leaves out what the conversation already holds.
+
+# With the tool on, it holds only while the tool is listed: a policy can refuse the module that
+# registers it and still run this hook. Automatic recall alone leaves Claude no such sign.
+
+if [ "${CLAUDE_PLUGIN_OPTION_RECALL:-}" = "true" ]; then
+  printf '%s %s %s\n' \
+    'The user turned on recall (the hive plugin): while the `mcp__hive__recall` tool is in your tool list, it reads the user'"'"'s messages and your replies from this project'"'"'s recent sessions.' \
+    "$(cat "${CLAUDE_PLUGIN_ROOT}/hooks/memory-guidance.txt")" \
+    'If that tool is not in your tool list, recall is not running in this session and none of this applies.'
+elif [ "${CLAUDE_PLUGIN_OPTION_AUTOMATICRECALL:-}" = "true" ]; then
+  printf '%s %s\n' \
+    'The user turned on automatic recall (the hive plugin): before each prompt the user sends, it reads the user'"'"'s messages and your replies from this project'"'"'s recent sessions and attaches the entries that bear on the prompt, as a `[hive recall]` block.' \
+    "$(cat "${CLAUDE_PLUGIN_ROOT}/hooks/memory-guidance.txt")"
+fi
+
 # --- Skip for resume/compact/fork (continuations don't need fresh state) ---
 
 if [ "$SOURCE" = "resume" ] || [ "$SOURCE" = "compact" ] || [ "$SOURCE" = "fork" ]; then

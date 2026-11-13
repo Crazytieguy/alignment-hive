@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { RECALL_SECTION, noteText, reportOf } from '../hooks/recall-text'
+import { noteText, recallSection, recallToolSpec, reportOf } from '../hooks/recall-text'
 
 const NOW = Date.parse('2026-10-20T15:30:00Z')
 const SESSION = 'abcd1234-0000-4000-8000-000000000000'
@@ -42,6 +42,8 @@ function world(on: On, { isSolMissing = false } = {}) {
   const dirs: Array<string | undefined> = []
   const served: Array<Served> = []
   const logs: Array<string> = []
+  // Each status-line change: what it says, or undefined when cleared.
+  const statuses: Array<unknown> = []
   // `transcript`: this session's rows as `hive local outline SESSION --uuids` reads them; `readBacks` counts those reads.
   const state = {
     hold: false,
@@ -146,13 +148,16 @@ function world(on: On, { isSolMissing = false } = {}) {
     if (fails) return { value: { isAnswered: false, reason: 'api-error', status: fails.status, error: fails.status === 429 ? 'rate_limit' : 'not_found_error', usage } } as never
     return { value: { isAnswered: true, text: state.reply, usage } } as never
   })
-  on('ui.status', async () => ({ value: undefined }) as never)
+  on('ui.status', async (_$, e) => {
+    statuses.push((e as { text?: unknown }).text)
+    return { value: undefined } as never
+  })
   on('ui.log', async (_$, e) => {
     logs.push(e.text)
     return { value: undefined } as never
   })
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
-  return { asked, contexts, clock, dirs, logs, prompts, registered, served, state, timeouts }
+  return { asked, contexts, clock, dirs, logs, prompts, registered, served, state, statuses, timeouts }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
@@ -167,7 +172,7 @@ describe('automatic recall', () => {
     expect(contexts).toEqual([[]])
   })
 
-  test('on: a typed prompt goes on with the cited entry, its loc and date', { options: { recall: true } }, async ($, on) => {
+  test('on: a typed prompt goes on with the cited entry, its loc and date', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, contexts } = world(on)
     await start($)
     await $.prompt.submit(typed('Format the file.'))
@@ -181,7 +186,7 @@ describe('automatic recall', () => {
     expect(asked).toHaveLength(1)
   })
 
-  test('on: nothing found, or only what an earlier recall in this session reported, adds nothing', { options: { recall: true } }, async ($, on) => {
+  test('on: nothing found, or only what an earlier recall in this session reported, adds nothing', { options: { automaticRecall: true } }, async ($, on) => {
     const { contexts, state } = world(on)
     await start($)
     state.reply = 'none'
@@ -192,7 +197,7 @@ describe('automatic recall', () => {
     expect(contexts).toEqual([[], []])
   })
 
-  test('on: after a rewind the transcript does not show yet, what a recall reported on the rewound part is reported again', { options: { recall: true } }, async ($, on) => {
+  test('on: after a rewind the transcript does not show yet, what a recall reported on the rewound part is reported again', { options: { automaticRecall: true } }, async ($, on) => {
     const { contexts, state } = world(on)
     await start($)
     const report = { loc: 'abcd1234:4', time: '2026-10-20T15:29:20Z', kind: 'user', origin: 'recall', recall: true, text: '[hive recall] Entries.\n\n> [user] Always use tabs in this repo, never spaces. (feed0001:7, 2026-10-19)' }
@@ -220,7 +225,7 @@ describe('automatic recall', () => {
     expect(contexts[3]?.join('')).toContain('(feed0001:7, 2026-10-19)')
   })
 
-  test('on, auto without model-router: Sonnet answers, and Sol is not asked again', { options: { recall: true } }, async ($, on) => {
+  test('on, auto without model-router: Sonnet answers, and Sol is not asked again', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, contexts } = world(on, { isSolMissing: true })
     await start($)
     await $.prompt.submit(typed('Format the file.'))
@@ -229,7 +234,7 @@ describe('automatic recall', () => {
     expect(contexts[1]?.join('')).toContain('Always use tabs')
   })
 
-  test('on, auto without model-router: a 4xx from Sonnet fails only that prompt, and Sonnet is asked again', { options: { recall: true } }, async ($, on) => {
+  test('on, auto without model-router: a 4xx from Sonnet fails only that prompt, and Sonnet is asked again', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, contexts, state } = world(on, { isSolMissing: true })
     await start($)
     state.fails.sonnet = { status: 400 }
@@ -242,7 +247,7 @@ describe('automatic recall', () => {
     expect(contexts.map(c => c.join(''))).toEqual([expect.stringContaining('did not finish'), found, found])
   })
 
-  test('on, Sonnet chosen by name: a 4xx fails only that prompt', { options: { recall: true, recallModel: 'sonnet' } }, async ($, on) => {
+  test('on, Sonnet chosen by name: a 4xx fails only that prompt', { options: { automaticRecall: true, recallModel: 'sonnet' } }, async ($, on) => {
     const { asked, contexts, state } = world(on)
     await start($)
     state.fails.sonnet = { status: 400 }
@@ -253,7 +258,7 @@ describe('automatic recall', () => {
     expect(contexts[1]?.join('')).toContain('Always use tabs')
   })
 
-  test('on, auto: Sonnet, after Sol turned out missing, gets its own history and the time left', { options: { recall: true } }, async ($, on) => {
+  test('on, auto: Sonnet, after Sol turned out missing, gets its own history and the time left', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, clock, prompts, state, timeouts } = world(on)
     // A row just ahead of the first attempt's clock tells a history built at the second attempt's clock.
     const later = 'A newer entry in the same outline.'
@@ -269,7 +274,7 @@ describe('automatic recall', () => {
     expect(prompts[1]).toContain(later)
   })
 
-  test('on, auto: when Sol fails, the prompt goes on without recall, not on Sonnet', { options: { recall: true } }, async ($, on) => {
+  test('on, auto: when Sol fails, the prompt goes on without recall, not on Sonnet', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, contexts, state } = world(on)
     state.fails[SOL] = { status: 429 }
     await start($)
@@ -279,7 +284,7 @@ describe('automatic recall', () => {
     expect(contexts.map(c => c.join(''))).toEqual([expect.stringContaining('did not finish'), expect.stringContaining('did not finish')])
   })
 
-  test('on, a model chosen by name: only it is asked, and once missing, not again', { options: { recall: true, recallModel: FAST } }, async ($, on) => {
+  test('on, a model chosen by name: only it is asked, and once missing, not again', { options: { automaticRecall: true, recallModel: FAST } }, async ($, on) => {
     const { asked, contexts, state } = world(on)
     await start($)
     state.fails[FAST] = { status: 429 }
@@ -291,7 +296,7 @@ describe('automatic recall', () => {
     expect(contexts.map(c => c.join(''))).toEqual([1, 2, 3].map(() => expect.stringContaining('did not finish')))
   })
 
-  test('on, a stored choice the option does not offer: it reads as auto', { options: { recall: true, recallModel: 'gpt-6.1-sol-fast' } }, async ($, on) => {
+  test('on, a stored choice the option does not offer: it reads as auto', { options: { automaticRecall: true, recallModel: 'gpt-6.1-sol-fast' } }, async ($, on) => {
     const { asked, contexts } = world(on)
     await start($)
     await $.prompt.submit(typed('Format the file.'))
@@ -299,7 +304,7 @@ describe('automatic recall', () => {
     expect(contexts).toEqual([[reportOf([{ loc: ENTRY.loc, label: 'user', text: ENTRY.text, date: '2026-10-19', context: '' }], '2026-10-19', { prompt: '' })]])
   })
 
-  test('on: past 30 seconds the prompt goes on, saying recall did not finish', { options: { recall: true } }, async ($, on) => {
+  test('on: past 30 seconds the prompt goes on, saying recall did not finish', { options: { automaticRecall: true } }, async ($, on) => {
     const { contexts, clock, state } = world(on)
     await start($)
     state.hold = true
@@ -309,7 +314,7 @@ describe('automatic recall', () => {
     expect(contexts[0]?.join('')).toContain('did not finish')
   })
 
-  test('on: a CLI read past 30 seconds holds the prompt no longer, and no model call starts after', { options: { recall: true } }, async ($, on) => {
+  test('on: a CLI read past 30 seconds holds the prompt no longer, and no model call starts after', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, contexts, clock, state } = world(on)
     await start($)
     state.isCliSlow = true
@@ -321,7 +326,7 @@ describe('automatic recall', () => {
     expect(asked).toEqual([])
   })
 
-  test('on: the model call gets the time left of the 30 seconds', { options: { recall: true } }, async ($, on) => {
+  test('on: the model call gets the time left of the 30 seconds', { options: { automaticRecall: true } }, async ($, on) => {
     const { timeouts } = world(on)
     await start($)
     await $.prompt.submit(typed('Format the file.'))
@@ -331,7 +336,7 @@ describe('automatic recall', () => {
   for (const server of ['none', 'up'] as const) {
     const through = server === 'up' ? 'the local server' : 'the CLI'
 
-    test(`on: a session gone since the listing costs only itself; the rest of its batch is read (through ${through})`, { options: { recall: true } }, async ($, on) => {
+    test(`on: a session gone since the listing costs only itself; the rest of its batch is read (through ${through})`, { options: { automaticRecall: true } }, async ($, on) => {
       const { contexts, dirs, state } = world(on)
       state.server = server
       await start($)
@@ -341,7 +346,7 @@ describe('automatic recall', () => {
       expect(dirs.length > 0).toBe(server === 'none')
     })
 
-    test(`on: a CLI read that fails partway is no history at all (through ${through})`, { options: { recall: true } }, async ($, on) => {
+    test(`on: a CLI read that fails partway is no history at all (through ${through})`, { options: { automaticRecall: true } }, async ($, on) => {
       const { asked, contexts, dirs, state } = world(on)
       state.server = server
       await start($)
@@ -353,7 +358,7 @@ describe('automatic recall', () => {
     })
   }
 
-  test('on: a project with no transcripts yet finds nothing', { options: { recall: true } }, async ($, on) => {
+  test('on: a project with no transcripts yet finds nothing', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, contexts, state } = world(on)
     await start($)
     state.isProjectNew = true
@@ -362,7 +367,7 @@ describe('automatic recall', () => {
     expect(contexts).toEqual([[]])
   })
 
-  test('on: the CLI reads the project the session started in, wherever a shell cd took it', { options: { recall: true } }, async ($, on) => {
+  test('on: the CLI reads the project the session started in, wherever a shell cd took it', { options: { automaticRecall: true } }, async ($, on) => {
     const { contexts, dirs } = world(on)
     on('session.cwd', async () => ({ value: '/tmp/project/notes' }))
     await start($)
@@ -386,7 +391,7 @@ describe('recall on comment reads', () => {
     expect(read.text).toBe(COMMENTS)
   })
 
-  test('on: a thread new to the session comes with the report on it; once the session has read it, nothing more', { options: { recall: true } }, async ($, on) => {
+  test('on: a thread new to the session comes with the report on it; once the session has read it, nothing more', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, prompts, state } = world(on)
     await start($)
     const read = await readComments($)
@@ -404,7 +409,7 @@ describe('recall on comment reads', () => {
     expect(again.context).toBeUndefined()
   })
 
-  test('on: a thread a recall ran on this turn gets none again in it, changed or not; in the next turn it does', { options: { recall: true } }, async ($, on) => {
+  test('on: a thread a recall ran on this turn gets none again in it, changed or not; in the next turn it does', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, state } = world(on)
     await start($)
     await readComments($)
@@ -421,7 +426,7 @@ describe('recall on comment reads', () => {
     expect(asked).toEqual([SOL, SOL])
   })
 
-  test('on: a subagent read, another action, a session a script ran, and a recall that found nothing or did not finish add nothing', { options: { recall: true } }, async ($, on) => {
+  test('on: a subagent read, another action, a session a script ran, and a recall that found nothing or did not finish add nothing', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, clock, state } = world(on)
     await start($)
     expect((await readComments($, { agentId: 'a1' })).context).toBeUndefined()
@@ -460,6 +465,38 @@ describe('the recall tool', () => {
     expect(registered.map(s => [s.name, s.isDeferred])).toEqual([['recall', false]])
   })
 
+  test('automatic recall alone: not listed, and a call is not answered by recall', { options: { automaticRecall: true } }, async ($, on) => {
+    const { asked, registered } = world(on)
+    await start($)
+    expect(registered).toEqual([])
+    await callTool($).catch(() => undefined)
+    expect(asked).toEqual([])
+  })
+
+  test('its description says when to call it: at each prompt only without automatic recall', async ($, on) => {
+    const alone = recallToolSpec({ isTool: true, isAuto: false }).description
+    const both = recallToolSpec({ isTool: true, isAuto: true }).description
+    expect(alone).toContain('When a prompt from the user asks for work')
+    expect(both).not.toContain('When a prompt from the user asks for work')
+    expect(both).toContain('since recall at the prompt could only go by the prompt')
+    for (const description of [alone, both]) {
+      expect(description).toContain("Don't call it when your task calls for a fresh-eyes, independent or limited-context opinion.")
+      expect(description).not.toContain('refused')
+    }
+  })
+
+  test('tool alone: a prompt and a comments read get no recall, and the tool answers', { options: { recall: true } }, async ($, on) => {
+    const { asked, contexts } = world(on)
+    await start($)
+    await $.prompt.submit(typed('Format the file.'))
+    const read = (await $.tool.call({ tool: 'ArtifactComments', action: 'read', url: 'https://claude.ai/artifact/abc' } as never)) as { context?: ReadonlyArray<string> }
+    expect(contexts).toEqual([[]])
+    expect(read.context ?? []).toEqual([])
+    expect(asked).toEqual([])
+    expect((await callTool($)).result).toContain('Always use tabs')
+    expect(asked).toEqual([SOL])
+  })
+
   test('on: answers with the cited entries, from a recall for what it was asked', { options: { recall: true } }, async ($, on) => {
     const { asked, prompts } = world(on)
     await start($)
@@ -490,20 +527,30 @@ describe('the recall tool', () => {
     expect((await held).result).toStartWith('Recall did not finish')
   })
 
-  test('on: a session a script ran may call it; a subagent is refused, with no recall', { options: { recall: true } }, async ($, on) => {
+  test('the status line says recall runs for a typed prompt, not for a tool call', { options: { recall: true, automaticRecall: true } }, async ($, on) => {
+    const { asked, statuses } = world(on)
+    await start($)
+    await $.prompt.submit(typed('Format the file.'))
+    expect(statuses).toHaveLength(2)
+    await callTool($)
+    expect(asked).toEqual([SOL, SOL])
+    expect(statuses).toHaveLength(2)
+  })
+
+  test('on: a session a script ran may call it, and so may a subagent', { options: { recall: true } }, async ($, on) => {
     const { asked, state } = world(on)
     await start($)
     state.isScripted = true
     expect((await callTool($)).result).toContain('Always use tabs')
     expect(asked).toEqual([SOL])
-    const refused = await ($.tool.call({ tool: TOOL, about: 'Next: the rollout.', agentId: 'a1' } as never) as unknown as Promise<{ text?: string; isError?: boolean; deny?: string }>)
-    expect(refused.deny ?? refused.text).toContain('Only the main agent')
-    expect(asked).toEqual([SOL])
+    const sub = await ($.tool.call({ tool: TOOL, about: 'Next: the rollout.', agentId: 'a1' } as never) as unknown as Promise<{ result?: string }>)
+    expect(sub.result).toContain('Always use tabs')
+    expect(asked).toEqual([SOL, SOL])
   })
 })
 
 describe('the local server', () => {
-  test('reads for recall when it runs: no CLI starts, and it reads the project the session started in', { options: { recall: true } }, async ($, on) => {
+  test('reads for recall when it runs: no CLI starts, and it reads the project the session started in', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, contexts, dirs, logs, served, state } = world(on)
     state.server = 'up'
     on('session.cwd', async () => ({ value: '/tmp/project/notes' }))
@@ -522,7 +569,7 @@ describe('the local server', () => {
     expect(logs).toContainEqual(expect.stringMatching(/^hive recall: gpt-6\.2-sol answered in \d+ ms/))
   })
 
-  test('a server that fails is started again and asked once more; then the CLI reads, for the rest of the recall', { options: { recall: true } }, async ($, on) => {
+  test('a server that fails is started again and asked once more; then the CLI reads, for the rest of the recall', { options: { automaticRecall: true } }, async ($, on) => {
     const { contexts, dirs, served, state } = world(on)
     state.server = 'down'
     await start($)
@@ -533,7 +580,7 @@ describe('the local server', () => {
     expect(dirs).toHaveLength(2)
   })
 
-  test('a server with no answer in 5 seconds: the CLI reads instead, and the next recall starts it again', { options: { recall: true } }, async ($, on) => {
+  test('a server with no answer in 5 seconds: the CLI reads instead, and the next recall starts it again', { options: { automaticRecall: true } }, async ($, on) => {
     const { clock, contexts, dirs, served, state, timeouts } = world(on)
     state.server = 'stuck'
     await start($)
@@ -552,7 +599,7 @@ describe('the local server', () => {
     expect(dirs).toHaveLength(2)
   })
 
-  test('warms after the session starts and after each main turn, reading what recall will; never through the CLI', { options: { recall: true } }, async ($, on) => {
+  test('warms after the session starts and after each main turn, reading what recall will; never through the CLI', { options: { automaticRecall: true } }, async ($, on) => {
     const { clock, dirs, served, state } = world(on)
     state.server = 'up'
     await start($)
@@ -586,7 +633,7 @@ describe('the local server', () => {
     expect(dirs).toEqual([])
   })
 
-  test('a warm read with no answer in 5 seconds stops the warm, and the server stays known', { options: { recall: true } }, async ($, on) => {
+  test('a warm read with no answer in 5 seconds stops the warm, and the server stays known', { options: { automaticRecall: true } }, async ($, on) => {
     const { asked, clock, logs, served, state } = world(on)
     state.server = 'up'
     state.held = 1
@@ -605,7 +652,7 @@ describe('the local server', () => {
     expect(state.ensures).toBe(1)
   })
 
-  test('a recall stops a warm at once, and none starts during one', { options: { recall: true } }, async ($, on) => {
+  test('a recall stops a warm at once, and none starts during one', { options: { automaticRecall: true } }, async ($, on) => {
     const { clock, contexts, served, state } = world(on)
     state.server = 'up'
     state.held = 1
@@ -630,7 +677,7 @@ describe('the local server', () => {
     expect(contexts[0]?.join('')).toContain('did not finish')
   })
 
-  test('without one, a warm reads nothing', { options: { recall: true } }, async ($, on) => {
+  test('without one, a warm reads nothing', { options: { automaticRecall: true } }, async ($, on) => {
     const { clock, dirs, served, state } = world(on)
     await start($)
     await settle()
@@ -664,21 +711,43 @@ describe('/remember and what the main agent is told', () => {
     const session = mock.session(on)
     await start($)
     const { text } = await run($, NOTE)
-    expect(text).toContain('Automatic recall is off')
+    expect(text).toContain('Recall is off')
     expect(text).not.toContain(NOTE)
     expect(textsOf(session)).toHaveLength(1)
   })
 
-  for (const isOn of [true, false])
-    test(`${isOn ? 'on' : 'off'}: the system prompt ${isOn ? 'ends with what recall covers' : 'is as composed'}`, { options: { recall: isOn } }, async ($, on) => {
+  test('automatic recall alone: the note is saved for recall', { options: { automaticRecall: true } }, async ($, on) => {
+    world(on)
+    mock.session(on)
+    await start($)
+    expect((await run($, NOTE)).text).toBe('Saved for recall')
+  })
+
+  for (const [name, recall, autoRecall] of [
+    ['both', true, true],
+    ['tool', true, false],
+    ['automatic', false, true],
+    ['off', false, false],
+  ] as const)
+    test(`${name}: the system prompt ${recall || autoRecall ? 'ends with what recall covers' : 'is as composed'}`, { options: { recall, automaticRecall: autoRecall } }, async ($, on) => {
       world(on)
       on('prompt.compose', async () => ({ sections: [{ id: 'intro', text: 'You are Claude.', scope: 'shared' }] }))
+      // The plugin's guidance file (hooks/session-start.spec.ts checks the real one).
+      const read: Array<string> = []
+      on('fs.read', async (_$, e) => {
+        read.push(e.path)
+        return { value: 'Say in replies what later sessions should know.\n' } as never
+      })
       await start($)
+      expect(read.map(path => path.endsWith('/hooks/memory-guidance.txt'))).toEqual(recall || autoRecall ? [true] : [])
       const model = 'claude-opus-5-5'
       const { sections } = await $.prompt.compose({ model, promptModel: model, surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] })
-      expect(sections.map(s => s.id)).toEqual(isOn ? ['intro', 'hive:recall'] : ['intro'])
-      if (isOn) expect(sections[1]).toEqual({ id: 'hive:recall', text: RECALL_SECTION, scope: 'session' })
+      expect(sections.map(s => s.id)).toEqual(recall || autoRecall ? ['intro', 'hive:recall'] : ['intro'])
+      if (!recall && !autoRecall) return
+      expect(sections[1]!.text).toBe(recallSection({ isTool: recall, isAuto: autoRecall }, 'Say in replies what later sessions should know.'))
+      expect(sections[1]!.text.startsWith(autoRecall ? '# Automatic recall' : "# Recall\n\nThe hive plugin's recall tool")).toBe(true)
     })
+
 })
 
 /** The prompt's row as the session stores it, under `uuid`. */
@@ -699,7 +768,7 @@ const row = (surface: 'terminal' | 'desktop', requestId: string, { isExpanded = 
 const LINE = /hive recalled 1 memory/
 
 describe('what recall gave a prompt', () => {
-  test('terminal: a line under the prompt counts the entries; ctrl+o shows them', { options: { recall: true } }, async ($, on) => {
+  test('terminal: a line under the prompt counts the entries; ctrl+o shows them', { options: { automaticRecall: true } }, async ($, on) => {
     world(on)
     await start($)
     await $.prompt.submit(typed('Format the file.'))
@@ -726,7 +795,7 @@ describe('what recall gave a prompt', () => {
     await other.unmount()
   })
 
-  test('terminal: only ctrl+o says when recall found nothing', { options: { recall: true } }, async ($, on) => {
+  test('terminal: only ctrl+o says when recall found nothing', { options: { automaticRecall: true } }, async ($, on) => {
     const { state } = world(on)
     await start($)
     state.reply = 'none'
@@ -740,7 +809,7 @@ describe('what recall gave a prompt', () => {
     await expanded.unmount()
   })
 
-  test('a dropped prompt leaves nothing for the same prompt typed again', { options: { recall: true } }, async ($, on) => {
+  test('a dropped prompt leaves nothing for the same prompt typed again', { options: { automaticRecall: true } }, async ($, on) => {
     const { state } = world(on)
     await start($)
     state.isDropped = true
@@ -754,7 +823,7 @@ describe('what recall gave a prompt', () => {
     await expanded.unmount()
   })
 
-  test('a press on the line opens and closes the entries: fullscreen terminal and desktop', { options: { recall: true } }, async ($, on) => {
+  test('a press on the line opens and closes the entries: fullscreen terminal and desktop', { options: { automaticRecall: true } }, async ($, on) => {
     world(on)
     await start($)
     await $.prompt.submit(typed('Format the file.'))
@@ -776,7 +845,7 @@ describe('what recall gave a prompt', () => {
     }
   })
 
-  test('desktop: no line where recall found nothing', { options: { recall: true } }, async ($, on) => {
+  test('desktop: no line where recall found nothing', { options: { automaticRecall: true } }, async ($, on) => {
     const { state } = world(on)
     await start($)
     state.reply = 'none'
@@ -788,7 +857,7 @@ describe('what recall gave a prompt', () => {
     await ui.unmount()
   })
 
-  test('a resumed session: earlier prompts show what recall gave them, read back once from the transcript', { options: { recall: true } }, async ($, on) => {
+  test('a resumed session: earlier prompts show what recall gave them, read back once from the transcript', { options: { automaticRecall: true } }, async ($, on) => {
     const { clock, state } = world(on)
     await start($)
     // This process recalled nothing for p1; the transcript, written by another, says otherwise.

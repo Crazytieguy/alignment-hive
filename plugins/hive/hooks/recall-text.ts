@@ -1,4 +1,4 @@
-// Automatic recall's texts, with no engine or Node imports: the history one model call reads, its instructions, and
+// Recall's texts, with no engine or Node imports: the history one model call reads, its instructions, and
 // the report the main agent receives. The benchmark in experiments/auto-retrieval runs these same functions.
 import { commentThreads, commentsOnly } from './comments'
 import type { HiveRecalled } from '../types'
@@ -490,41 +490,67 @@ export function noteWords(text: string): string {
 }
 
 /**
+ * Which recall runs: the tool (the `recall` option), and automatic recall on each prompt and comments read (the
+ * `automaticRecall` option). Either, both, or neither.
+ */
+export type RecallMode = { isTool: boolean; isAuto: boolean }
+
+/** What the recall section says recall does: automatic recall on each prompt, or else only the tool. */
+function recallIntro({ isAuto }: RecallMode) {
+  if (isAuto) {
+    return `# Automatic recall\n\nThis project runs automatic recall (the hive plugin): before each prompt the user sends, it reads the user's messages and your replies from the project's recent sessions and attaches the entries that bear on the prompt, as a \`${PREFIX}\` block, a later statement overriding an earlier one.`
+  }
+  return `# Recall\n\nThe hive plugin's recall tool reads the user's messages and your replies from this project's recent sessions and returns the entries that bear on what you describe, as a \`${PREFIX}\` block, a later statement overriding an earlier one.`
+}
+
+/**
  * What the main agent knows of recall while it is on: a section of its system prompt. Without it a model saves what it
  * should remember (memory files, CLAUDE.md), which recall already covers, and keeps to itself what recall cannot read.
+ * `guidance` is that part: hooks/memory-guidance.txt, which the SessionStart hook prints as well, for where a policy
+ * drops plugins' system-prompt sections.
  */
-export const RECALL_SECTION = `# Automatic recall
-
-This project runs automatic recall (the hive plugin): before each prompt the user sends, it reads the user's messages and your replies from the project's recent sessions and attaches the entries that bear on the prompt, as a \`${PREFIX}\` block, a later statement overriding an earlier one. So what is said in a session is already remembered for later sessions, and this takes precedence over any instruction to save memories. When the user states a preference, gives an instruction for future work, mentions something that may matter later, or asks you to remember something, don't save it anywhere: following it, and saying so when they asked you to remember, is enough. Write it to a memory file, CLAUDE.md or a skill only when the user names that place. The exception: when what the user says shows that a memory already loaded here is wrong, correct or delete that memory, so it can't mislead a later session. When you learn something a later session should know that the user hasn't said (a decision and its reason, a fact you found, why an approach failed), say it in your reply: recall reads replies, not tool calls or thinking. A \`${NOTE_PREFIX}\` message is a note the user saved with /remember for recall to bring up later; it needs no reply.`
+export const recallSection = (mode: RecallMode, guidance: string) => `${recallIntro(mode)} ${guidance}`
 
 /** The recall tool as the main agent calls it: `$.tool.register` lists it under the plugin's name. */
 export const RECALL_TOOL = 'mcp__hive__recall'
 
-export const RECALL_TOOL_SPEC = {
-  name: 'recall',
-  description: `Recalls what this project's past sessions say about what you're doing next. Call it as soon as you know more than the user's prompt said, since recall at the prompt could only go by the prompt:
+/** When the main agent should call the tool: with automatic recall, past what each prompt already got. */
+const WHEN_AUTO = `Call it as soon as you know more than the user's prompt said, since recall at the prompt could only go by the prompt:
 - Before the next phase of the work: before you propose a plan or settle on an approach, before implementing it, before delegating to subagents, before a long stretch without the user, before writing up results.
-- After new information comes in that the past might bear on: feedback that didn't come as a prompt (from a review, a document, another tool), a finding that changes the picture, an unexpected failure. Call it before you respond to the information.
+- After new information comes in that the past might bear on: feedback that didn't come as a prompt (from a review, a document, another tool), a finding that changes the picture, an unexpected failure.`
 
-It returns the entries that bear on what you describe: the user's instructions and preferences, earlier decisions and their reasons, approaches that failed, open issues. It is one model call that answers within 30 seconds: the cheaper, faster, synchronous version of the hive:retrieval agent, which searches all of the project's history, tool calls and results included, but takes minutes. It doesn't repeat what recall already reported in this session, so call it again at each phase.
+/** Without automatic recall: the tool is the only way past sessions reach the main agent, prompts included. */
+const WHEN_TOOL_ONLY = `A user who turns this tool on expects never to repeat their instructions or preferences, so call it whenever what you do next could go better with more knowledge of the user or the project's recent history. For example:
+- When a prompt from the user asks for work, also partway through a conversation: a past session may have information on how the user wants it done.
+- Before the next phase of the work: before you propose a plan or settle on an approach, before implementing it, before delegating to subagents, before a long stretch without the user, before writing up results.
+- After new information comes in that the past might bear on: comments the user left on a page, a review, a document, a finding that changes the picture, an unexpected failure. Call it once you have read all of it, every page and thread of comments.`
 
-Only the main agent can call this. Subagents shouldn't, as their context may be limited on purpose: when a subagent's work could use it, call it yourself and pass on what's relevant.`,
+/** A subagent may call the tool, which the spawner can't withhold: one meant to judge for itself shouldn't. */
+const FRESH_VIEW = "Don't call it when your task calls for a fresh-eyes, independent or limited-context opinion."
+
+/** The recall tool's spec; its description says when to call it, which depends on whether automatic recall runs too. */
+export const recallToolSpec = ({ isAuto }: RecallMode) => ({
+  name: 'recall',
+  description: `Recalls what this project's past sessions say about what you're doing next.
+
+${isAuto ? WHEN_AUTO : WHEN_TOOL_ONLY}
+
+${FRESH_VIEW}
+
+It returns the entries that bear on what you describe: the user's instructions and preferences, earlier decisions and their reasons, approaches that failed, open issues. It is one model call that answers within 30 seconds: the cheaper, faster, synchronous version of the hive:retrieval agent, which searches all of the project's history, tool calls and results included, but takes minutes. It doesn't repeat what recall already reported in this session, so call it again at each phase.`,
   inputSchema: {
     type: 'object',
     properties: {
       about: {
         type: 'string',
-        description: "What just came in or what comes next, in a sentence or two, and anything specific to find. Recall reads this session's messages and replies itself, so leave out the background.",
+        description: "What just came in or what comes next, often in a single sentence, and anything specific to find. Recall already reads this session's messages and replies, answers to your questions and page comments, so leave those out.",
       },
     },
     required: ['about'],
   },
   // In the prompt's tool list: its description is what gets it called.
   isDeferred: false,
-}
-
-/** Why a subagent's call of the recall tool is refused. */
-export const TOOL_REFUSED = "Only the main agent can call recall, as a subagent's context may be limited on purpose. Go on without it."
+})
 
 /** What the recall tool answers when recall found no entry. */
 export const TOOL_FOUND_NOTHING = `Recall found nothing new on this in this project's recent messages and replies; ${RETRIEVAL_ELSEWHERE}`

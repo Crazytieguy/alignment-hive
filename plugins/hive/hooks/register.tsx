@@ -8,7 +8,7 @@ import { cli, hive } from './cli'
 import { noticeBand, noticeLabel } from './notice-band'
 import type { Notice, NoticeAction } from './notice-band'
 import { REMEMBER_DESCRIPTION, answerRecallTool, drawRecalled, endRecallTurn, onPromptStored, readWithRecall, remember, submitWithRecall, warm } from './recall'
-import { RECALL_SECTION, RECALL_TOOL, RECALL_TOOL_SPEC } from './recall-text'
+import { RECALL_TOOL, recallSection, recallToolSpec } from './recall-text'
 import type { HiveBusy, HiveFolded, HiveNotices } from '../types'
 
 // `when`: which phase of the session shows the row (packages/hive-cli/src/commands/notices.ts).
@@ -201,43 +201,52 @@ function warmLater($: EngineInterface, recallModel: string): void {
 
 export const register: Register = (on, options) => {
   const recallModel = String(options.recallModel ?? 'auto')
+  // Recall's two parts, each its own option: the tool (`recall`) and automatic recall (`automaticRecall`).
+  const mode = { isTool: options.recall === true, isAuto: options.automaticRecall === true }
+  const isRecallOn = mode.isTool || mode.isAuto
+  // What recall changes about saving memories (recall-text's recallSection), read as the session starts; '' when unread.
+  let guidance = ''
 
   on('session.start', async ($, e, next) => {
-    if (options.recall === true) await $.tool.register(RECALL_TOOL_SPEC)
+    if (mode.isTool) await $.tool.register(recallToolSpec(mode))
+    if (isRecallOn) guidance = String(await $.fs.read(`${$.plugin.root}/hooks/memory-guidance.txt`).catch(() => '')).trim()
     const started = await next(e)
     cli.projectDir = await $.session.root()
     // A refused registration (a name taken) leaves the rest of the start as it was.
     await $.command.register({ name: 'remember', description: REMEMBER_DESCRIPTION, argumentHint: '<note>', immediate: true }).catch(() => undefined)
     // While recall is on, a warm follows the notices: its CLI call waits for theirs, which may download the CLI first.
-    inBackground(refresh($).finally(() => options.recall === true && warmLater($, recallModel)))
+    inBackground(refresh($).finally(() => isRecallOn && warmLater($, recallModel)))
     return started
   })
 
   on('prompt.submit', async ($, e, next) => {
     const [sessionId, prompted] = await Promise.all([$.session.id(), read($, promptedSession)])
     if (prompted !== sessionId) await update($, promptedSession, () => sessionId)
-    return options.recall === true ? submitWithRecall($, e, next, recallModel) : next(e)
+    return mode.isAuto ? submitWithRecall($, e, next, recallModel) : next(e)
   })
 
   // `/remember <note>`: a note for later sessions, saved without a turn (recall.tsx).
-  on('command.run', { command: 'remember' }, ($, e) => remember($, e.args, options.recall === true))
+  on('command.run', { command: 'remember' }, ($, e) => remember($, e.args, isRecallOn))
 
-  // What recall gave a prompt shows under it (recall.tsx); the prompt's stored row names it. A comments read gets
-  // recall too, and the recall tool asks for it. The main agent's system prompt says what recall covers, so it saves
-  // nothing recall already does.
-  if (options.recall === true) {
+  // The main agent's system prompt says what recall covers, so it saves nothing recall already does.
+  if (isRecallOn) {
     on('prompt.compose', async ($, e, next) => {
       const { sections } = await next(e)
+      if (!guidance) return { sections }
       // Right after the auto-memory section, which it overrides, where that is on the same side of the cache boundary.
       const memory = sections.findIndex(s => s.id === 'memory' && s.scope === 'session')
       const at = memory < 0 ? sections.length : memory + 1
-      return { sections: [...sections.slice(0, at), { id: 'hive:recall', text: RECALL_SECTION, scope: 'session' }, ...sections.slice(at)] }
+      return { sections: [...sections.slice(0, at), { id: 'hive:recall', text: recallSection(mode, guidance), scope: 'session' }, ...sections.slice(at)] }
     })
+  }
+  // What automatic recall gave a prompt shows under it (recall.tsx); the prompt's stored row names it. A comments read
+  // gets recall too.
+  if (mode.isAuto) {
     on('session.append', { door: ['prompt', 'delivery'] }, onPromptStored)
     on('ui.render', { component: 'UserMessage' }, drawRecalled)
     on('tool.call', { tool: 'ArtifactComments' }, ($, e, next) => readWithRecall($, e, next, recallModel))
-    on('tool.call', { tool: RECALL_TOOL }, ($, e) => answerRecallTool($, e, recallModel))
   }
+  if (mode.isTool) on('tool.call', { tool: RECALL_TOOL }, ($, e) => answerRecallTool($, e, recallModel))
 
   // The CLI discovers a session once it holds an assistant reply: the first reply row stored in
   // the main conversation of a session it does not know yet is the moment to ask again, once per
@@ -261,7 +270,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     if (await isRefreshNeeded($)) inBackground(refresh($))
     // The person may type next.
-    if (options.recall === true && e.agentId === undefined) {
+    if (isRecallOn && e.agentId === undefined) {
       endRecallTurn()
       warmLater($, recallModel)
     }

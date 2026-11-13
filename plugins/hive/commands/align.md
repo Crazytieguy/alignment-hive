@@ -134,17 +134,17 @@ A marketplace declared in `~/.claude/settings.local.json` (an older version of t
 
 Read the `alignment-hive` entry in `~/.claude/plugins/known_marketplaces.json`. If `autoUpdate` is not `true`, mention once that the install script (`curl -fsSL https://alignment-hive.com/install.sh | bash`) is supposed to set this and recommend re-running it. Do not auto-fix.
 
-### Automatic recall (beta)
+### Recall (beta)
 
 Skip if `pluginConfigs` in `~/.claude/settings.json` already has the hive plugin's options with `recall` set, either way (its key is the hive plugin's id as `enabledPlugins` lists it, normally `hive@alignment-hive`). Otherwise ask once, **Yes** / **No** / **Tell me more**:
 
-> **Automatic recall** (beta): runs an automatic memory recall step before sending each of your prompts, finding relevant context from this project's past sessions, so you repeat yourself less. Each prompt waits up to 30 seconds.
+> **Recall** (beta): gives Claude a tool that finds relevant context from this project's past sessions as it works, so you repeat yourself less. Each call takes up to 30 seconds.
 
-If model-router is not installed, add: without it, recall runs on Sonnet, which finds less than GPT-6.2 Sol and adds about 5% to your Claude usage; with model-router (recommended above), it runs on Sol and uses none.
+If model-router is not installed, add: without it, recall runs on Sonnet, which finds less than GPT-6.2 Sol and adds to your Claude usage; with model-router (recommended above), it runs on Sol and uses none.
 
-On **Tell me more**, present the Automatic recall paragraph of the hive README (fetched as under "Installing and Tell me more"), then ask again with **Yes** / **No**.
+On **Tell me more**, present the Recall paragraph of the hive README (fetched as under "Installing and Tell me more"), then ask again with **Yes** / **No**.
 
-On Yes, set `pluginConfigs.<hive plugin id>.options.recall` to `true` in `~/.claude/settings.json` (user settings: plugin options are not read from project settings), keeping any other options there; it applies from the next session. On No, record it in the rejected file.
+On Yes, set `pluginConfigs.<hive plugin id>.options.recall` to `true` in `~/.claude/settings.json` (user settings: plugin options are not read from project settings), keeping any other options there; it applies from the next session. If they asked for automatic recall, also set `automaticRecall` to `true`. On No, record it in the rejected file.
 
 ### Transcript Retention
 
@@ -154,7 +154,7 @@ Check `cleanupPeriodDays` in the four settings files. If it's unset or below 365
 
 ### Claude Code's memory
 
-Skip unless all of these hold: `recall` is `true` in the hive plugin's options, `cleanupPeriodDays` is at least 365 (recall and `/remember` notes live in transcripts, which otherwise expire while memory files don't), memory is on for this project (`autoMemoryEnabled` isn't `false` in the settings that apply here, `.claude/settings.local.json` over `.claude/settings.json` over `~/.claude/settings.json`, and `CLAUDE_CODE_DISABLE_AUTO_MEMORY` isn't `1`), and no decline is recorded.
+Skip unless all of these hold: the hive plugin's options have `recall` or `automaticRecall` set to `true`, `cleanupPeriodDays` is at least 365 (recall and `/remember` notes live in transcripts, which otherwise expire while memory files don't), memory is on for this project (`autoMemoryEnabled` isn't `false` in the settings that apply here, `.claude/settings.local.json` over `.claude/settings.json` over `~/.claude/settings.json`, and `CLAUDE_CODE_DISABLE_AUTO_MEMORY` isn't `1`), and no decline is recorded.
 
 This project's memory folder is `autoMemoryDirectory` if that is set, else `~/.claude/projects/<main worktree path with every non-alphanumeric character replaced by ->/memory/`. Count its `.md` files other than `MEMORY.md`, and the other projects under `~/.claude/projects/*/memory/` that have any, leaving out temp-dir projects. Ask:
 

@@ -6,7 +6,7 @@ allowed-tools: Bash(hive local:*)
 
 ## The session you serve
 
-Alongside your first searches, read the session that started you: `hive local outline current --replies`, and `hive local show` its `recall` rows, which hold what automatic recall and earlier retrieval already reported. The spawn prompt says what the caller plans; the session gives the context. Don't report again what a recall row after the session's latest compaction already quotes, unless a later statement supersedes it; the caller no longer has what came before that compaction, so it counts like any past session. Spend your searches on what is missing, older sessions above all.
+Alongside your first searches, read the session that started you: `hive local outline current --replies`, and `hive local show` its `recall` rows, which hold what recall and earlier retrieval already reported. The spawn prompt says what the caller plans; the session gives the context. Don't report again what a recall row after the session's latest compaction already quotes, unless a later statement supersedes it; the caller no longer has what came before that compaction, so it counts like any past session. Spend your searches on what is missing, older sessions above all.
 
 ## Goal
 
