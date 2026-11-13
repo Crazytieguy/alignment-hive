@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::claude_settings::{
     Settings, USER_SETTINGS_DISPLAY, user_settings_file, winning_setting,
 };
+use crate::settings_edit::Version;
 
 /// The setting that sets every routed model's context window.
 pub const ENV_VAR: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
@@ -24,15 +25,68 @@ pub const ENV_VAR: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
 /// files included.
 pub const AUTO_COMPACT_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
 
+/// The setting that keeps an undeclared routed model at
+/// [`LEGACY_UNDECLARED_WINDOW`] on every Claude Code version.
+pub const DISABLE_1M_ENV_VAR: &str = "CLAUDE_CODE_DISABLE_1M_CONTEXT";
+
 /// The context window Claude Code gives a routed model when [`ENV_VAR`] is
-/// unset, zero, or malformed.
-pub const UNDECLARED_CONTEXT_WINDOW: u64 = 200_000;
+/// unset, zero, or malformed, from [`FIRST_1M_DEFAULT`] on.
+pub const UNDECLARED_CONTEXT_WINDOW: u64 = 1_000_000;
+
+/// The same before [`FIRST_1M_DEFAULT`], or under [`DISABLE_1M_ENV_VAR`].
+pub const LEGACY_UNDECLARED_WINDOW: u64 = 200_000;
+
+/// The first Claude Code release to give an undeclared routed model
+/// [`UNDECLARED_CONTEXT_WINDOW`] (2.1.322 gave 200K, measured).
+pub const FIRST_1M_DEFAULT: Version = Version(2, 1, 323);
+
+/// What decides the window Claude Code gives a routed model when [`ENV_VAR`]
+/// does not declare one: its version and [`DISABLE_1M_ENV_VAR`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Undeclared {
+    /// The Claude Code version this process runs under, when it can tell;
+    /// otherwise assumed current.
+    pub version: Option<Version>,
+    /// Whether [`DISABLE_1M_ENV_VAR`] is on.
+    pub opted_out: bool,
+}
+
+impl Undeclared {
+    #[must_use]
+    pub fn window(self) -> u64 {
+        if self.opted_out
+            || self
+                .version
+                .is_some_and(|version| version < FIRST_1M_DEFAULT)
+        {
+            LEGACY_UNDECLARED_WINDOW
+        } else {
+            UNDECLARED_CONTEXT_WINDOW
+        }
+    }
+
+    /// Why an undeclared routed model gets [`Self::window`], for doctor.
+    #[must_use]
+    pub fn describe(self) -> String {
+        if self.opted_out {
+            format!("{ENV_VAR} unset and {DISABLE_1M_ENV_VAR} on")
+        } else if let Some(version) = self.version {
+            format!("{ENV_VAR} unset: Claude Code {version}'s default")
+        } else {
+            format!(
+                "{ENV_VAR} unset: Claude Code's default from {FIRST_1M_DEFAULT} on, its version \
+                 not detected"
+            )
+        }
+    }
+}
 
 /// The context window Claude Code gives every routed model under the
-/// declaration `declared` (an [`ENV_VAR`] value).
+/// declaration `declared` (an [`ENV_VAR`] value), and `undeclared` without
+/// one.
 #[must_use]
-pub fn client_context_window(declared: Option<u64>) -> u64 {
-    declared.unwrap_or(UNDECLARED_CONTEXT_WINDOW)
+pub fn client_context_window(declared: Option<u64>, undeclared: Undeclared) -> u64 {
+    declared.unwrap_or_else(|| undeclared.window())
 }
 
 /// Rescales the usage the router reports so Claude Code's auto-compact gate
@@ -124,14 +178,21 @@ impl EnvSetting {
     }
 }
 
-/// [`ENV_VAR`] and [`AUTO_COMPACT_ENV_VAR`] as a process environment holds
-/// them. Read once by the command and passed in, so the readings below never
-/// take them from wherever the code happens to run (a test, say).
+/// [`ENV_VAR`], [`AUTO_COMPACT_ENV_VAR`], [`DISABLE_1M_ENV_VAR`] and
+/// [`AGENT_ENV_VAR`] as a process environment holds them. Read once by the
+/// command and passed in, so the readings below never take them from
+/// wherever the code happens to run (a test, say).
 #[derive(Debug, Clone, Default)]
 pub struct WindowEnv {
     context_window: Option<String>,
     auto_compact: Option<String>,
+    disable_1m: Option<String>,
+    agent: Option<String>,
 }
+
+/// What Claude Code sets in its Bash tool's environment, naming its version:
+/// `claude-code_2-1-323_agent`.
+pub const AGENT_ENV_VAR: &str = "AI_AGENT";
 
 impl WindowEnv {
     /// This process's values.
@@ -140,8 +201,65 @@ impl WindowEnv {
         Self {
             context_window: std::env::var(ENV_VAR).ok(),
             auto_compact: std::env::var(AUTO_COMPACT_ENV_VAR).ok(),
+            disable_1m: std::env::var(DISABLE_1M_ENV_VAR).ok(),
+            agent: std::env::var(AGENT_ENV_VAR).ok(),
         }
     }
+
+    /// The Claude Code version whose Bash tool runs this process.
+    fn version(&self) -> Option<Version> {
+        let version = self.agent.as_deref()?.strip_prefix("claude-code_")?;
+        Version::parse(&version.split('_').next()?.replace('-', "."))
+    }
+}
+
+/// Reads what decides an undeclared routed model's window: the version from
+/// `env`, and [`DISABLE_1M_ENV_VAR`] the way [`env_setting`] reads a
+/// variable (the environment when it has one, else the winning settings
+/// file's `env`).
+#[must_use]
+pub fn undeclared(env: &WindowEnv, settings: &Settings) -> Undeclared {
+    undeclared_with(env.disable_1m.as_deref(), env.version(), settings)
+}
+
+/// [`undeclared`] as the next session started over `files` reads it, `env`
+/// and `current` as in [`inherited`].
+#[must_use]
+pub fn next_undeclared(env: &WindowEnv, current: &Settings, files: &Settings) -> Undeclared {
+    let disable_1m = inherited(
+        DISABLE_1M_ENV_VAR,
+        env.disable_1m.as_deref(),
+        current,
+        files,
+    );
+    undeclared_with(disable_1m, env.version(), files)
+}
+
+fn undeclared_with(
+    disable_1m: Option<&str>,
+    version: Option<Version>,
+    settings: &Settings,
+) -> Undeclared {
+    let opted_out = match disable_1m {
+        Some(raw) => is_on(raw),
+        None => {
+            winning_setting(settings, &["env", DISABLE_1M_ENV_VAR]).is_some_and(
+                |(_, raw)| match raw {
+                    serde_json::Value::String(text) => is_on(text),
+                    serde_json::Value::Bool(on) => *on,
+                    other => is_on(&other.to_string()),
+                },
+            )
+        }
+    };
+    Undeclared { version, opted_out }
+}
+
+/// Whether Claude Code reads `raw` as on (measured on 2.1.323 for
+/// [`DISABLE_1M_ENV_VAR`]: `1`, `true`, `TRUE`, `yes` and `on` are on; `0`,
+/// `false`, `2` and an empty value are off).
+fn is_on(raw: &str) -> bool {
+    ["1", "true", "yes", "on"].contains(&raw.trim().to_ascii_lowercase().as_str())
 }
 
 /// Reads the effective [`ENV_VAR`]. Zero reads as unset, as it does to
@@ -532,6 +650,72 @@ mod tests {
         // So does one of this session's: the environment holds its value,
         // which a view without that file must not inherit.
         assert_eq!(inherited(ENV_VAR, shell, &settings(), &[]), None);
+    }
+
+    #[test]
+    fn an_undeclared_route_gets_1m_from_2_1_323_on_unless_opted_out() {
+        let env = |disable_1m: Option<&str>, agent: Option<&str>| WindowEnv {
+            disable_1m: disable_1m.map(String::from),
+            agent: agent.map(String::from),
+            ..WindowEnv::default()
+        };
+        let window = |env: &WindowEnv| undeclared(env, &[]).window();
+        // The Bash tool's AI_AGENT names the version; without it, current.
+        assert_eq!(window(&env(None, None)), 1_000_000);
+        assert_eq!(
+            window(&env(None, Some("claude-code_2-1-323_agent"))),
+            1_000_000
+        );
+        assert_eq!(
+            window(&env(None, Some("claude-code_2-1-322_agent"))),
+            200_000
+        );
+        assert_eq!(
+            undeclared(&env(None, Some("claude-code_2-1-319_agent")), &[]).version,
+            Some(Version(2, 1, 319))
+        );
+        assert_eq!(undeclared(&env(None, Some("cursor")), &[]).version, None);
+        // The opt-out wins on every version, read as Claude Code reads it.
+        for on in ["1", "true", "TRUE", "yes", " on "] {
+            assert_eq!(window(&env(Some(on), None)), 200_000, "{on}");
+        }
+        for off in ["0", "false", "2", ""] {
+            assert_eq!(window(&env(Some(off), None)), 1_000_000, "{off:?}");
+        }
+    }
+
+    #[test]
+    fn the_1m_opt_out_is_read_from_settings_unless_the_environment_has_it() {
+        let project = tempfile::tempdir().unwrap();
+        let settings = || settings_by_precedence(None, project.path());
+        let opted_out = |env: &WindowEnv| undeclared(env, &settings()).opted_out;
+        assert!(!opted_out(&WindowEnv::default()));
+        for (value, on) in [
+            (r#""1""#, true),
+            ("true", true),
+            ("1", true),
+            (r#""0""#, false),
+        ] {
+            write_settings(
+                project.path(),
+                "settings.json",
+                &format!(r#"{{"env":{{"CLAUDE_CODE_DISABLE_1M_CONTEXT":{value}}}}}"#),
+            );
+            assert_eq!(opted_out(&WindowEnv::default()), on, "{value}");
+        }
+        // This session's environment holds the value in force.
+        let off = WindowEnv {
+            disable_1m: Some("0".into()),
+            ..WindowEnv::default()
+        };
+        assert!(!opted_out(&off));
+        // The next session reads the file over a shell value.
+        write_settings(
+            project.path(),
+            "settings.json",
+            r#"{"env":{"CLAUDE_CODE_DISABLE_1M_CONTEXT":"1"}}"#,
+        );
+        assert!(next_undeclared(&off, &[], &settings()).opted_out);
     }
 
     #[test]

@@ -6,8 +6,8 @@
 
 use crate::claude_settings::USER_SETTINGS_DISPLAY;
 use crate::client_window::{
-    AUTO_COMPACT_ENV_VAR, Compaction, ENV_VAR, EnvSetting, MAX_COMPACT_WINDOW, MIN_COMPACT_WINDOW,
-    UsageScale, client_context_window,
+    AUTO_COMPACT_ENV_VAR, Compaction, EnvSetting, MAX_COMPACT_WINDOW, MIN_COMPACT_WINDOW,
+    Undeclared, UsageScale, client_context_window,
 };
 use crate::config::{
     CODEX_DEFAULT_CONTEXT_WINDOW, Config, ModelRoute, codex_default_window, overflow_dialect,
@@ -207,10 +207,16 @@ pub(crate) fn window_routes<'a>(
 
 /// Builds the `context-windows` check, or `None` when the config says
 /// nothing about context windows (nothing to verify, nothing to warn about).
-/// The config's usage scales must already reflect `declared` (see
+/// `undeclared` sizes the routes when `declared` is unset. The config's
+/// usage scales must already reflect both (see
 /// [`Config::adopt_client_window`]), as the service's do.
 #[must_use]
-pub fn check(config: &Config, declared: EnvSetting, compaction: &Compaction) -> Option<Check> {
+pub fn check(
+    config: &Config,
+    declared: EnvSetting,
+    undeclared: Undeclared,
+    compaction: &Compaction,
+) -> Option<Check> {
     let declared_in_config = config.declares_window_in_config();
     let deprecated = declared_in_config
         || config
@@ -223,7 +229,7 @@ pub fn check(config: &Config, declared: EnvSetting, compaction: &Compaction) -> 
     {
         return None;
     }
-    let context_window = client_context_window(declared.value());
+    let context_window = client_context_window(declared.value(), undeclared);
 
     let mut ok = true;
     let mut warn = false;
@@ -264,7 +270,8 @@ pub fn check(config: &Config, declared: EnvSetting, compaction: &Compaction) -> 
             None => matched += 1,
         }
         if route.context_window_scaling {
-            let declared = client_context_window(config.declared_context_window);
+            let declared =
+                client_context_window(config.declared_context_window, config.undeclared_window);
             deprecations.push(scaling_note(route, compaction, declared));
         }
     }
@@ -282,7 +289,7 @@ pub fn check(config: &Config, declared: EnvSetting, compaction: &Compaction) -> 
     let source = |setting| match setting {
         EnvSetting::Environment(_) => "from the environment".to_string(),
         EnvSetting::Settings(_) => "from settings".to_string(),
-        EnvSetting::Unresolved => format!("assumed: {ENV_VAR} unset"),
+        EnvSetting::Unresolved => undeclared.describe(),
     };
     // A green result must say what it could not see.
     let per_model = compaction.env.value().map_or_else(
@@ -351,8 +358,14 @@ context-window = {window}
         let dirs = crate::client_window::SettingsDirs::new();
         dirs.user(user_settings);
         let mut config = config(source);
-        config.adopt_client_window(declared);
-        check(&config, declared, &dirs.resolve(None)).unwrap()
+        config.adopt_client_window(declared, false);
+        check(
+            &config,
+            declared,
+            Undeclared::default(),
+            &dirs.resolve(None),
+        )
+        .unwrap()
     }
 
     /// What setup writes: every built-in GPT route compacted at Codex's
@@ -376,7 +389,15 @@ context-window = {window}
         let mut bare: Config = toml::from_str("").unwrap();
         bare.models.clear();
         bare.prepare().unwrap();
-        assert!(check(&bare, EnvSetting::Unresolved, &Compaction::default()).is_none());
+        assert!(
+            check(
+                &bare,
+                EnvSetting::Unresolved,
+                Undeclared::default(),
+                &Compaction::default(),
+            )
+            .is_none()
+        );
     }
 
     /// An install from before per-model windows: the old declaration, a
@@ -669,13 +690,91 @@ context-window = {window}
         let mut bare: Config = toml::from_str("declared-context-window = 258400").unwrap();
         bare.models.clear();
         bare.prepare().unwrap();
-        let check = super::check(&bare, EnvSetting::Unresolved, &Compaction::default()).unwrap();
-        assert!(check.ok, "{check:?}");
+        // With nothing declared, the head says what sized the routes.
+        let head = |undeclared| {
+            let check = super::check(
+                &bare,
+                EnvSetting::Unresolved,
+                undeclared,
+                &Compaction::default(),
+            )
+            .unwrap();
+            assert!(check.ok, "{check:?}");
+            check.detail.split(';').next().unwrap().to_string()
+        };
+        let version = |patch| Some(crate::settings_edit::Version(2, 1, patch));
+        assert_eq!(
+            head(Undeclared::default()),
+            "context window 1000000 (CLAUDE_CODE_MAX_CONTEXT_TOKENS unset: Claude Code's default \
+             from 2.1.323 on, its version not detected)"
+        );
+        assert_eq!(
+            head(Undeclared {
+                version: version(323),
+                opted_out: false
+            }),
+            "context window 1000000 (CLAUDE_CODE_MAX_CONTEXT_TOKENS unset: Claude Code \
+             2.1.323's default)"
+        );
+        assert_eq!(
+            head(Undeclared {
+                version: version(322),
+                opted_out: false
+            }),
+            "context window 200000 (CLAUDE_CODE_MAX_CONTEXT_TOKENS unset: Claude Code \
+             2.1.322's default)"
+        );
+        assert_eq!(
+            head(Undeclared {
+                version: version(323),
+                opted_out: true
+            }),
+            "context window 200000 (CLAUDE_CODE_MAX_CONTEXT_TOKENS unset and \
+             CLAUDE_CODE_DISABLE_1M_CONTEXT on)"
+        );
+    }
+
+    /// The bug 2.1.323 brought: an undeclared route with no entry of its own
+    /// compacts at 1M, past a smaller real window.
+    #[test]
+    fn an_undeclared_route_without_an_entry_overruns_from_2_1_323_on() {
+        undeclared_route_on_each_side_of_2_1_323(&provider(400_000));
+        // A scaled route: the service sees no version, so it scales for 1M,
+        // which a 400K route is not above; doctor must not report a scale it
+        // does not apply on an older Claude Code.
+        undeclared_route_on_each_side_of_2_1_323(&scaled_provider(400_000));
+    }
+
+    fn undeclared_route_on_each_side_of_2_1_323(source: &str) {
+        let checked = |patch| {
+            let mut config = config(source);
+            let undeclared = Undeclared {
+                version: Some(crate::settings_edit::Version(2, 1, patch)),
+                opted_out: false,
+            };
+            config.adopt_client_window(EnvSetting::Unresolved, false);
+            check(
+                &config,
+                EnvSetting::Unresolved,
+                undeclared,
+                &Compaction::default(),
+            )
+            .unwrap()
+        };
+        let now = checked(323);
+        assert!(!now.ok, "{now:?}");
         assert!(
-            check
+            now.detail
+                .contains("kimi-k3 OVERRUN RISK: Claude Code compacts it at 1000000"),
+            "{now:?}"
+        );
+        let before = checked(322);
+        assert!(before.ok, "{before:?}");
+        assert!(
+            before
                 .detail
-                .contains("context window 200000 (assumed: CLAUDE_CODE_MAX_CONTEXT_TOKENS unset)"),
-            "{check:?}"
+                .contains("kimi-k3 clipped to 200000 (real 400000);"),
+            "{before:?}"
         );
     }
 
@@ -728,10 +827,11 @@ context-window = {window}
     #[test]
     fn an_adopted_declaration_is_not_flagged_as_a_deprecated_key() {
         let mut config = config(&scaled_provider(1_048_576));
-        config.adopt_client_window(EnvSetting::Settings(258_400));
+        config.adopt_client_window(EnvSetting::Settings(258_400), false);
         let check = check(
             &config,
             EnvSetting::Settings(258_400),
+            Undeclared::default(),
             &Compaction::default(),
         )
         .unwrap();
@@ -766,6 +866,7 @@ context-window = {window}
         let check = super::check(
             &pinned,
             EnvSetting::Environment(250_000),
+            Undeclared::default(),
             &Compaction::default(),
         )
         .unwrap();

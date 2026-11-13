@@ -679,7 +679,7 @@ display-name = "GLM-5.2"
                 &BTreeMap::from([(cache_key("openrouter", "moonshotai/kimi-k3"), window(real))]),
             );
             let mut config = scaling();
-            config.adopt_client_window(crate::client_window::EnvSetting::Settings(declared));
+            config.adopt_client_window(crate::client_window::EnvSetting::Settings(declared), false);
             apply_cached_windows(&mut config, &dirs).unwrap();
             config
         };

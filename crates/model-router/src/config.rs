@@ -14,7 +14,7 @@ use anyhow::{Context, ensure};
 use serde::Deserialize;
 use serde_inline_default::serde_inline_default;
 
-use crate::client_window::{EnvSetting, UsageScale, client_context_window};
+use crate::client_window::{EnvSetting, Undeclared, UsageScale, client_context_window};
 
 mod catalog;
 
@@ -308,6 +308,11 @@ pub struct Config {
     /// rather than the config file, so doctor doesn't flag it as deprecated.
     #[serde(skip)]
     pub declared_adopted: bool,
+    /// What sizes routed models when no declaration is in force, as the
+    /// service can tell ([`Config::adopt_client_window`]): the 1M opt-out,
+    /// but never a Claude Code version, so doctor scales as the service does.
+    #[serde(skip)]
+    pub undeclared_window: Undeclared,
 
     /// Routes the router generates rather than reads: the built-in Grok and
     /// Muse families when enabled, one per `[[openai-providers]]` model
@@ -722,11 +727,11 @@ impl ModelRoute {
     /// The scale this route's reported usage needs, if any: `None` when
     /// scaling is off, the real window is unknown, or it is not larger than
     /// the client's (an identity scale is a no-op, and scaling up is unsound).
-    fn scale_for(&self, declared: Option<u64>) -> Option<UsageScale> {
+    fn scale_for(&self, declared: Option<u64>, undeclared: Undeclared) -> Option<UsageScale> {
         let actual = self
             .context_window
             .filter(|_| self.context_window_scaling)?;
-        let client = client_context_window(declared);
+        let client = client_context_window(declared, undeclared);
         if actual <= client {
             return None;
         }
@@ -1059,14 +1064,21 @@ impl Config {
 
     /// Takes the context window Claude Code was configured with (`client`,
     /// from its environment or settings) as `declared-context-window` unless
-    /// the config states one, and rescales the routes for it. An explicit
-    /// value wins: it is the escape hatch for a project-level settings
-    /// override, which a service started outside the project cannot see.
-    pub(crate) fn adopt_client_window(&mut self, client: EnvSetting) {
+    /// the config states one, and rescales the routes for it. With neither,
+    /// they are scaled for Claude Code's own default as of the newest version
+    /// (the service runs under none), or 200K when `opted_out_of_1m`. An
+    /// explicit value wins: it is the escape hatch for a project-level
+    /// settings override, which a service started outside the project cannot
+    /// see.
+    pub(crate) fn adopt_client_window(&mut self, client: EnvSetting, opted_out_of_1m: bool) {
         if self.declared_context_window.is_none() {
             self.declared_context_window = client.value();
             self.declared_adopted = self.declared_context_window.is_some();
         }
+        self.undeclared_window = Undeclared {
+            version: None,
+            opted_out: opted_out_of_1m,
+        };
         self.compute_usage_scales();
     }
 
@@ -1075,22 +1087,23 @@ impl Config {
     /// files).
     pub fn read_client_window(&mut self, home: Option<&Path>, project: &Path) {
         let settings = crate::claude_settings::settings_by_precedence(home, project);
-        self.adopt_client_window(crate::client_window::resolve(
-            &crate::client_window::WindowEnv::read(),
-            &settings,
-        ));
+        let env = crate::client_window::WindowEnv::read();
+        self.adopt_client_window(
+            crate::client_window::resolve(&env, &settings),
+            crate::client_window::undeclared(&env, &settings).opted_out,
+        );
     }
 
     /// Resolves every route's usage scale.
     fn compute_usage_scales(&mut self) {
-        let declared = self.declared_context_window;
+        let (declared, undeclared) = (self.declared_context_window, self.undeclared_window);
         for route in self
             .models
             .iter_mut()
             .chain(self.generated_models.iter_mut())
             .chain(self.opt_in_models.iter_mut())
         {
-            route.usage_scale = route.scale_for(declared);
+            route.usage_scale = route.scale_for(declared, undeclared);
         }
     }
 
@@ -1098,7 +1111,7 @@ impl Config {
     /// unscaled. Never an error: a declaration raised to a route's window or
     /// past it (setup's 1M) with the key left behind must still serve.
     pub fn warn_unscaled_routes(&self) {
-        let client = client_context_window(self.declared_context_window);
+        let client = client_context_window(self.declared_context_window, self.undeclared_window);
         for route in self
             .effective_models()
             .filter(|route| route.context_window_scaling && route.usage_scale.is_none())
@@ -2550,7 +2563,7 @@ mod tests {
         };
 
         let mut config = parse_and_prepare(&source);
-        config.adopt_client_window(EnvSetting::Settings(500_000));
+        config.adopt_client_window(EnvSetting::Settings(500_000), false);
         assert_eq!(config.declared_context_window, Some(500_000));
         assert_eq!(scaled(&config), 500_000);
         // Re-preparing (discovery does) keeps the adopted declaration.
@@ -2559,19 +2572,22 @@ mod tests {
 
         // A raised declaration the route's window does not exceed: unscaled.
         let mut config = parse_and_prepare(&source);
-        config.adopt_client_window(EnvSetting::Environment(1_000_000));
+        config.adopt_client_window(EnvSetting::Environment(1_000_000), false);
         assert!(route(&config, "kimi-k3").usage_scale.is_none());
 
-        // Nothing resolved: Claude Code's own default.
-        let mut config = parse_and_prepare(&source);
-        config.adopt_client_window(EnvSetting::Unresolved);
-        assert_eq!(
-            scaled(&config),
-            crate::client_window::UNDECLARED_CONTEXT_WINDOW
-        );
+        // Nothing resolved: Claude Code's own default, 1M (so unscaled here),
+        // or 200K under its opt-out. It stays through a re-prepare.
+        let undeclared = |opted_out| {
+            let mut config = parse_and_prepare(&source);
+            config.adopt_client_window(EnvSetting::Unresolved, opted_out);
+            config.prepare().unwrap();
+            config
+        };
+        assert!(route(&undeclared(false), "kimi-k3").usage_scale.is_none());
+        assert_eq!(scaled(&undeclared(true)), 200_000);
 
         let mut config = parse_and_prepare(&scaled_kimi(1_000_000));
-        config.adopt_client_window(EnvSetting::Settings(500_000));
+        config.adopt_client_window(EnvSetting::Settings(500_000), false);
         assert_eq!(scaled(&config), CODEX_DEFAULT_CONTEXT_WINDOW);
     }
 

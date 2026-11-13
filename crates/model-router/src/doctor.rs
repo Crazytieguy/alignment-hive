@@ -45,6 +45,7 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
     let project = std::env::current_dir().unwrap_or_default();
     let settings = crate::claude_settings::settings_by_precedence(home.as_deref(), &project);
     let declared = crate::client_window::resolve(env, &settings);
+    let undeclared = crate::client_window::undeclared(env, &settings);
 
     // Auth-file permissions are a property of the state directory alone, so
     // this runs before — and independently of — the config load, the
@@ -272,7 +273,7 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         checks.extend(context_window_checks(
             config,
             dirs,
-            declared,
+            (declared, undeclared),
             &crate::client_window::resolve_compaction(env, home.as_deref(), &settings),
             home.as_deref()
                 .map(|home| (env, home, project.as_path(), settings.as_slice())),
@@ -416,7 +417,7 @@ fn context_declaration_check(
 }
 
 /// The `context-windows` check as doctor runs it: the routes are scaled for
-/// `declared` and the windows the service discovered at its last start are
+/// `declared` (and what sizes them without a declaration) and the windows the service discovered at its last start are
 /// applied (the config on disk carries neither), then checked against Claude
 /// Code's settings. Failing to re-prepare the config with the cached windows
 /// is reported in the check's place. With `next` (the window env, home,
@@ -426,7 +427,10 @@ fn context_declaration_check(
 fn context_window_checks(
     mut config: Config,
     dirs: &Dirs,
-    declared: crate::client_window::EnvSetting,
+    (declared, undeclared): (
+        crate::client_window::EnvSetting,
+        crate::client_window::Undeclared,
+    ),
     compaction: &crate::client_window::Compaction,
     next: Option<(
         &crate::client_window::WindowEnv,
@@ -435,7 +439,7 @@ fn context_window_checks(
         &crate::claude_settings::Settings,
     )>,
 ) -> Vec<Check> {
-    config.adopt_client_window(declared);
+    config.adopt_client_window(declared, undeclared.opted_out);
     if let Err(error) = crate::discovery::apply_cached_windows(&mut config, dirs) {
         return vec![Check {
             warn: false,
@@ -444,7 +448,7 @@ fn context_window_checks(
             detail: format!("applying the discovered context windows failed: {error:#}"),
         }];
     }
-    let mut check = crate::context_check::check(&config, declared, compaction);
+    let mut check = crate::context_check::check(&config, declared, undeclared, compaction);
     if let (Some(check), Some((env, home, project, settings))) = (&mut check, next)
         && let Some(note) =
             crate::settings_edit::windows_note(env, home, project, settings, &config)
@@ -2582,7 +2586,10 @@ display-name = "Kimi K3"
             let checks = context_window_checks(
                 load(),
                 &dirs,
-                crate::client_window::EnvSetting::Settings(1_000_000),
+                (
+                    crate::client_window::EnvSetting::Settings(1_000_000),
+                    crate::client_window::Undeclared::default(),
+                ),
                 &compaction,
                 None,
             );

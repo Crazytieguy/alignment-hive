@@ -15,8 +15,9 @@ use crate::claude_settings::{
     winning_setting,
 };
 use crate::client_window::{
-    Compaction, ENV_VAR, EnvSetting, MAX_COMPACT_WINDOW, MIN_COMPACT_WINDOW, WindowEnv,
-    client_context_window, next_compaction, next_session, resolve_compaction,
+    Compaction, ENV_VAR, EnvSetting, LEGACY_UNDECLARED_WINDOW, MAX_COMPACT_WINDOW,
+    MIN_COMPACT_WINDOW, WindowEnv, next_compaction, next_session, next_undeclared,
+    resolve_compaction,
 };
 use crate::config::{
     Config, ModelRoute, SHIPPED_GPT_ROUTES, fast_twin_id, is_built_in_route, is_retired_gpt_route,
@@ -561,7 +562,7 @@ fn plan_windows(
             .to_path_buf(),
     };
     let declared = next_session(env, settings, settings);
-    let raise = client_context_window(declared.value()) < SETUP_DECLARATION;
+    let raise = below_setup(declared);
     let legacy_config = legacy_sizing(config, &resolve_compaction(env, Some(home), settings));
     let legacy = raise || legacy_config.is_some();
     let blocked = |reason: String| WindowsPlan::Blocked { legacy, reason };
@@ -594,7 +595,9 @@ fn plan_windows(
     }
     // A route the migration can give no window must not compact later than
     // it does now, here and from the edited file down: raising the
-    // declaration moves it to its cap, or to 1M with none (or `"auto"`).
+    // declaration moves it to its cap, or to 1M with none (or `"auto"`). An
+    // unset declaration counts at the smallest window it gives (see
+    // `below_setup`).
     let views = [
         (
             next_compaction(env, Some(home), settings, settings),
@@ -607,7 +610,7 @@ fn plan_windows(
         let rises = |(compaction, before): &(Compaction, EnvSetting)| {
             compaction
                 .cap(id)
-                .is_none_or(|cap| cap > client_context_window(before.value()))
+                .is_none_or(|cap| cap > before.value().unwrap_or(LEGACY_UNDECLARED_WINDOW))
         };
         recommended_entry(route).is_none()
             && (!views[1].0.is_configured(id) || raise && views.iter().any(rises))
@@ -737,7 +740,7 @@ fn doctor_after(
     config: &Config,
 ) -> Option<String> {
     let declared = next_session(env, current, after);
-    if raise && client_context_window(declared.value()) < SETUP_DECLARATION {
+    if raise && below_setup(declared) {
         let (file, _) = winning_setting(after, &["env", ENV_VAR])?;
         return Some(format!(
             "{} sets {ENV_VAR} over the edited file",
@@ -745,7 +748,8 @@ fn doctor_after(
         ));
     }
     let compaction = next_compaction(env, Some(home), current, after);
-    let check = context_check::check(config, declared, &compaction)?;
+    let undeclared = next_undeclared(env, current, after);
+    let check = context_check::check(config, declared, undeclared, &compaction)?;
     (!check.ok || check.warn).then(|| {
         format!(
             "with every route at its recommended window, doctor's context-windows check would \
@@ -754,6 +758,16 @@ fn doctor_after(
             check.detail
         )
     })
+}
+
+/// Whether `declared` leaves routes short of [`SETUP_DECLARATION`] on some
+/// Claude Code. Setup declares it outright: an undeclared route gets 1M only
+/// from Claude Code 2.1.323 on, and never under its 1M opt-out, and the
+/// desktop app may bundle an older Claude Code than the terminal runs.
+fn below_setup(declared: EnvSetting) -> bool {
+    declared
+        .value()
+        .is_none_or(|value| value < SETUP_DECLARATION)
 }
 
 /// `doc` with [`ENV_VAR`] raised to [`SETUP_DECLARATION`] (when `raise`) and
