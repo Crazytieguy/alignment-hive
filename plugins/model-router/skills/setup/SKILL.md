@@ -180,6 +180,10 @@ here works until the binary resolves.
    HTTPS-proxy wiring, also offer `claude remote-control` as a check.
    Picker rows: `/model` in a fresh interactive session lists them after
    the Claude models.
+   The desktop app's model menu lists only Claude models; there, typing
+   `/model <routing-id>` in the message box picks a route. Tell the user
+   when `$CLAUDE_CODE_ENTRYPOINT` is `claude-desktop` (this session runs in
+   the desktop app).
 7. Ask whether the user also wants (a) open-weights models (Kimi, GLM, ...)
    served through an OpenAI-compatible host they have an API key for — if
    yes, read `references/open-weights.md` and follow it; (b) Grok models

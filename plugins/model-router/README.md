@@ -98,6 +98,9 @@ Claude Code reaches the gateway one of two ways:
   refuses to start under it, and the desktop app ignores it. Earlier
   installs keep working on it; setup moves them to the proxy when you ask.
 
+The desktop app's model menu lists only Claude models; type
+`/model gpt-6.1-sol` (or another routing ID) in its message box instead.
+
 ## Compliance
 
 Both sides ride supported paths. The Claude side is a standard gateway
