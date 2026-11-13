@@ -63,20 +63,22 @@ present themselves as Claude.
 Run `/model-router:setup` and follow along; it also covers repair and
 uninstall. `model-router doctor` diagnoses the whole stack in one shot.
 
-Claude Code reaches the gateway one of two ways:
+Setup makes the gateway Claude Code's HTTPS proxy. Claude Code still talks
+to `api.anthropic.com`, so Remote Control keeps working and sessions in the
+Claude desktop app go through the gateway too. The gateway decrypts only
+Claude Code's own `api.anthropic.com` traffic, with a local certificate
+authority restricted to that host (on macOS, setup adds it to your login
+keychain, which may ask for your password); everything else passes through
+undecrypted. While the gateway is down, Claude Code and the programs it
+runs have no network, until the service restarts it or you pick Bypass
+router in the notice model-router shows (at the next start or `/clear`)
+and restart Claude Code. This wiring is untested on Linux and WSL.
 
-- **As its HTTPS proxy** (recommended). Claude Code still talks to
-  `api.anthropic.com`, so Remote Control keeps working and sessions in the
-  Claude desktop app route too. The gateway decrypts only Claude Code's own
-  `api.anthropic.com` traffic, with a local certificate authority that is
-  restricted to that one host (on macOS, setup adds it to your login
-  keychain, which asks for your password); every other connection,
-  including your tools' own Anthropic calls, passes through untouched.
-  While the gateway is down, Claude Code and the tools it runs have no
-  network until it restarts or you bypass it. Untested on Linux and WSL.
-- **As its `ANTHROPIC_BASE_URL`**, the original wiring. Remote Control
-  refuses to start under it, and the desktop app ignores it. Earlier
-  installs keep working on it; setup moves them to the proxy when you ask.
+Earlier installs wired through `ANTHROPIC_BASE_URL` keep working, though
+Remote Control refuses to start under it and desktop-app sessions don't go
+through the gateway; `/model-router:setup` moves them to the proxy if you
+want. Setup also falls back to the base URL when you keep a proxy or
+certificate setting of your own that conflicts with the proxy wiring.
 
 The desktop app's model menu lists only Claude models; type
 `/model gpt-6.2-sol` (or another routing ID) in its message box instead.
