@@ -17,6 +17,8 @@ const EXPIRY_MARGIN_S = 60;
 // How long a caller waits for the detached refresh before giving up on it (the refresh itself
 // carries on and lands on disk for the next caller).
 const REFRESH_WAIT_MS = 30_000;
+/** `hive auth-refresh`'s exit code for a login only `hive login` can restore. */
+export const NEEDS_LOGIN_EXIT = 3;
 // Per-request cap, so that a replay of an ambiguous exchange still lands inside the 30-second
 // window in which WorkOS returns the same rotated pair.
 const WORKOS_TIMEOUT_MS = 10_000;
@@ -64,7 +66,14 @@ function isTokenExpired(token: string): boolean {
   return payload.exp - EXPIRY_MARGIN_S <= Math.floor(Date.now() / 1000);
 }
 
-/** Auth data from disk. Returns null if no auth file. Throws on corrupt data. */
+/**
+ * The login on disk can no longer be used, and only `hive login` restores it: WorkOS turned the
+ * refresh token down, or the auth file is unreadable. Every other auth failure (offline, a timeout,
+ * a WorkOS outage) is a plain Error and says nothing about the login.
+ */
+export class NeedsLoginError extends Error {}
+
+/** Auth data from disk. Returns null if no auth file. Throws NeedsLoginError on corrupt data. */
 async function readAuthData(): Promise<AuthData | null> {
   const file = Bun.file(getAuthFile());
   if (!(await file.exists())) return null;
@@ -72,11 +81,11 @@ async function readAuthData(): Promise<AuthData | null> {
   try {
     data = await file.json();
   } catch {
-    throw new Error(errors.authSchemaError('invalid JSON'));
+    throw new NeedsLoginError(errors.authSchemaError('invalid JSON'));
   }
   const parsed = AuthDataSchema.safeParse(data);
   if (!parsed.success) {
-    throw new Error(errors.authSchemaError(parsed.error.message));
+    throw new NeedsLoginError(errors.authSchemaError(parsed.error.message));
   }
   return parsed.data;
 }
@@ -90,17 +99,27 @@ export async function saveAuthData(data: AuthData): Promise<void> {
   await rename(tmp, file);
 }
 
-/** WorkOS answered and turned the exchange down; anything else leaves its outcome unknown. */
-class RefreshRejected extends Error {}
-
+/**
+ * One refresh-token exchange. A NeedsLoginError means WorkOS answered and turned the token down;
+ * anything else (no network, a timeout, a 5xx, a 408 or 429, a reply that is not WorkOS JSON) leaves
+ * the outcome unknown and the login possibly fine.
+ */
 async function refreshToken(authData: AuthData): Promise<AuthData> {
-  const { ok, status, data } = await postWorkos('/authenticate', {
-    grant_type: 'refresh_token',
-    refresh_token: authData.refresh_token,
-    client_id: getClientId(),
-  });
-  if (status >= 400 && status < 500) throw new RefreshRejected(errors.refreshFailed(status));
-  if (!ok) throw new Error(errors.refreshFailed(status));
+  let reply: Awaited<ReturnType<typeof postWorkos>>;
+  try {
+    reply = await postWorkos('/authenticate', {
+      grant_type: 'refresh_token',
+      refresh_token: authData.refresh_token,
+      client_id: getClientId(),
+    });
+  } catch (error) {
+    throw new Error(errors.refreshUnreachable(error instanceof Error ? error.message : String(error)));
+  }
+  const { ok, status, data } = reply;
+  if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+    throw new NeedsLoginError(errors.refreshFailed(status));
+  }
+  if (!ok) throw new Error(errors.refreshServerError(status));
   const parsed = AuthDataSchema.safeParse(data);
   if (!parsed.success) throw new Error(errors.unexpectedResponse);
   return parsed.data;
@@ -139,7 +158,7 @@ export async function refreshAuthFile(): Promise<AuthData | null> {
       } else {
         // WorkOS may have rotated the token and lost the reply; for 30 seconds a replay returns
         // the same pair, and without it the token on disk is dead for good.
-        if (replayed || refreshError instanceof RefreshRejected) throw refreshError;
+        if (replayed || refreshError instanceof NeedsLoginError) throw refreshError;
         replayed = true;
       }
     }
@@ -153,7 +172,8 @@ let inflightRefresh: Promise<AuthData> | null = null;
  * in another process takes effect at once (the review server runs for hours); a refresh is
  * shared between concurrent callers and delegated to a detached `hive auth-refresh` so that
  * killing this process cannot strand the single-use refresh token (see `refreshAuthFile`).
- * Returns null if not logged in. Throws if the refresh fails.
+ * Returns null if not logged in. Throws NeedsLoginError when only `hive login` can help, and a
+ * plain Error when the refresh could not complete (offline, WorkOS down): the login may be fine.
  */
 export async function getAuthData(): Promise<AuthData | null> {
   const authData = await readAuthData();
@@ -166,32 +186,33 @@ export async function getAuthData(): Promise<AuthData | null> {
 }
 
 async function refreshDetached(): Promise<AuthData> {
-  const failure = await runAuthRefresh();
+  const { message, needsLogin } = await runAuthRefresh();
   // Whatever the child reported, the file is the truth: another process may have refreshed it.
   const current = await readAuthData();
   if (current && !isTokenExpired(current.access_token)) return current;
-  throw new Error(failure || errors.refreshIncomplete);
+  if (needsLogin) throw new NeedsLoginError(message || errors.refreshIncomplete);
+  throw new Error(message || errors.refreshIncomplete);
 }
 
-/** Run `hive auth-refresh` detached and wait for it. Resolves to its failure message, if any. */
-function runAuthRefresh(): Promise<string> {
+/** Run `hive auth-refresh` detached and wait for it: its failure message, if any, and its kind. */
+function runAuthRefresh(): Promise<{ message: string; needsLogin: boolean }> {
   const child = spawnDetached(['auth-refresh'], ['ignore', 'pipe', 'ignore']);
-  if (!child) return Promise.resolve(errors.refreshIncomplete);
+  if (!child) return Promise.resolve({ message: errors.refreshIncomplete, needsLogin: false });
   return new Promise((resolve) => {
     let output = '';
     let done = false;
-    const finish = (message: string) => {
+    const finish = (message: string, needsLogin = false) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       child.unref();
       child.stdout?.destroy();
-      resolve(message);
+      resolve({ message, needsLogin });
     };
     child.stdout?.on('data', (chunk: Buffer | string) => {
       output += chunk.toString();
     });
-    child.on('exit', () => finish(output.trim()));
+    child.on('exit', (code) => finish(output.trim(), code === NEEDS_LOGIN_EXIT));
     child.on('error', () => finish(errors.refreshIncomplete));
     const timer = setTimeout(() => finish(errors.refreshIncomplete), REFRESH_WAIT_MS);
   });

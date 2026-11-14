@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { getAuthData } from '../lib/auth';
+import { NeedsLoginError, getAuthData } from '../lib/auth';
 import {
   getProjectIdentifiers,
   getStateDir,
@@ -13,10 +13,19 @@ import { hive } from '../lib/messages';
 
 /**
  * `hive consent status`: consent state as plain lines, which /hive:align and the manage-data-sharing
- * skill read. Being logged out, or a failed consent fetch, is a line of output and exit 0.
+ * skill read. Being logged out, or a failed consent fetch, is a line of output and exit 0; an
+ * expired login is an error that says to log in again.
  */
 export async function consentStatus(): Promise<number> {
-  const authData = await getAuthData();
+  let authData;
+  try {
+    authData = await getAuthData();
+  } catch (error) {
+    if (error instanceof NeedsLoginError) throw error;
+    // The login could not be renewed (offline, WorkOS down): the same as a failed fetch.
+    console.log(hive.consent.statusFetchFailed);
+    return 0;
+  }
   if (!authData) {
     console.log(hive.consent.statusNotAuthenticated);
     return 0;

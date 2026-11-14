@@ -86,9 +86,44 @@ test('an expired token is refreshed by a detached child and the result read back
 test('a refresh the server rejects surfaces the child failure and leaves the file alone', async () => {
   await writeAuth('dead', nowS() - 10);
   workosReply = () => Response.json({ error: 'invalid_grant' }, { status: 400 });
-  const { getAuthData } = await import('../lib/auth');
-  await expect(getAuthData()).rejects.toThrow('Token refresh failed (400)');
+  const { NeedsLoginError, getAuthData } = await import('../lib/auth');
+  const error = await getAuthData().catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(NeedsLoginError);
+  expect((error as Error).message).toContain('turned down your saved hive login (HTTP 400)');
   expect(await readRefreshToken()).toBe('dead');
+});
+
+// Offline, a WorkOS outage or a rate limit says nothing about the login: callers must not report it
+// as expired (the band's "login expired" row, `hive login --status`).
+const transientFailures: Array<[string, (() => Response) | null]> = [
+  ['an unreachable server', null],
+  ['a 503', () => new Response('unavailable', { status: 503 })],
+  ['a 429', () => Response.json({ error: 'rate_limited' }, { status: 429 })],
+];
+for (const [name, reply] of transientFailures) {
+  test(`a refresh that fails on ${name} is not a lost login`, async () => {
+    await writeAuth('alive', nowS() - 10);
+    const savedUrl = process.env.ALIGNMENT_HIVE_WORKOS_URL;
+    if (reply) workosReply = reply;
+    // The child reads the URL from its environment; port 9 on loopback refuses the connection.
+    else process.env.ALIGNMENT_HIVE_WORKOS_URL = 'http://127.0.0.1:9';
+    try {
+      const { NeedsLoginError, getAuthData } = await import('../lib/auth');
+      const error = await getAuthData().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(NeedsLoginError);
+      expect((error as Error).message).toContain('Your saved login is kept');
+      expect(await readRefreshToken()).toBe('alive');
+    } finally {
+      process.env.ALIGNMENT_HIVE_WORKOS_URL = savedUrl;
+    }
+  });
+}
+
+test('a corrupt auth file needs a new login', async () => {
+  await writeFile(authFile, '{not json');
+  const { NeedsLoginError, getAuthData } = await import('../lib/auth');
+  await expect(getAuthData()).rejects.toBeInstanceOf(NeedsLoginError);
 });
 
 test('a refresh that finishes after another login does not overwrite that login', async () => {
@@ -155,7 +190,7 @@ test('a rejection from WorkOS is not replayed', async () => {
   }) as unknown as typeof fetch;
   try {
     const { refreshAuthFile } = await import('../lib/auth');
-    await expect(refreshAuthFile()).rejects.toThrow('Token refresh failed (400)');
+    await expect(refreshAuthFile()).rejects.toThrow('turned down your saved hive login (HTTP 400)');
     expect(calls).toBe(1);
     expect(await readRefreshToken()).toBe('dead');
   } finally {

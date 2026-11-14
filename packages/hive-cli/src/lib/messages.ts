@@ -204,9 +204,15 @@ export const reviewRoundMessages = {
 };
 
 export const errors = {
-  authSchemaError: (error: string): string => `Auth data schema error: ${error}`,
-  refreshFailed: (status: number): string => `Token refresh failed (${status}). Run \`hive login\` to re-login.`,
-  refreshIncomplete: 'Token refresh did not complete. Run `hive login` to re-login.',
+  authSchemaError: (error: string): string =>
+    `Your saved hive login can't be read (${error}). Run \`hive login\` to log in again.`,
+  refreshFailed: (status: number): string =>
+    `The login server turned down your saved hive login (HTTP ${status}). Run \`hive login\` to log in again.`,
+  refreshUnreachable: (detail: string): string =>
+    `Couldn't reach the login server to renew your hive login (${detail}). Your saved login is kept: try again once you're back online.`,
+  refreshServerError: (status: number): string =>
+    `The login server couldn't renew your hive login just now (HTTP ${status}). Your saved login is kept: try again in a few minutes.`,
+  refreshIncomplete: 'Renewing your hive login timed out. Your saved login is kept: try again shortly.',
   sessionNotFound: (prefix: string): string => `No session matching "${prefix}"`,
   multipleSessions: (prefix: string): string => `Multiple sessions match "${prefix}":`,
   andMore: (count: number): string => `  ... and ${count} more`,
@@ -221,6 +227,7 @@ export const setup = {
   header: 'Join the alignment-hive shared knowledge base',
   alreadyLoggedIn: "You're already connected.",
   confirmRelogin: 'Do you want to reconnect?',
+  confirmReloginAnyway: 'Start a new login anyway? Usually not needed.',
   starting: 'Starting authentication...',
   deviceAuth: (url: string, code: string): string => {
     return ['Open this URL in your browser:', '', `  ${url}`, '', 'Confirm this code matches:', '', `  ${code}`].join(
@@ -240,6 +247,8 @@ export const setup = {
   unexpectedAuthResponse: 'Unexpected response from authentication server',
   loginStatusYes: (displayName: string): string => `logged in: yes (${displayName})`,
   loginStatusNo: 'logged in: no',
+  loginStatusExpired: 'logged in: no (login expired; run `hive login`)',
+  loginStatusUnknown: 'logged in: unknown',
 };
 
 export const locatorErrors = {

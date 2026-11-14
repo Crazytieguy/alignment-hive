@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
-import { AuthDataSchema, getAuthData, postWorkos, saveAuthData } from '../lib/auth';
+import { AuthDataSchema, NeedsLoginError, getAuthData, postWorkos, saveAuthData } from '../lib/auth';
 import { openBrowser } from '../lib/browser';
 import { getClientId } from '../lib/config';
 import { setup as msg } from '../lib/messages';
@@ -36,17 +36,27 @@ async function confirm(message: string, defaultYes = false): Promise<boolean> {
   });
 }
 
-async function checkExistingAuth(): Promise<boolean> {
+/**
+ * Whether to start a new login: `login` when there is none or it can no longer be refreshed,
+ * `keep` when the person keeps the current one, `failed` when it could not be checked and the
+ * person does not log in anyway.
+ */
+async function checkExistingAuth(): Promise<'login' | 'keep' | 'failed'> {
   try {
     const authData = await getAuthData();
     if (authData) {
       printWarning(msg.alreadyLoggedIn);
-      return await confirm(msg.confirmRelogin);
+      return (await confirm(msg.confirmRelogin)) ? 'login' : 'keep';
     }
-  } catch {
-    // Token expired and refresh failed — proceed to login
+  } catch (error) {
+    if (!(error instanceof NeedsLoginError)) {
+      // The login could not be renewed (offline, WorkOS down) but may well be fine, so a new
+      // login is the person's call rather than the default.
+      printWarning(error instanceof Error ? error.message : String(error));
+      return (await confirm(msg.confirmReloginAnyway)) ? 'login' : 'failed';
+    }
   }
-  return true;
+  return 'login';
 }
 
 async function deviceAuthFlow(): Promise<number> {
@@ -137,8 +147,12 @@ async function showStatus(): Promise<number> {
     } else {
       console.log(msg.loginStatusNo);
     }
-  } catch {
-    console.log(msg.loginStatusNo);
+  } catch (error) {
+    if (error instanceof NeedsLoginError) console.log(msg.loginStatusExpired);
+    else {
+      console.log(msg.loginStatusUnknown);
+      console.log(error instanceof Error ? error.message : String(error));
+    }
   }
   return 0;
 }
@@ -155,9 +169,8 @@ export async function login(args: Array<string>): Promise<number> {
   printInfo(msg.header);
   console.log('');
 
-  if (!(await checkExistingAuth())) {
-    return 0;
-  }
+  const existing = await checkExistingAuth();
+  if (existing !== 'login') return existing === 'keep' ? 0 : 1;
 
   return await deviceAuthFlow();
 }

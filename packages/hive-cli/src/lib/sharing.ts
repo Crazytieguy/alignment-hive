@@ -4,7 +4,7 @@
 
 import { rm, writeFile } from 'node:fs/promises';
 import { canExclude, isPreUploadState } from '@alignment-hive/session-data';
-import { getAuthData } from './auth';
+import { NeedsLoginError, getAuthData } from './auth';
 import { isSharingDisabledLocally, loadTranscriptsDirs, readStateFile, readTimestamp, statePaths } from './config';
 import { resolveProjectConsent } from './convex';
 import { computeSessionStatus, hasIncompleteUpload, withDiscoveryCache } from './session-state';
@@ -91,8 +91,8 @@ type SessionState = Awaited<ReturnType<typeof loadSessionStateWithMigrations>>;
 
 /**
  * The project's sessions with what their sharing status is computed from, or why there is none:
- * `off` (sharing disabled locally, not logged in, no consent, unreachable backend, no
- * transcripts) or `login-expired` (a login that can no longer be refreshed, which every other
+ * `off` (sharing disabled locally, not logged in, no consent, unreachable backend or login server,
+ * no transcripts) or `login-expired` (a login that can no longer be refreshed, which every other
  * path fails silently on). The one gate session start, `upload status` and `notices` share.
  */
 export type SharingSnapshot =
@@ -110,8 +110,9 @@ export async function loadSharingSnapshot(stateDir: string, cwd: string, onlySes
   try {
     // Not logged in: /hive:align owns the setup flow.
     if (!(await getAuthData())) return { kind: 'off' };
-  } catch {
-    return { kind: 'login-expired' };
+  } catch (error) {
+    // Offline or WorkOS down: the login is likely fine, and the next call will say.
+    return error instanceof NeedsLoginError ? { kind: 'login-expired' } : { kind: 'off' };
   }
 
   let consent: Awaited<ReturnType<typeof resolveProjectConsent>>;

@@ -26,9 +26,13 @@ mockForFile('../lib/convex', realConvex, {
   getConsentHistory: () => Promise.resolve(history),
 });
 let isLoginExpired = false;
+let isLoginServerDown = false;
 mockForFile('../lib/auth', realAuth, {
-  getAuthData: () =>
-    isLoginExpired ? Promise.reject(new Error('refresh failed')) : Promise.resolve({ accessToken: 'test' }),
+  getAuthData: () => {
+    if (isLoginExpired) return Promise.reject(new realAuth.NeedsLoginError('refresh failed'));
+    if (isLoginServerDown) return Promise.reject(new Error('unable to connect'));
+    return Promise.resolve({ accessToken: 'test' });
+  },
 });
 const realGetSnoozeUntil = realSnooze.getSnoozeUntil;
 mockForFile('../lib/snooze', realSnooze, {
@@ -111,6 +115,7 @@ const SHARING = { global: [{ sessionSharing: true, timestamp: 1 }], project: [{ 
 describe('session start', () => {
   beforeEach(() => {
     isLoginExpired = false;
+    isLoginServerDown = false;
     isSpawnFailing = false;
     delete process.env.HIVE_PLUGIN_VERSION;
   });
@@ -231,6 +236,14 @@ describe('session start', () => {
     await printed(hiveSessionStart);
     expect(spawned.filter((args) => args[0] === 'upload')).toEqual([]);
     expect((await notices()).map((n) => n.id)).toEqual(['login-expired']);
+  });
+
+  test('a login that cannot be renewed while offline gets no row and schedules nothing', async () => {
+    history = SHARING;
+    isLoginServerDown = true;
+    await printed(hiveSessionStart);
+    expect(spawned.filter((args) => args[0] === 'upload')).toEqual([]);
+    expect(await notices()).toEqual([]);
   });
 
   test('notices says whether it knows the session, so the band asks again only when it does not', async () => {
