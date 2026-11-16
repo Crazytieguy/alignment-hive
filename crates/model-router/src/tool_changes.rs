@@ -8,7 +8,9 @@
 //! an MCP server connecting late — in the history instead of in `tools[]`: a
 //! `role: "system"` message carrying
 //! `{"type":"tool_addition","tool":{"type":"tool_definition","definition":{…}}}`,
-//! or a `tool_reference` naming a `defer_loading` entry of `tools[]`, and
+//! or a `tool_reference` naming a `defer_loading` entry of `tools[]` (which
+//! loads it: the fold drops its `defer_loading`, since from 8.0.59 the child
+//! leaves an unreferenced deferred tool out of the upstream `tools`), and
 //! `{"type":"tool_removal","tool":{"type":"tool_reference","name":…}}` to
 //! withdraw one. Every translator of the child (`CLIProxyAPI` 8.0.34 through
 //! 8.0.47) kept only a system message's text, so the model read "the tool is
@@ -203,6 +205,13 @@ impl<'a> Change<'a> {
             Self::Reference(name) => {
                 if let Some(slot) = slots.iter_mut().find(|slot| slot.name() == Some(name)) {
                     slot.active = true;
+                    // The reference is what loads a deferred tool, and the
+                    // fold removes it: since 8.0.59 the child leaves a
+                    // `defer_loading` entry out of `tools[]` unless something
+                    // in the request references it.
+                    if let Some(definition) = slot.definition.as_object_mut() {
+                        definition.remove("defer_loading");
+                    }
                 } else if !changes.unresolved.iter().any(|known| known == name) {
                     changes.unresolved.push(name.to_string());
                 }
@@ -443,8 +452,19 @@ mod tests {
             ],
         );
         let changes = hoist_tool_changes(&mut document).unwrap();
-        assert_eq!(document["tools"], json!([tool("Bash"), advisor]));
+        assert_eq!(document["tools"], json!([tool("Bash"), tool("advisor")]));
         assert!(changes.removed.is_empty() && changes.unresolved.is_empty());
+
+        // A reference loads the deferred tool; without one it stays deferred.
+        let mut document = request(
+            &[tool("Bash"), advisor.clone()],
+            &[system(&[reference("advisor")])],
+        );
+        hoist_tool_changes(&mut document).unwrap();
+        assert_eq!(document["tools"], json!([tool("Bash"), tool("advisor")]));
+        let mut document = request(&[tool("Bash"), advisor.clone()], &[user("a")]);
+        assert!(hoist_tool_changes(&mut document).is_none());
+        assert_eq!(document["tools"], json!([tool("Bash"), advisor]));
     }
 
     #[test]
