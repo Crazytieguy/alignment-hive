@@ -26,16 +26,19 @@
 //! - Every response reports `service_tier: "default"`, priority or not, so
 //!   whether the tier applied is never observable; latency is the only sign.
 //!
-//! `OpenAI` bills the tier at 2.5x the included subscription usage (2x
-//! purchased credits), and at about twice the per-token rate on an API key.
+//! `OpenAI` bills the tier at 2x the included subscription usage on the
+//! GPT-6.2 models and 2.5x on the earlier ones (2x purchased credits), and
+//! at about twice the per-token rate on an API key.
 //!
 //! An `-ultrafast` twin (managed mode) asks for `OpenAI`'s
-//! Ultrafast tier, which only GPT-6.1 Sol and GPT-6 Astra have and only
-//! some plans may use (Codex's speed page, 2026-11-01: Pro $500 and eligible
-//! Enterprise and Edu, at 8x the included usage, 6x credits; every API key,
-//! at API prices). "Up to 8x faster" than Standard is `OpenAI`'s claim for
-//! both models in Codex (the speed page for Astra, the 2026-10-08 rollout
-//! post for Sol); it is unmeasured here. The body cannot carry it: `CLIProxyAPI`'s Claude
+//! Ultrafast tier, served here for GPT-6.2 Sol and GPT-6.2 Astra, which
+//! only some plans may use (Codex's speed page, 2026-11-17: Pro $200 for
+//! Sol, Pro $500 for both, eligible Enterprise and Edu, at 6x the included
+//! usage, and 3x credits until 2027-02-28, then 6x; every API key, at API
+//! prices). "Up to 4.5x faster" than Standard is `OpenAI`'s claim for
+//! both; it is unmeasured here. GPT-6.1 Sol and GPT-6 Astra keep the tier
+//! at `OpenAI` (up to 8x faster for 8x the usage); their twins are
+//! retired, still served but no longer offered. The body cannot carry it: `CLIProxyAPI`'s Claude
 //! translator keeps only `priority` (`normalizeCodexServiceTier`, 8.0.44
 //! through 8.0.69). So the router sends the twin's turns with
 //! [`ULTRAFAST_RELAY_HEADER`] instead, and the managed child's payload rule

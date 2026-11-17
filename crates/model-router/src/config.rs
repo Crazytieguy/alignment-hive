@@ -21,10 +21,11 @@ mod catalog;
 #[cfg(test)]
 pub(crate) use catalog::GPT_CONTEXT_WINDOW;
 pub(crate) use catalog::{
-    CODEX_DEFAULT_CONTEXT_WINDOW, FAST, MUSE_WONDER_FULL, SHIPPED_GPT_ROUTES, ULTRAFAST,
-    ULTRAFAST_MODELS, codex_default_window, fast_twin_id, forces_text_on_compaction, has_fast_tier,
-    is_built_in_route, is_codex_native_model, is_muse_contributor_model, is_retired_gpt_route,
-    names_auto_model, names_muse_model, names_muse_wonder_full, overflow_dialect,
+    CODEX_DEFAULT_CONTEXT_WINDOW, FAST, MUSE_WONDER_FULL, RETIRED_FAST, RETIRED_TWIN_MODELS,
+    RETIRED_ULTRAFAST, SHIPPED_GPT_ROUTES, ULTRAFAST, ULTRAFAST_MODELS, codex_default_window,
+    codex_display_name, fast_twin_id, forces_text_on_compaction, has_fast_tier, is_built_in_route,
+    is_codex_native_model, is_muse_contributor_model, is_retired_gpt_route, names_auto_model,
+    names_muse_model, names_muse_wonder_full, overflow_dialect, retired_successor,
     shipped_picker_rows, superseded_codex_windows, twin_of,
 };
 use catalog::{
@@ -1295,11 +1296,11 @@ impl Config {
                 generated.push(twin);
             }
         }
-        let opt_in = if self.is_managed() {
-            ULTRAFAST.of(&self.models)
-        } else {
-            Vec::new()
-        };
+        let mut opt_in = RETIRED_FAST.of(&self.models);
+        if self.is_managed() {
+            opt_in.extend(ULTRAFAST.of(&self.models));
+            opt_in.extend(RETIRED_ULTRAFAST.of(&self.models));
+        }
         self.opt_in_models = opt_in
             .into_iter()
             .filter(|twin| !taken(&generated, twin))
@@ -3080,9 +3081,9 @@ mod tests {
         assert_eq!(
             twins(&config),
             [
-                "gpt-6.1-sol-fast",
+                "gpt-6.2-sol-fast",
+                "gpt-6.2-astra-fast",
                 "gpt-6.1-terra-fast",
-                "gpt-6-astra-fast",
                 "gpt-6-luna-fast"
             ]
         );
@@ -3100,9 +3101,22 @@ mod tests {
             );
             assert!(is_codex_native_model(model), "{model}");
         }
-        // Retired models list the tier too, but get no twin.
+        // Retired models list the tier too, but get no twin, unless theirs
+        // shipped: then it stays served, opt-in, outside every install's
+        // routes.
         for model in ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-luna"] {
             assert!(config.route(&format!("{model}-fast")).is_none(), "{model}");
+        }
+        for model in RETIRED_TWIN_MODELS {
+            let id = format!("{model}-fast");
+            assert!(
+                config.effective_models().all(|r| r.routing_id != id),
+                "{id}"
+            );
+            let twin = config.route(&id).expect("a retired twin stays served");
+            assert_eq!(twin.tier, ServiceTier::Priority, "{id}");
+            assert_eq!(twin.upstream_model, model, "{id}");
+            assert!(is_retired_gpt_route(&id), "{id}");
         }
     }
 
@@ -3110,21 +3124,21 @@ mod tests {
     fn hand_written_codex_routes_get_twins_and_no_other_family_does() {
         let config = parse_and_prepare(
             "[grok]\nenabled = true\n[muse]\nenabled = true\n\n\
-             [[models]]\nrouting-id = \"sol\"\nupstream-model = \"gpt-6.1-sol(high)\"\n\
+             [[models]]\nrouting-id = \"sol\"\nupstream-model = \"gpt-6.2-sol(high)\"\n\
              display-name = \"Sol\"\n\n\
-             [[models]]\nrouting-id = \"old\"\nupstream-model = \"gpt-6-sol\"\n\
+             [[models]]\nrouting-id = \"old\"\nupstream-model = \"gpt-6.1-sol\"\n\
              display-name = \"Old\"\n\n\
              [[models]]\nrouting-id = \"elsewhere\"\nupstream-model = \"m\"\n\
              display-name = \"M\"\n\n\
              [[models]]\nrouting-id = \"g\"\nupstream-model = \"grok-4.7\"\n\
              display-name = \"G\"\nfamily = \"grok\"\n\n\
              [[openai-providers]]\nname = \"p\"\nbase-url = \"https://example.test/v1\"\n\n\
-             [[openai-providers.models]]\nname = \"gpt-6.1-sol\"\nrouting-id = \"kimi\"\n\
+             [[openai-providers.models]]\nname = \"gpt-6.2-sol\"\nrouting-id = \"kimi\"\n\
              display-name = \"Kimi\"\n",
         );
         assert_eq!(twins(&config), ["sol-fast"]);
         let twin = route(&config, "sol-fast");
-        assert_eq!(twin.upstream_model, "gpt-6.1-sol(high)");
+        assert_eq!(twin.upstream_model, "gpt-6.2-sol(high)");
         assert_eq!(twin.display_name, "Sol");
     }
 
@@ -3190,7 +3204,17 @@ mod tests {
         for model in ["gpt-6-sol-fast", "sol-fast", "grok-4.7-fast", "gpt-6.1-sol"] {
             assert_eq!(FAST.base(model), None, "{model}");
         }
-        for model in ["gpt-6-sol", "gpt-6-sol-fast", "gpt-6-sol-fast(high)"] {
+        for model in [
+            "gpt-6-sol",
+            "gpt-6-sol-fast",
+            "gpt-6-sol-fast(high)",
+            "gpt-6.1-sol",
+            "gpt-6.1-sol-fast",
+            "gpt-6.1-sol-ultrafast(high)",
+            "gpt-6-astra",
+            "gpt-6-astra-fast(high)",
+            "gpt-6-astra-ultrafast",
+        ] {
             assert!(is_built_in_route(model), "{model}");
             assert!(is_retired_gpt_route(model), "{model}");
         }
@@ -3349,7 +3373,12 @@ mod tests {
         let config = parse_and_prepare("");
         assert_eq!(
             ultrafast(&config),
-            ["gpt-6.1-sol-ultrafast", "gpt-6-astra-ultrafast"]
+            [
+                "gpt-6.2-sol-ultrafast",
+                "gpt-6.2-astra-ultrafast",
+                "gpt-6.1-sol-ultrafast",
+                "gpt-6-astra-ultrafast"
+            ]
         );
         assert!(
             config
@@ -3368,31 +3397,34 @@ mod tests {
             );
         }
         let api_key = parse_and_prepare("[gpt]\nauth = \"api-key\"\n");
-        assert_eq!(ultrafast(&api_key).len(), 2);
+        assert_eq!(ultrafast(&api_key).len(), 4);
         // The tier reaches Codex through the managed child's config.
         let external = parse_and_prepare(EXTERNAL_UPSTREAM);
         assert_eq!(ultrafast(&external), [] as [&str; 0]);
-        assert!(external.route("gpt-6.1-sol-ultrafast").is_none());
+        assert!(external.route("gpt-6.2-sol-ultrafast").is_none());
     }
 
     #[test]
     fn ultrafast_twins_follow_hand_written_routes_and_yield_their_ids() {
         let config = parse_and_prepare(
-            "[[models]]\nrouting-id = \"sol\"\nupstream-model = \"gpt-6.1-sol(high)\"\n\
+            "[[models]]\nrouting-id = \"sol\"\nupstream-model = \"gpt-6.2-sol(high)\"\n\
              display-name = \"Sol\"\n\n\
              [[models]]\nrouting-id = \"terra\"\nupstream-model = \"gpt-6.1-terra\"\n\
              display-name = \"Terra\"\n\n\
-             [[models]]\nrouting-id = \"gpt-6-astra\"\nupstream-model = \"gpt-6-astra\"\n\
+             [[models]]\nrouting-id = \"gpt-6.2-astra\"\nupstream-model = \"gpt-6.2-astra\"\n\
              display-name = \"Astra\"\n\n\
-             [[models]]\nrouting-id = \"gpt-6-astra-ultrafast\"\nupstream-model = \"m\"\n\
+             [[models]]\nrouting-id = \"gpt-6.2-astra-ultrafast\"\nupstream-model = \"m\"\n\
              display-name = \"Mine\"\n",
         );
         assert_eq!(ultrafast(&config), ["sol-ultrafast"]);
         assert_eq!(
             route(&config, "sol-ultrafast").upstream_model,
-            "gpt-6.1-sol(high)"
+            "gpt-6.2-sol(high)"
         );
-        assert_eq!(route(&config, "gpt-6-astra-ultrafast").display_name, "Mine");
+        assert_eq!(
+            route(&config, "gpt-6.2-astra-ultrafast").display_name,
+            "Mine"
+        );
     }
 
     #[test]
@@ -3408,12 +3440,16 @@ mod tests {
         }
         for id in [
             "gpt-6.1-terra-ultrafast",
+            "gpt-6.1-sol-ultrafast",
+            "gpt-6-astra-ultrafast",
             "sol-ultrafast",
-            "gpt-6.1-sol-fast",
+            "gpt-6.2-sol-fast",
         ] {
             assert_eq!(ULTRAFAST.base(id), None, "{id}");
         }
         assert!(is_retired_gpt_route("gpt-6-sol-ultrafast"));
+        assert!(is_retired_gpt_route("gpt-6.1-sol-ultrafast"));
+        assert!(is_retired_gpt_route("gpt-6-astra-ultrafast"));
     }
 
     /// The routing IDs a prepared config serves, in order.
@@ -3428,22 +3464,22 @@ mod tests {
     fn model_overrides_change_only_the_fields_they_set() {
         let defaults = parse_and_prepare("");
         let config = parse_and_prepare(
-            "[[model-overrides]]\nrouting-id = \"gpt-6.1-sol\"\ndisplay-name = \"Sol\"\n",
+            "[[model-overrides]]\nrouting-id = \"gpt-6.2-sol\"\ndisplay-name = \"Sol\"\n",
         );
         assert!(!config.legacy_models_block);
         assert_eq!(route_ids(&config), route_ids(&defaults));
         assert_eq!(
-            route(&config, "gpt-6.1-sol"),
+            route(&config, "gpt-6.2-sol"),
             &ModelRoute {
                 display_name: "Sol".to_string(),
-                ..route(&defaults, "gpt-6.1-sol").clone()
+                ..route(&defaults, "gpt-6.2-sol").clone()
             }
         );
         // The -fast twin is built from the overridden route.
-        assert_eq!(route(&config, "gpt-6.1-sol-fast").display_name, "Sol");
+        assert_eq!(route(&config, "gpt-6.2-sol-fast").display_name, "Sol");
         for id in route_ids(&defaults)
             .into_iter()
-            .filter(|id| !id.starts_with("gpt-6.1-sol"))
+            .filter(|id| !id.starts_with("gpt-6.2-sol"))
         {
             assert_eq!(route(&config, id), route(&defaults, id), "{id}");
         }
@@ -3452,15 +3488,15 @@ mod tests {
     #[test]
     fn a_model_override_can_repoint_a_built_in_route() {
         let config = parse_and_prepare(
-            "[[model-overrides]]\nrouting-id = \"gpt-6.1-sol\"\nupstream-model = \"gpt-6-luna\"\n\
+            "[[model-overrides]]\nrouting-id = \"gpt-6.2-sol\"\nupstream-model = \"gpt-6-luna\"\n\
              context-window = 123456\n",
         );
-        let sol = route(&config, "gpt-6.1-sol");
+        let sol = route(&config, "gpt-6.2-sol");
         assert_eq!(sol.upstream_model, "gpt-6-luna");
         assert_eq!(sol.context_window, Some(123_456));
-        assert_eq!(sol.display_name, "GPT-6.1 Sol");
+        assert_eq!(sol.display_name, "GPT-6.2 Sol");
         assert_eq!(
-            route(&config, "gpt-6.1-sol-fast").upstream_model,
+            route(&config, "gpt-6.2-sol-fast").upstream_model,
             "gpt-6-luna"
         );
     }

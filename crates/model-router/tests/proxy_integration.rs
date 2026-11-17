@@ -2612,10 +2612,10 @@ async fn compaction_is_answered_without_tools_only_on_codex_native_gpt_and_grok(
     let mut config = muse_config(cpa_address, Some(auth.path()));
     config.models.extend([
         ModelRoute {
-            routing_id: "gpt-6-astra".to_string(),
+            routing_id: "gpt-6.2-astra".to_string(),
             upstream: "cliproxy".to_string(),
-            upstream_model: "gpt-6-astra".to_string(),
-            display_name: "GPT-6 Astra".to_string(),
+            upstream_model: "gpt-6.2-astra".to_string(),
+            display_name: "GPT-6.2 Astra".to_string(),
             ..Default::default()
         },
         ModelRoute {
@@ -2629,8 +2629,8 @@ async fn compaction_is_answered_without_tools_only_on_codex_native_gpt_and_grok(
     ]);
     let app = model_router::proxy::app(config).await.unwrap();
     let cases = [
-        ("gpt-6-astra", true),
-        ("gpt-6-astra-fast", true),
+        ("gpt-6.2-astra", true),
+        ("gpt-6.2-astra-fast", true),
         ("grok-4.5", true),
         // A hand-written `gpt` route to a model outside the Codex list.
         ("claude-gpt-test", false),
@@ -3840,8 +3840,8 @@ async fn a_fast_twin_forwards_its_base_model_at_the_priority_tier() {
         .unwrap();
 
     for (model, session) in [
-        ("gpt-6.1-sol-fast", "session-a"),
-        ("gpt-6.1-sol", "session-b"),
+        ("gpt-6.2-sol-fast", "session-a"),
+        ("gpt-6.2-sol", "session-b"),
     ] {
         let body = serde_json::json!({
             "model": model, "max_tokens": 16, "system": "shared agent prompt",
@@ -3860,10 +3860,10 @@ async fn a_fast_twin_forwards_its_base_model_at_the_priority_tier() {
     };
     let twin_body: serde_json::Value = serde_json::from_slice(&twin.body).unwrap();
     let base_body: serde_json::Value = serde_json::from_slice(&base.body).unwrap();
-    assert_eq!(twin_body["model"], "gpt-6.1-sol");
+    assert_eq!(twin_body["model"], "gpt-6.2-sol");
     assert_eq!(twin_body["service_tier"], "priority");
     assert!(twin_body.get("speed").is_none(), "{twin_body}");
-    assert_eq!(base_body["model"], "gpt-6.1-sol");
+    assert_eq!(base_body["model"], "gpt-6.2-sol");
     assert!(base_body.get("service_tier").is_none(), "{base_body}");
     assert!(base_body.get("speed").is_none(), "{base_body}");
     assert_eq!(twin_body["system"], base_body["system"]);
@@ -3871,7 +3871,7 @@ async fn a_fast_twin_forwards_its_base_model_at_the_priority_tier() {
         twin_body["system"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("GPT-6.1 Sol")
+            .contains("GPT-6.2 Sol")
     );
     let key = &twin.headers["x-claude-code-session-id"];
     assert!(key.to_str().unwrap().starts_with("prefix-"), "{key:?}");
@@ -3936,7 +3936,7 @@ async fn a_twin_origin_search_fallback_keeps_the_priority_tier() {
                 .method("POST")
                 .uri("/v1/messages")
                 .header("content-type", "application/json")
-                .body(Body::from(websearch_declaring_body("gpt-6.1-sol-fast")))
+                .body(Body::from(websearch_declaring_body("gpt-6.2-sol-fast")))
                 .unwrap(),
         )
         .await
@@ -3962,7 +3962,7 @@ async fn a_twin_origin_search_fallback_keeps_the_priority_tier() {
     );
     for request in [&cpa_requests[0], &cpa_requests[2]] {
         let document: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(document["model"], "gpt-6.1-sol");
+        assert_eq!(document["model"], "gpt-6.2-sol");
         assert_eq!(document["service_tier"], "priority", "{document}");
         assert!(document.get("speed").is_none(), "{document}");
     }
@@ -4029,18 +4029,18 @@ async fn carried_search_tiers(
 async fn a_gpt_carried_search_runs_at_the_origins_tier() {
     let priority = || Some("priority".to_string());
     assert_eq!(
-        carried_search_tiers(alpha_search_down, "gpt-6.1-sol", "gpt-6.1-sol-fast").await,
+        carried_search_tiers(alpha_search_down, "gpt-6.2-sol", "gpt-6.2-sol-fast").await,
         [None]
     );
     assert_eq!(
-        carried_search_tiers(alpha_search_down, "gpt-6.1-sol-fast", "gpt-6.1-sol").await,
+        carried_search_tiers(alpha_search_down, "gpt-6.2-sol-fast", "gpt-6.2-sol").await,
         [priority()]
     );
     assert_eq!(
         carried_search_tiers(
             alpha_and_legacy_search_down,
-            "gpt-6.1-sol",
-            "gpt-6.1-sol-fast"
+            "gpt-6.2-sol",
+            "gpt-6.2-sol-fast"
         )
         .await,
         [None, None]
@@ -4048,14 +4048,14 @@ async fn a_gpt_carried_search_runs_at_the_origins_tier() {
     assert_eq!(
         carried_search_tiers(
             alpha_and_legacy_search_down,
-            "gpt-6.1-sol-fast",
-            "gpt-6.1-sol"
+            "gpt-6.2-sol-fast",
+            "gpt-6.2-sol"
         )
         .await,
         [priority(), priority()]
     );
     assert_eq!(
-        carried_search_tiers(alpha_and_legacy_search_down, "gpt-6.1-sol-fast", "grok-4.7").await,
+        carried_search_tiers(alpha_and_legacy_search_down, "gpt-6.2-sol-fast", "grok-4.7").await,
         [None, None]
     );
 }

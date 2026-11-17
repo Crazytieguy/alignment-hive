@@ -20,8 +20,8 @@ use crate::client_window::{
     resolve_compaction,
 };
 use crate::config::{
-    Config, ModelRoute, SHIPPED_GPT_ROUTES, fast_twin_id, is_built_in_route, is_retired_gpt_route,
-    shipped_picker_rows, twin_of,
+    Config, ModelRoute, SHIPPED_GPT_ROUTES, codex_display_name, fast_twin_id, is_built_in_route,
+    is_retired_gpt_route, retired_successor, shipped_picker_rows, twin_of,
 };
 use crate::context_check::{self, is_superseded_default, recommended_entry};
 
@@ -206,12 +206,25 @@ fn plan_models(
         if adds.is_empty() && !models.iter().any(|model| is_retired_gpt_route(model)) {
             return Plan::Current;
         }
-        let rows = options
-            .iter()
-            .filter(|row| !picker_model(row).is_some_and(is_retired_gpt_route))
-            .cloned()
-            .chain(shipped_rows(&adds))
-            .collect();
+        // A retired route's row gives its place to its successor when that
+        // is added; its twins' rows go (the Fast offer adds the successor's).
+        let mut pending: Vec<String> = adds.clone();
+        let mut rows = Vec::new();
+        for row in options {
+            match picker_model(row) {
+                Some(model) if is_retired_gpt_route(model) => {
+                    if let Some(next) = retired_successor(model)
+                        && let Some(at) = pending.iter().position(|id| id == next)
+                    {
+                        let next = pending.remove(at);
+                        let label = picker_label(&next).expect("a successor is shipped");
+                        rows.push(picker_row(&next, &label));
+                    }
+                }
+                _ => rows.push(row.clone()),
+            }
+        }
+        rows.extend(shipped_rows(&pending));
         let picker = edited.get_mut("modelPicker").expect("read above");
         picker.set("options", Doc::Array(rows));
     } else if let Some(option) = doc.str_at(&["env", OPTION]) {
@@ -480,10 +493,43 @@ fn report_models(
             "needed": true, "canApply": false, "adds": adds, "labels": labels(&adds),
             "reason": reason,
         }),
-        Plan::Ready { adds, .. } => json!({
-            "needed": true, "canApply": true, "adds": adds, "labels": labels(&adds),
-        }),
+        Plan::Ready { adds, .. } => {
+            let mut report = json!({
+                "needed": true, "canApply": true, "adds": adds, "labels": labels(&adds),
+            });
+            let replaces = replaced_rows(home, &adds);
+            if !replaces.is_empty() {
+                report["replaces"] = json!(replaces);
+            }
+            report
+        }
     }
+}
+
+/// The display names of the picker's retired routes whose successor is
+/// among `adds` ([`retired_successor`]): what the band says the added rows
+/// replace. The router's own names, not the rows' labels, which the band's
+/// shell would have to escape.
+fn replaced_rows(home: &Path, adds: &[String]) -> Vec<String> {
+    let Read::Found(_, doc) = read(&user_settings_file(home)) else {
+        return Vec::new();
+    };
+    let Ok(Some(picker)) = read_picker(&doc) else {
+        return Vec::new();
+    };
+    let mut replaces: Vec<String> = Vec::new();
+    for row in picker.options {
+        let Some(model) = picker_model(row) else {
+            continue;
+        };
+        if retired_successor(model).is_some_and(|next| adds.iter().any(|id| id == next))
+            && let Some(name) = codex_display_name(model)
+            && !replaces.iter().any(|known| known == name)
+        {
+            replaces.push(name.to_owned());
+        }
+    }
+    replaces
 }
 
 /// The [`ENV_VAR`] value setup declares: the largest per-model window Claude
@@ -1282,7 +1328,7 @@ mod tests {
             fast_models(&dirs, Ok(&config), CURRENT, false),
             json!({
                 "needed": true, "canApply": true, "adds": twins,
-                "labels": ["GPT-6 Astra Fast", "GPT-6.1 Sol Fast", "GPT-6.1 Terra Fast", "GPT-6 Luna Fast"]
+                "labels": ["GPT-6.2 Astra Fast", "GPT-6.2 Sol Fast", "GPT-6.1 Terra Fast", "GPT-6 Luna Fast"]
             })
         );
         assert_eq!(dirs.user_text(), before.to_string());
@@ -1290,7 +1336,7 @@ mod tests {
             fast_models(&dirs, Ok(&config), CURRENT, true),
             json!({
                 "applied": true, "added": twins,
-                "windows": {"gpt-6-astra-fast": 258_400, "gpt-6.1-sol-fast": 475_000,
+                "windows": {"gpt-6.2-astra-fast": 258_400, "gpt-6.2-sol-fast": 475_000,
                             "gpt-6.1-terra-fast": 475_000, "gpt-6-luna-fast": 258_400}
             })
         );
@@ -1322,11 +1368,11 @@ mod tests {
         let dirs = Dirs::new();
         let config = crate::config::parse_and_prepare("");
         dirs.user(
-            r#"{"modelPicker":{"options":[{"model":"gpt-6-luna"},{"model":"gpt-6.1-sol"}]}}"#,
+            r#"{"modelPicker":{"options":[{"model":"gpt-6-luna"},{"model":"gpt-6.2-sol"}]}}"#,
         );
         assert_eq!(
             fast_models(&dirs, Ok(&config), CURRENT, false)["adds"],
-            json!(["gpt-6.1-sol-fast", "gpt-6-luna-fast"])
+            json!(["gpt-6.2-sol-fast", "gpt-6-luna-fast"])
         );
         assert_eq!(
             fast_models(&dirs, Ok(&config), CURRENT, true)["applied"],
@@ -1336,8 +1382,8 @@ mod tests {
         let rows = &written["modelPicker"]["options"];
         assert_eq!(rows[0]["model"], "gpt-6-luna");
         assert_eq!(rows[1]["model"], "gpt-6-luna-fast");
-        assert_eq!(rows[2]["model"], "gpt-6.1-sol");
-        assert_eq!(rows[3]["model"], "gpt-6.1-sol-fast");
+        assert_eq!(rows[2]["model"], "gpt-6.2-sol");
+        assert_eq!(rows[3]["model"], "gpt-6.2-sol-fast");
     }
 
     #[test]
@@ -1346,17 +1392,18 @@ mod tests {
         let config = crate::config::parse_and_prepare("");
         let before = json!({
             "modelPicker": {"options": [
-                {"model": " gpt-6-astra-fast ", "label": "mine"},
-                {"model": "gpt-6-astra"}, 3, {"model": " gpt-6.1-sol "},
-                {"model": "gpt-6.1-sol"}, {"model": "gpt-6-sol"}, {"model": "custom"}
+                {"model": " gpt-6.2-astra-fast ", "label": "mine"},
+                {"model": "gpt-6.2-astra"}, 3, {"model": " gpt-6.2-sol "},
+                {"model": "gpt-6.2-sol"}, {"model": "gpt-6.1-sol"}, {"model": "gpt-6-sol"},
+                {"model": "custom"}
             ]},
-            "modelSettings": {"gpt-6.1-sol-fast": {"autoCompactWindow": 600_000, "effortLevel": "high"}}
+            "modelSettings": {"gpt-6.2-sol-fast": {"autoCompactWindow": 600_000, "effortLevel": "high"}}
         });
         dirs.user(&before.to_string());
         let applied = fast_models(&dirs, Ok(&config), CURRENT, true);
         assert_eq!(
             applied,
-            json!({"applied": true, "added": ["gpt-6.1-sol-fast"], "windows": {}})
+            json!({"applied": true, "added": ["gpt-6.2-sol-fast"], "windows": {}})
         );
         let mut expected = before;
         expected["modelPicker"]["options"]
@@ -1364,7 +1411,7 @@ mod tests {
             .unwrap()
             .insert(
                 4,
-                json!({"model": "gpt-6.1-sol-fast", "label": "GPT-6.1 Sol Fast"}),
+                json!({"model": "gpt-6.2-sol-fast", "label": "GPT-6.2 Sol Fast"}),
             );
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
         assert_eq!(written, expected);
@@ -1418,9 +1465,9 @@ mod tests {
         let missing = crate::config::parse_and_prepare(
             r#"
             [[models]]
-            routing-id = "gpt-6-astra"
-            upstream-model = "gpt-6-astra"
-            display-name = "GPT-6 Astra"
+            routing-id = "gpt-6.2-astra"
+            upstream-model = "gpt-6.2-astra"
+            display-name = "GPT-6.2 Astra"
         "#,
         );
         for (config, version, extra, reason) in [
@@ -1434,7 +1481,7 @@ mod tests {
                 Ok(&missing),
                 CURRENT,
                 json!({}),
-                "does not serve gpt-6.1-sol-fast",
+                "does not serve gpt-6.2-sol-fast",
             ),
             (
                 Ok(&config),
@@ -1450,13 +1497,13 @@ mod tests {
             ),
         ] {
             let mut before = extra;
-            before["modelPicker"] = json!({"options": [{"model": "gpt-6.1-sol"}]});
+            before["modelPicker"] = json!({"options": [{"model": "gpt-6.2-sol"}]});
             dirs.user(&before.to_string());
             let report = fast_models(&dirs, config, version, false);
             assert_eq!(report["needed"], true, "{report}");
             assert_eq!(report["canApply"], false, "{report}");
-            assert_eq!(report["adds"], json!(["gpt-6.1-sol-fast"]));
-            assert_eq!(report["labels"], json!(["GPT-6.1 Sol Fast"]));
+            assert_eq!(report["adds"], json!(["gpt-6.2-sol-fast"]));
+            assert_eq!(report["labels"], json!(["GPT-6.2 Sol Fast"]));
             assert!(
                 report["reason"].as_str().unwrap().contains(reason),
                 "{report}"
@@ -1473,16 +1520,26 @@ mod tests {
             .into_iter()
             .map(|id| json!({"model": id}))
             .collect();
+        let shipped_twins = [
+            json!({"model": "gpt-6.2-sol-fast"}),
+            json!({"model": "gpt-6.2-astra-ultrafast(high)"}),
+        ];
         rows.extend([
             json!({"model": "gpt-6-sol-fast(high)"}),
+            shipped_twins[0].clone(),
             json!({"model": "gpt-6.1-sol-fast"}),
+            json!({"model": "gpt-6-astra-fast"}),
+            json!({"model": "gpt-6.1-sol-ultrafast"}),
+            shipped_twins[1].clone(),
+            json!({"model": "gpt-6-astra-ultrafast(high)"}),
         ]);
         dirs.user(&json!({"modelPicker": {"options": rows}}).to_string());
         assert_eq!(
             dirs.models(CURRENT, true),
             json!({"applied": true, "added": [], "windows": {}})
         );
-        rows.remove(4);
+        rows.truncate(SHIPPED_GPT_ROUTES.len());
+        rows.extend(shipped_twins);
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
         assert_eq!(written["modelPicker"]["options"], json!(rows));
 
@@ -1510,25 +1567,32 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_loses_retired_rows_gains_shipped_ones_and_keeps_its_order() {
+    fn a_retired_row_gives_its_place_to_its_successor_and_its_twins_go() {
         let dirs = Dirs::new();
         dirs.user(&format!(
             r#"{{"zeta":1,"env":{{"{BASE_URL}":"{URL}"}},"modelPicker":{{"options":[
                 {{"model":"gpt-6-astra","label":"GPT-6 Astra"}},
+                {{"model":"gpt-6.1-terra","label":"GPT-6.1 Terra"}},
+                {{"model":"gpt-6.1-sol","label":"GPT-6.1 Sol"}},
+                {{"model":"gpt-6.1-sol-fast","label":"GPT-6.1 Sol Fast"}},
+                {{"model":"gpt-6.1-sol-ultrafast","label":"GPT-6.1 Sol Ultrafast"}},
                 {{"model":"gpt-6-sol","label":"GPT-6 Sol"}},
                 {{"model":"grok-4.7","label":"Grok 4.7","description":"mine"}},
+                {{"model":"gpt-6-astra-fast","label":"GPT-6 Astra Fast"}},
+                {{"model":"gpt-6-astra-ultrafast","label":"GPT-6 Astra Ultrafast"}},
                 {{"model":"gpt-5.6-luna","label":"GPT-5.6 Luna"}}]}},"alpha":true}}"#
         ));
         assert_eq!(
             dirs.models(CURRENT, false),
             json!({"needed": true, "canApply": true,
-                   "adds": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"],
-                   "labels": ["GPT-6.1 Sol", "GPT-6.1 Terra", "GPT-6 Luna"]})
+                   "adds": ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-luna"],
+                   "labels": ["GPT-6.2 Astra", "GPT-6.2 Sol", "GPT-6 Luna"],
+                   "replaces": ["GPT-6 Astra", "GPT-6.1 Sol", "GPT-6 Sol", "GPT-5.6 Luna"]})
         );
         assert_eq!(
             dirs.models(CURRENT, true),
-            json!({"applied": true, "added": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"],
-                   "windows": {"gpt-6.1-sol": 475_000, "gpt-6.1-terra": 475_000,
+            json!({"applied": true, "added": ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-luna"],
+                   "windows": {"gpt-6.2-astra": 258_400, "gpt-6.2-sol": 475_000,
                                "gpt-6-luna": 258_400}})
         );
         let expected = format!(
@@ -1540,21 +1604,21 @@ mod tests {
   "modelPicker": {{
     "options": [
       {{
-        "model": "gpt-6-astra",
-        "label": "GPT-6 Astra"
+        "model": "gpt-6.2-astra",
+        "label": "GPT-6.2 Astra"
+      }},
+      {{
+        "model": "gpt-6.1-terra",
+        "label": "GPT-6.1 Terra"
+      }},
+      {{
+        "model": "gpt-6.2-sol",
+        "label": "GPT-6.2 Sol"
       }},
       {{
         "model": "grok-4.7",
         "label": "Grok 4.7",
         "description": "mine"
-      }},
-      {{
-        "model": "gpt-6.1-sol",
-        "label": "GPT-6.1 Sol"
-      }},
-      {{
-        "model": "gpt-6.1-terra",
-        "label": "GPT-6.1 Terra"
       }},
       {{
         "model": "gpt-6-luna",
@@ -1564,10 +1628,10 @@ mod tests {
   }},
   "alpha": true,
   "modelSettings": {{
-    "gpt-6.1-sol": {{
-      "autoCompactWindow": 475000
+    "gpt-6.2-astra": {{
+      "autoCompactWindow": 258400
     }},
-    "gpt-6.1-terra": {{
+    "gpt-6.2-sol": {{
       "autoCompactWindow": 475000
     }},
     "gpt-6-luna": {{
@@ -1586,18 +1650,18 @@ mod tests {
         let dirs = Dirs::new();
         dirs.user(&format!(
             r#"{{"env":{{"{BASE_URL}":"{URL}"}},
-                "modelSettings":{{"gpt-6-luna":{{"autoCompactWindow":500000}},"gpt-6.1-sol":{{"x":1}}}},
-                "modelPicker":{{"options":[{{"model":"gpt-6-astra","label":"A"}}]}}}}"#
+                "modelSettings":{{"gpt-6-luna":{{"autoCompactWindow":500000}},"gpt-6.2-sol":{{"x":1}}}},
+                "modelPicker":{{"options":[{{"model":"gpt-6.2-astra","label":"A"}}]}}}}"#
         ));
         assert_eq!(
             dirs.models(CURRENT, true)["windows"],
-            json!({"gpt-6.1-sol": 475_000, "gpt-6.1-terra": 475_000})
+            json!({"gpt-6.2-sol": 475_000, "gpt-6.1-terra": 475_000})
         );
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
         assert_eq!(
             written["modelSettings"],
             json!({"gpt-6-luna": {"autoCompactWindow": 500_000},
-                   "gpt-6.1-sol": {"x": 1, "autoCompactWindow": 475_000},
+                   "gpt-6.2-sol": {"x": 1, "autoCompactWindow": 475_000},
                    "gpt-6.1-terra": {"autoCompactWindow": 475_000}})
         );
     }
@@ -1606,12 +1670,12 @@ mod tests {
     fn the_single_slot_pair_gives_way_to_the_picker() {
         let dirs = Dirs::new();
         dirs.user(&format!(
-            r#"{{"env":{{"{BASE_URL}":"{URL}","{OPTION}":"gpt-6-astra","{OPTION_NAME}":"GPT-6 Astra","KEEP":"1"}}}}"#
+            r#"{{"env":{{"{BASE_URL}":"{URL}","{OPTION}":"gpt-6.2-astra","{OPTION_NAME}":"GPT-6.2 Astra","KEEP":"1"}}}}"#
         ));
         assert_eq!(
             dirs.models(CURRENT, true),
-            json!({"applied": true, "added": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"],
-                   "windows": {"gpt-6.1-sol": 475_000, "gpt-6.1-terra": 475_000,
+            json!({"applied": true, "added": ["gpt-6.2-sol", "gpt-6.1-terra", "gpt-6-luna"],
+                   "windows": {"gpt-6.2-sol": 475_000, "gpt-6.1-terra": 475_000,
                                "gpt-6-luna": 258_400}})
         );
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
@@ -1624,7 +1688,12 @@ mod tests {
             .collect();
         assert_eq!(
             rows,
-            ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"]
+            [
+                "gpt-6.2-astra",
+                "gpt-6.2-sol",
+                "gpt-6.1-terra",
+                "gpt-6-luna"
+            ]
         );
     }
 
@@ -1650,7 +1719,12 @@ mod tests {
         dirs.user(&format!(r#"{{"env":{{"{BASE_URL}":"{URL}"}}}}"#));
         assert_eq!(
             dirs.models(CURRENT, false)["adds"],
-            json!(["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"])
+            json!([
+                "gpt-6.2-astra",
+                "gpt-6.2-sol",
+                "gpt-6.1-terra",
+                "gpt-6-luna"
+            ])
         );
     }
 
@@ -1701,9 +1775,9 @@ mod tests {
         let config = crate::config::parse_and_prepare(
             r#"
             [[models]]
-            routing-id = "gpt-6-astra"
-            upstream-model = "gpt-6-astra"
-            display-name = "GPT-6 Astra"
+            routing-id = "gpt-6.2-astra"
+            upstream-model = "gpt-6.2-astra"
+            display-name = "GPT-6.2 Astra"
             "#,
         );
         let report = models(
@@ -1719,7 +1793,7 @@ mod tests {
             report["reason"]
                 .as_str()
                 .unwrap()
-                .contains("does not serve gpt-6.1-sol")
+                .contains("does not serve gpt-6.2-sol")
         );
     }
 
@@ -1729,7 +1803,7 @@ mod tests {
         dirs.user("{}");
         dirs.project(
             "settings.local.json",
-            &format!(r#"{{"env":{{"{BASE_URL}":"{URL}","{OPTION}":"gpt-6-astra"}}}}"#),
+            &format!(r#"{{"env":{{"{BASE_URL}":"{URL}","{OPTION}":"gpt-6.2-astra"}}}}"#),
         );
         assert_eq!(dirs.models(CURRENT, false)["needed"], false);
     }
@@ -1747,7 +1821,7 @@ mod tests {
     fn bypass_clears_every_copy_of_the_url_and_a_routed_default() {
         let dirs = Dirs::new();
         dirs.user(&format!(
-            r#"{{"model":"gpt-6.1-sol","env":{{"{BASE_URL}":"{URL}","KEEP":"1"}},"z":0}}"#
+            r#"{{"model":"gpt-6.2-sol","env":{{"{BASE_URL}":"{URL}","KEEP":"1"}},"z":0}}"#
         ));
         dirs.project(
             "settings.local.json",
@@ -1815,7 +1889,7 @@ mod tests {
         let dirs = Dirs::new();
         let user = format!(r#"{{"env":{{"{BASE_URL}":"{URL}"}}}}"#);
         dirs.user(&user);
-        dirs.project("settings.json", r#"{"model":"gpt-6-astra"}"#);
+        dirs.project("settings.json", r#"{"model":"gpt-6.2-astra"}"#);
         let report = dirs.bypass();
         assert_eq!(report["status"], "shared-file");
         assert!(
@@ -1939,7 +2013,7 @@ mod tests {
         assert_eq!(report["applied"], true, "{report}");
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
         assert!(written.get("env").is_none(), "{written}");
-        assert_eq!(written["modelPicker"]["options"][0]["model"], "gpt-6-astra");
+        assert_eq!(written["modelPicker"]["options"][0]["model"], "gpt-6.2-sol");
         // No temp file is left behind.
         let leftovers = std::fs::read_dir(dirs.home.path().join(".claude"))
             .unwrap()
@@ -1974,8 +2048,8 @@ mod tests {
             assert_eq!(
                 first.join().unwrap(),
                 json!({"applied": true,
-                       "added": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"],
-                       "windows": {"gpt-6-astra": 258_400, "gpt-6.1-sol": 475_000,
+                       "added": ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra", "gpt-6-luna"],
+                       "windows": {"gpt-6.2-astra": 258_400, "gpt-6.2-sol": 475_000,
                                    "gpt-6.1-terra": 475_000, "gpt-6-luna": 258_400}})
             );
             // The lock held the bypass until the first had committed.
@@ -1988,7 +2062,7 @@ mod tests {
         });
         let written: Value = serde_json::from_str(&dirs.user_text()).unwrap();
         assert_eq!(written["env"], json!({}), "{written}");
-        assert_eq!(written["modelPicker"]["options"][0]["model"], "gpt-6-astra");
+        assert_eq!(written["modelPicker"]["options"][0]["model"], "gpt-6.2-sol");
     }
 
     #[test]
@@ -2056,7 +2130,9 @@ mod tests {
     }
 
     /// Every built-in GPT route, then their `-fast` twins, in route order.
-    const GPT_ROUTES: [&str; 12] = [
+    const GPT_ROUTES: [&str; 14] = [
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
         "gpt-6.1-sol",
         "gpt-6.1-terra",
         "gpt-6-astra",
@@ -2065,9 +2141,9 @@ mod tests {
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
-        "gpt-6.1-sol-fast",
+        "gpt-6.2-sol-fast",
+        "gpt-6.2-astra-fast",
         "gpt-6.1-terra-fast",
-        "gpt-6-astra-fast",
         "gpt-6-luna-fast",
     ];
 
@@ -2160,7 +2236,7 @@ mod tests {
         dirs.user(&format!(
             r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"258400","OTHER":"1"}},
                 "modelSettings":{{"claude-opus-5-5":{{"effortLevel":"medium"}},
-                                  "gpt-6-astra":{{"effortLevel":"high"}}}},"theme":"dark"}}"#
+                                  "gpt-6.2-astra":{{"effortLevel":"high"}}}},"theme":"dark"}}"#
         ));
         assert_eq!(
             windows_of(&dirs, "", CURRENT, false),
@@ -2188,7 +2264,7 @@ mod tests {
         assert_eq!(settings["env"][ENV_VAR], "1000000");
         assert_eq!(settings["env"]["OTHER"], "1");
         assert_eq!(
-            settings["modelSettings"]["gpt-6-astra"],
+            settings["modelSettings"]["gpt-6.2-astra"],
             json!({"effortLevel": "high", "autoCompactWindow": 258_400})
         );
         assert_eq!(
@@ -2230,7 +2306,7 @@ mod tests {
         let local: Value = serde_json::from_str(&dirs.project_text("settings.local.json")).unwrap();
         assert_eq!(local["env"][ENV_VAR], "1000000");
         assert_eq!(
-            local["modelSettings"]["gpt-6.1-sol"]["autoCompactWindow"],
+            local["modelSettings"]["gpt-6.2-sol"]["autoCompactWindow"],
             475_000
         );
     }
@@ -2239,7 +2315,7 @@ mod tests {
     #[test]
     fn the_fast_twins_need_windows_in_every_auth_mode() {
         let dirs = Dirs::new();
-        let entries = GPT_ROUTES[..8]
+        let entries = GPT_ROUTES[..10]
             .iter()
             .map(|id| format!(r#""{id}":{{"autoCompactWindow":{}}}"#, codex_default(id)))
             .collect::<Vec<_>>()
@@ -2248,12 +2324,12 @@ mod tests {
             r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"1000000"}},"modelSettings":{{{entries}}}}}"#
         ));
         let report = windows_of(&dirs, "", CURRENT, false);
-        assert_eq!(report["routes"], json!(GPT_ROUTES[8..]), "{report}");
+        assert_eq!(report["routes"], json!(GPT_ROUTES[10..]), "{report}");
         let applied = windows_of(&dirs, "", CURRENT, true);
         assert_eq!(
             applied["windows"],
-            json!({"gpt-6.1-sol-fast": 475_000, "gpt-6.1-terra-fast": 475_000,
-                   "gpt-6-astra-fast": 258_400, "gpt-6-luna-fast": 258_400}),
+            json!({"gpt-6.2-sol-fast": 475_000, "gpt-6.2-astra-fast": 258_400,
+                   "gpt-6.1-terra-fast": 475_000, "gpt-6-luna-fast": 258_400}),
             "{applied}"
         );
 
@@ -2263,7 +2339,7 @@ mod tests {
         let api_key = "[gpt]\nauth = \"api-key\"\n";
         assert_eq!(
             windows_of(&dirs, api_key, CURRENT, false)["routes"],
-            json!(GPT_ROUTES[8..])
+            json!(GPT_ROUTES[10..])
         );
     }
 
@@ -2444,14 +2520,14 @@ mod tests {
         let user = format!(r#"{{"env":{{"{BASE_URL}":"{URL}","{ENV_VAR}":"258400"}}}}"#);
         for local in [
             r#"{"autoCompactWindow":200000}"#,
-            r#"{"modelSettings":{"gpt-6-astra":{"autoCompactWindow":200000}}}"#,
+            r#"{"modelSettings":{"gpt-6.2-astra":{"autoCompactWindow":200000}}}"#,
         ] {
             let dirs = Dirs::new();
             dirs.user(&user);
             dirs.project("settings.local.json", local);
             let applied = windows_of(&dirs, "", CURRENT, true);
             assert_eq!(applied["applied"], true, "{applied}");
-            assert_eq!(applied["windows"]["gpt-6-astra"], 258_400, "{applied}");
+            assert_eq!(applied["windows"]["gpt-6.2-astra"], 258_400, "{applied}");
             assert_eq!(dirs.project_text("settings.local.json"), local);
 
             // Another project, read from the user file alone.
@@ -2526,7 +2602,7 @@ display-name = "Kimi K3"
         // A window the person raised, which the old declaration capped.
         let dirs = Dirs::new();
         dirs.user(&format!(
-            r#"{{{wired},"modelSettings":{{"gpt-6-astra":{{"autoCompactWindow":400000}}}}}}"#
+            r#"{{{wired},"modelSettings":{{"gpt-6.2-astra":{{"autoCompactWindow":400000}}}}}}"#
         ));
         assert!(
             blocked_reason(&dirs, "").contains("doctor's context-windows check would still warn")

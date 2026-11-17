@@ -19,8 +19,8 @@ const declineFastAction = { id: 'decline-fast-models', label: "Don't add", kind:
 const fastModels = {
   id: 'fast-models',
   severity: 'action',
-  text: 'GPT-6.1 Sol Fast can be added to /model: 1.5–2x faster for 2.5x the usage',
-  version: 'fast:gpt-6.1-sol-fast',
+  text: 'GPT-6.2 Sol Fast can be added to /model: 1.5–2x faster for 2x the usage',
+  version: 'fast:gpt-6.2-sol-fast',
   actions: [addFastAction, declineFastAction],
 }
 
@@ -84,20 +84,20 @@ describe('model-router settings buttons', () => {
   const newModel = {
     id: 'new-model',
     severity: 'action',
-    text: 'GPT-6.1 Sol can be added to /model',
+    text: 'GPT-6.2 Sol can be added to /model',
     actions: [addAction, customizeAction],
   }
 
   test('Add to /model has the binary apply the migration and says what it added, at what window', async ($, on) => {
     const { toasts, settingsCalls } = await startWithSettings($, on, [newModel], {
       applied: true,
-      added: ['gpt-6.1-sol'],
-      windows: { 'gpt-6.1-sol': 475000 },
+      added: ['gpt-6.2-sol'],
+      windows: { 'gpt-6.2-sol': 475000 },
     })
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:new-model:add-models' })
     expect(settingsCalls).toEqual([['settings', 'models', '--apply', '--project-dir', '/proj']])
-    expect(toasts[0]).toBe('Added to /model; restart Claude Code to pick. Compacts gpt-6.1-sol at 475K.')
+    expect(toasts[0]).toBe('Added to /model; restart Claude Code to pick. Compacts gpt-6.2-sol at 475K.')
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
     await ui.unmount()
   })
@@ -115,12 +115,12 @@ describe('model-router settings buttons', () => {
 
   test('Add to /model on the Fast row applies --fast and says its window', async ($, on) => {
     const { toasts, settingsCalls } = await startWithSettings($, on, [fastModels], {
-      applied: true, added: ['gpt-6.1-sol-fast'], windows: { 'gpt-6.1-sol-fast': 475000 },
+      applied: true, added: ['gpt-6.2-sol-fast'], windows: { 'gpt-6.2-sol-fast': 475000 },
     })
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:fast-models:add-fast-models' })
     expect(settingsCalls).toEqual([['settings', 'models', '--fast', '--apply', '--project-dir', '/proj']])
-    expect(toasts).toEqual(['Added to /model; restart Claude Code to pick. Compacts gpt-6.1-sol-fast at 475K.'])
+    expect(toasts).toEqual(['Added to /model; restart Claude Code to pick. Compacts gpt-6.2-sol-fast at 475K.'])
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
     await ui.unmount()
   })
@@ -139,8 +139,8 @@ describe('model-router settings buttons', () => {
   const ultrafastModels = {
     id: 'ultrafast-models',
     severity: 'action',
-    text: 'Ultrafast models can be added to /model: up to 8x faster for 8x the usage',
-    version: 'ultrafast:gpt-6.1-sol-ultrafast',
+    text: 'GPT-6.2 Sol Ultrafast can be added to /model: up to 4.5x faster for 6x the usage',
+    version: 'ultrafast:gpt-6.2-sol-ultrafast',
     actions: [
       { id: 'add-ultrafast-models', label: 'Add to /model', kind: 'plugin' },
       { id: 'decline-ultrafast-models', label: "Don't add", kind: 'plugin' },
@@ -149,8 +149,8 @@ describe('model-router settings buttons', () => {
 
   test('Add on the Ultrafast row applies it, with no router restart', async ($, on) => {
     const { toasts, settingsCalls, checks } = await startWithSettings($, on, [ultrafastModels], {
-      applied: true, added: ['gpt-6.1-sol-ultrafast'],
-      windows: { 'gpt-6.1-sol-ultrafast': 475000 }, agents: ['/home/me/.claude/agents/gpt-6.1-sol-ultrafast.md'],
+      applied: true, added: ['gpt-6.2-sol-ultrafast'],
+      windows: { 'gpt-6.2-sol-ultrafast': 475000 }, agents: ['/home/me/.claude/agents/gpt-6.2-sol-ultrafast.md'],
     })
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:ultrafast-models:add-ultrafast-models' })
@@ -194,12 +194,12 @@ describe('model-router settings buttons', () => {
       applied: true,
       file: '/home/me/.claude/settings.json',
       declared: 1000000,
-      windows: { 'gpt-6-astra': 258400, 'gpt-6-luna': 258400, 'grok-4.7': 500000 },
+      windows: { 'gpt-6.2-astra': 258400, 'gpt-6-luna': 258400, 'grok-4.7': 500000 },
     })
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     await ui.press({ key: 'model-router:windows:windows' })
     expect(settingsCalls).toEqual([['settings', 'windows', '--apply', '--project-dir', '/proj']])
-    expect(toasts[0]).toBe('Restart Claude Code to compact gpt-6-astra, gpt-6-luna at 258K; grok-4.7 at 500K.')
+    expect(toasts[0]).toBe('Restart Claude Code to compact gpt-6.2-astra, gpt-6-luna at 258K; grok-4.7 at 500K.')
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
     await ui.unmount()
   })
@@ -289,17 +289,17 @@ describe('model-router settings buttons', () => {
     [
       'every shipped model added',
       addAction,
-      { applied: true, added: ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'], windows: { 'gpt-6-astra': 258400, 'gpt-6.1-sol': 475000, 'gpt-6.1-terra': 475000, 'gpt-6-luna': 258400 } },
+      { applied: true, added: ['gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.1-terra', 'gpt-6-luna'], windows: { 'gpt-6.2-astra': 258400, 'gpt-6.2-sol': 475000, 'gpt-6.1-terra': 475000, 'gpt-6-luna': 258400 } },
     ],
     [
       'every shipped Fast twin added',
       addFastAction,
-      { applied: true, added: ['gpt-6-astra-fast', 'gpt-6.1-sol-fast', 'gpt-6.1-terra-fast', 'gpt-6-luna-fast'], windows: { 'gpt-6-astra-fast': 258400, 'gpt-6.1-sol-fast': 475000, 'gpt-6.1-terra-fast': 475000, 'gpt-6-luna-fast': 258400 } },
+      { applied: true, added: ['gpt-6.2-astra-fast', 'gpt-6.2-sol-fast', 'gpt-6.1-terra-fast', 'gpt-6-luna-fast'], windows: { 'gpt-6.2-astra-fast': 258400, 'gpt-6.2-sol-fast': 475000, 'gpt-6.1-terra-fast': 475000, 'gpt-6-luna-fast': 258400 } },
     ],
     [
       'every window set',
       { id: 'windows', label: 'Migrate', kind: 'plugin' },
-      { applied: true, file: '/proj/.claude/settings.local.json', windows: { 'gpt-6-astra': 258400, 'gpt-6-luna': 258400, 'gpt-6.1-sol': 475000, 'grok-4.7': 500000 } },
+      { applied: true, file: '/proj/.claude/settings.local.json', windows: { 'gpt-6.2-astra': 258400, 'gpt-6-luna': 258400, 'gpt-6.2-sol': 475000, 'grok-4.7': 500000 } },
     ],
     [
       'every window set, Muse included',
@@ -308,9 +308,9 @@ describe('model-router settings buttons', () => {
         applied: true,
         file: '/proj/.claude/settings.local.json',
         windows: {
-          'gpt-6-astra': 258400,
+          'gpt-6.2-astra': 258400,
           'gpt-6-luna': 258400,
-          'gpt-6.1-sol': 475000,
+          'gpt-6.2-sol': 475000,
           'grok-4.7': 500000,
           'muse-wonder-1.0': 1000000,
           'muse-wonder-full-1.0': 1000000,
@@ -322,7 +322,7 @@ describe('model-router settings buttons', () => {
       { id: 'windows', label: 'Migrate', kind: 'plugin' },
       {
         applied: true,
-        windows: { 'gpt-6-astra': 258400, 'gpt-6-luna': 258400, 'gpt-6.1-sol': 475000, 'muse-wonder-1.0': 1000000, 'muse-wonder-full-1.0': 1000000 },
+        windows: { 'gpt-6.2-astra': 258400, 'gpt-6-luna': 258400, 'gpt-6.2-sol': 475000, 'muse-wonder-1.0': 1000000, 'muse-wonder-full-1.0': 1000000 },
       },
     ],
     [

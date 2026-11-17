@@ -449,14 +449,14 @@ context-window = {window}
         assert!(check.ok && !check.detail.contains("ultrafast"), "{check:?}");
         let adopted = setup.replace(
             r#"{"modelSettings":{"#,
-            r#"{"modelSettings":{"gpt-6.1-sol-ultrafast":{"autoCompactWindow":1000000},"#,
+            r#"{"modelSettings":{"gpt-6.2-sol-ultrafast":{"autoCompactWindow":1000000},"#,
         );
         let check = checked("", EnvSetting::Settings(1_000_000), &adopted);
         assert!(!check.ok, "{check:?}");
         assert!(
             check
                 .detail
-                .contains("gpt-6.1-sol-ultrafast OVERRUN RISK: Claude Code compacts it at 1000000"),
+                .contains("gpt-6.2-sol-ultrafast OVERRUN RISK: Claude Code compacts it at 1000000"),
             "{check:?}"
         );
     }

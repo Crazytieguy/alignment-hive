@@ -561,9 +561,14 @@ fn ultrafast_refusal(twin: &crate::config::ModelRoute) -> String {
     let fast = FAST.id(ULTRAFAST
         .strip(&twin.routing_id)
         .expect("an Ultrafast route is a twin"));
+    // Codex's speed page, 2026-11-17.
+    let plans = match model {
+        "gpt-6.2-sol" => "Pro $200, Pro $500",
+        _ => "Pro $500",
+    };
     format!(
         "model-router refused this request: your Codex plan doesn't have OpenAI's Ultrafast tier \
-         for {model} (Pro $500 and some Enterprise and Edu plans do). {fast} runs on Codex's fast \
+         for {model} ({plans} and some Enterprise and Edu plans do). {fast} runs on Codex's fast \
          tier instead."
     )
 }
@@ -1804,10 +1809,10 @@ mod tests {
     #[tokio::test]
     async fn only_an_ultrafast_twin_turn_carries_the_relay() {
         let models = [
-            "gpt-6.1-sol-ultrafast",
-            "gpt-6-astra-ultrafast",
-            "gpt-6.1-sol",
-            "gpt-6.1-sol-fast",
+            "gpt-6.2-sol-ultrafast",
+            "gpt-6.2-astra-ultrafast",
+            "gpt-6.2-sol",
+            "gpt-6.2-sol-fast",
         ];
         let (answers, seen) = ultrafast_turns(Config::default(), &models).await;
         assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
@@ -1820,8 +1825,8 @@ mod tests {
                 (None, Some("priority")),
             ]
         );
-        assert_eq!(seen[0].1["model"], "gpt-6.1-sol");
-        assert_eq!(seen[1].1["model"], "gpt-6-astra");
+        assert_eq!(seen[0].1["model"], "gpt-6.2-sol");
+        assert_eq!(seen[1].1["model"], "gpt-6.2-astra");
     }
 
     /// A subscription's twin turns go by the Codex plan: refused where it
@@ -1848,7 +1853,7 @@ mod tests {
             config.ultrafast_gate = Some(Arc::new(gate));
             config
         };
-        let models = ["gpt-6.1-sol-ultrafast", "gpt-6-astra-ultrafast"];
+        let models = ["gpt-6.2-sol-ultrafast", "gpt-6.2-astra-ultrafast"];
 
         let (answers, seen) = ultrafast_turns(with_gate(), &models).await;
         assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
@@ -1858,13 +1863,13 @@ mod tests {
             "unread"
         );
 
-        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6-astra"]);
+        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6.2-astra"]);
         let (answers, seen) = ultrafast_turns(with_gate(), &models).await;
         assert_eq!(answers[0].0, StatusCode::BAD_REQUEST);
         assert!(
             answers[0].1.contains(
-                "doesn't have OpenAI's Ultrafast tier for gpt-6.1-sol (Pro $500 and some \
-                 Enterprise and Edu plans do). gpt-6.1-sol-fast runs"
+                "doesn't have OpenAI's Ultrafast tier for gpt-6.2-sol (Pro $200, Pro $500 and some \
+                 Enterprise and Edu plans do). gpt-6.2-sol-fast runs"
             ),
             "{}",
             answers[0].1

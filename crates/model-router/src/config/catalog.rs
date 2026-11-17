@@ -24,11 +24,13 @@ pub(crate) const CODEX_DEFAULT_CONTEXT_WINDOW: u64 = 258_400;
 /// The built-in GPT models whose Codex default differs from
 /// [`CODEX_DEFAULT_CONTEXT_WINDOW`], with the defaults they had before: an
 /// entry still at one of those was set to Codex's default rather than
-/// chosen, so `settings windows` moves it. Both are 500K at 95%, from
+/// chosen, so `settings windows` moves it. All are 500K at 95%, from
 /// Codex's live catalog: GPT-6.1 Sol since 2026-10-13 (Codex 0.162.1; the
 /// catalog bundled in the binary still says 272K), GPT-6.1 Terra since its
-/// release (2026-10-26, Codex 0.163.0).
-const CODEX_DEFAULT_WINDOW_CHANGES: [(&str, u64, &[u64]); 2] = [
+/// release (2026-10-26, Codex 0.163.0), GPT-6.2 Sol since its release
+/// (2026-11-17, Codex 0.166.0). GPT-6.2 Astra stays at 272K, like GPT-6 Astra.
+const CODEX_DEFAULT_WINDOW_CHANGES: [(&str, u64, &[u64]); 3] = [
+    ("gpt-6.2-sol", 475_000, &[]),
     ("gpt-6.1-sol", 475_000, &[CODEX_DEFAULT_CONTEXT_WINDOW]),
     ("gpt-6.1-terra", 475_000, &[]),
 ];
@@ -54,7 +56,9 @@ fn codex_window_change(upstream_model: &str) -> Option<(&'static str, u64, &'sta
 
 /// The Codex-native upstream model IDs behind the built-in routes, with
 /// their display names.
-const CODEX_NATIVE_MODELS: [(&str, &str); 8] = [
+const CODEX_NATIVE_MODELS: [(&str, &str); 10] = [
+    ("gpt-6.2-sol", "GPT-6.2 Sol"),
+    ("gpt-6.2-astra", "GPT-6.2 Astra"),
     ("gpt-6.1-sol", "GPT-6.1 Sol"),
     ("gpt-6.1-terra", "GPT-6.1 Terra"),
     ("gpt-6-astra", "GPT-6 Astra"),
@@ -70,8 +74,12 @@ const CODEX_NATIVE_MODELS: [(&str, &str); 8] = [
 /// above), and the plugin ships agents for them and their `-fast` twins
 /// ([`fast_twins`]; keep in step with `plugins/model-router/agents/`). The
 /// other built-in GPT routes are retired: still served, off the picker.
-pub(crate) const SHIPPED_GPT_ROUTES: [&str; 4] =
-    ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"];
+pub(crate) const SHIPPED_GPT_ROUTES: [&str; 4] = [
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
+    "gpt-6.1-terra",
+    "gpt-6-luna",
+];
 
 /// [`SHIPPED_GPT_ROUTES`] with their picker labels.
 pub(crate) fn shipped_picker_rows() -> impl Iterator<Item = (&'static str, &'static str)> {
@@ -85,19 +93,55 @@ pub(crate) fn shipped_picker_rows() -> impl Iterator<Item = (&'static str, &'sta
 }
 
 /// A built-in GPT route that is no longer shipped (see [`SHIPPED_GPT_ROUTES`]).
-/// A retired route's `-fast` and `-ultrafast` twins are retired too, and no
-/// longer served.
+/// A retired route's `-fast` and `-ultrafast` twins are retired too: off the
+/// picker, and served only for [`RETIRED_TWIN_MODELS`].
 #[must_use]
 pub(crate) fn is_retired_gpt_route(model: &str) -> bool {
     let base = twin_route_base(model).unwrap_or(split_effort_suffix(model).0);
     is_codex_native_model(base) && !SHIPPED_GPT_ROUTES.contains(&base)
 }
 
-/// The models `OpenAI`'s Ultrafast tier covers (Codex's speed page,
-/// 2026-11-01). Both are shipped routes; their twins are served in managed
+/// The shipped route that takes a retired route's place in the `/model`
+/// picker. Only a route row has one: a retired twin's row just goes, and
+/// the Fast offer adds the successor's twin after it.
+const RETIRED_SUCCESSORS: [(&str, &str); 6] = [
+    ("gpt-6-astra", "gpt-6.2-astra"),
+    ("gpt-6.1-sol", "gpt-6.2-sol"),
+    ("gpt-6-sol", "gpt-6.2-sol"),
+    ("gpt-5.6-sol", "gpt-6.2-sol"),
+    ("gpt-5.6-terra", "gpt-6.1-terra"),
+    ("gpt-5.6-luna", "gpt-6-luna"),
+];
+
+/// The display name of the built-in GPT model `model` names (an effort
+/// suffix allowed).
+#[must_use]
+pub(crate) fn codex_display_name(model: &str) -> Option<&'static str> {
+    let (base, _) = split_effort_suffix(model);
+    CODEX_NATIVE_MODELS
+        .into_iter()
+        .find(|(id, _)| *id == base)
+        .map(|(_, name)| name)
+}
+
+/// The shipped route that replaces the retired route `model` in the picker
+/// ([`RETIRED_SUCCESSORS`]), if `model` is one (an effort suffix allowed).
+#[must_use]
+pub(crate) fn retired_successor(model: &str) -> Option<&'static str> {
+    let (base, _) = split_effort_suffix(model);
+    RETIRED_SUCCESSORS
+        .into_iter()
+        .find(|(retired, _)| *retired == base)
+        .map(|(_, next)| next)
+}
+
+/// The shipped models `OpenAI`'s Ultrafast tier covers (Codex's speed page,
+/// 2026-11-17): GPT-6.2 Sol on Pro $200 and up, GPT-6.2 Astra on Pro $500.
+/// GPT-6.1 Sol and GPT-6 Astra, which had it before, are retired
+/// ([`RETIRED_ULTRAFAST`]). Every one is a shipped route; their twins are served in managed
 /// mode only, outside the routes every install sets up
 /// ([`super::Config::opt_in_models`]).
-pub(crate) const ULTRAFAST_MODELS: [&str; 2] = ["gpt-6.1-sol", "gpt-6-astra"];
+pub(crate) const ULTRAFAST_MODELS: [&str; 2] = ["gpt-6.2-sol", "gpt-6.2-astra"];
 
 /// A kind of twin route: a copy of a `gpt` route to one of `models`, under
 /// the route's ID plus `suffix`, that asks for `tier`
@@ -110,12 +154,35 @@ pub(crate) struct Twin {
 
 /// The `-fast` twins, of every shipped model ([`SHIPPED_GPT_ROUTES`]). Each
 /// listed Codex's `priority` service tier (Codex's `/fast`) in the child's
-/// `/v1/models?client_version=` catalog (2026-10-29); the backend accepts the
-/// tier on models that list none, so only the canary checks that catalog.
+/// `/v1/models?client_version=` catalog (2026-10-29, 2026-11-17 for the 6.2
+/// models); the backend accepts the tier on models that list none, so only
+/// the canary checks that catalog.
 pub(crate) const FAST: Twin = Twin {
     suffix: "-fast",
     models: &SHIPPED_GPT_ROUTES,
     tier: ServiceTier::Priority,
+};
+
+/// Retired routes whose `-fast` and `-ultrafast` twins shipped: those twins
+/// stay served, as opt-in routes ([`super::Config::opt_in_models`]: out of
+/// the window checks and the offers), so a default `model`, a user agent, a
+/// Workflow script or hive's `recallModel` that names one keeps working.
+/// The `/model` update still drops their rows.
+pub(crate) const RETIRED_TWIN_MODELS: [&str; 2] = ["gpt-6.1-sol", "gpt-6-astra"];
+
+/// The `-fast` twins of [`RETIRED_TWIN_MODELS`].
+pub(crate) const RETIRED_FAST: Twin = Twin {
+    suffix: "-fast",
+    models: &RETIRED_TWIN_MODELS,
+    tier: ServiceTier::Priority,
+};
+
+/// The `-ultrafast` twins of [`RETIRED_TWIN_MODELS`] (managed mode, gated
+/// by the plan like [`ULTRAFAST`]'s).
+pub(crate) const RETIRED_ULTRAFAST: Twin = Twin {
+    suffix: "-ultrafast",
+    models: &RETIRED_TWIN_MODELS,
+    tier: ServiceTier::Ultrafast,
 };
 
 /// The `-ultrafast` twins, of [`ULTRAFAST_MODELS`].
@@ -172,7 +239,7 @@ impl Twin {
 
 /// The built-in route `routing_id` is a twin of, and the twin's tier.
 pub(crate) fn twin_of(routing_id: &str) -> Option<(&str, ServiceTier)> {
-    [FAST, ULTRAFAST]
+    [FAST, ULTRAFAST, RETIRED_FAST, RETIRED_ULTRAFAST]
         .iter()
         .find_map(|twin| Some((twin.base(routing_id)?, twin.tier)))
 }
@@ -409,4 +476,25 @@ pub(super) fn default_models() -> Vec<ModelRoute> {
         GPT_CONTEXT_WINDOW,
         false,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_retired_route_gives_its_picker_place_to_a_shipped_one() {
+        for (model, _) in CODEX_NATIVE_MODELS {
+            let next = retired_successor(model);
+            if is_retired_gpt_route(model) {
+                let next = next.unwrap_or_else(|| panic!("{model} has no successor"));
+                assert!(SHIPPED_GPT_ROUTES.contains(&next), "{model} -> {next}");
+            } else {
+                assert_eq!(next, None, "{model} is shipped");
+            }
+        }
+        for model in RETIRED_TWIN_MODELS {
+            assert!(is_retired_gpt_route(model), "{model}");
+        }
+    }
 }

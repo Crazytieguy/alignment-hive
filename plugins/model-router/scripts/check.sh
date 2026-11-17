@@ -97,9 +97,9 @@ if [ -n "$HEALTH" ]; then
   json_list() {
     printf '%s' "$OUT" | sed -n 's/.*"'"$1"'":\[\([^]]*\)\].*/\1/p'
   }
-  # "GPT-6.1 Terra" or "GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna".
+  # "GPT-6.1 Terra" or "GPT-6.2 Astra, GPT-6.2 Sol, GPT-6.1 Terra and GPT-6 Luna".
   format_labels() {
-    json_list labels | sed 's/","/, /g; s/"//g; s/\(.*\), /\1 and /'
+    json_list "${1:-labels}" | sed 's/","/, /g; s/"//g; s/\(.*\), /\1 and /'
   }
   # Adds the row for OUT: id, text, and the button's action id and label,
   # offered with Customize (or $6) when the binary can apply it, else Run setup.
@@ -123,7 +123,11 @@ if [ -n "$HEALTH" ]; then
     [ "${NEW_MODEL_DISMISSED:-}" = "$PLUGIN_VERSION" ] ||
       ADDS=$(json_list adds | tr -d '"')
     LABELS=$(format_labels)
-    if [ -n "$LABELS" ]; then
+    # The retired rows the added ones take the place of.
+    REPLACES=$(format_labels replaces)
+    if [ -n "$LABELS" ] && [ -n "$REPLACES" ]; then
+      add_row new-model "$LABELS can replace $REPLACES in /model" add-models "Update /model"
+    elif [ -n "$LABELS" ]; then
       add_row new-model "$LABELS can be added to /model" add-models "Add to /model"
     else
       add_row new-model "/model still lists retired GPT models" add-models "Update /model"
@@ -138,7 +142,15 @@ if [ -n "$HEALTH" ]; then
     if [ "${FAST_MODELS_DISMISSED:-}" != "$FAST_VERSION" ]; then
       ADDS="${ADDS:+$ADDS,}$FAST_ADDS"
       LABELS=$(format_labels)
-      add_row fast-models "$LABELS can be added to /model: 1.5–2x faster for 2.5x the usage" \
+      # Codex bills the fast tier at 2x on the GPT-6.2 models, 2.5x on the others.
+      NEW=""; OLD=""
+      for ID in $(printf '%s' "$FAST_ADDS" | tr ',' ' '); do
+        case "$ID" in gpt-6.2-*) NEW=1 ;; *) OLD=1 ;; esac
+      done
+      USAGE="2.5x"
+      [ -n "$NEW" ] && USAGE="2x"
+      [ -n "$NEW" ] && [ -n "$OLD" ] && USAGE="2–2.5x"
+      add_row fast-models "$LABELS can be added to /model: 1.5–2x faster for $USAGE the usage" \
         add-fast-models "Add to /model" "$FAST_VERSION" \
         "{\"id\": \"decline-fast-models\", \"label\": \"Don't add\", \"kind\": \"plugin\"}"
     fi
@@ -156,7 +168,7 @@ if [ -n "$HEALTH" ]; then
     printf '%s' "$OUT" | grep -q '"canApply":true'; then
     UF_VERSION="ultrafast:$(json_list adds | tr -d '"')"
     if [ "${ULTRAFAST_MODELS_DISMISSED:-}" != "$UF_VERSION" ]; then
-      add_row ultrafast-models "Ultrafast models can be added to /model: up to 8x faster for 8x the usage" \
+      add_row ultrafast-models "$(format_labels) can be added to /model: up to 4.5x faster for 6x the usage" \
         add-ultrafast-models "Add to /model" "$UF_VERSION" \
         "{\"id\": \"decline-ultrafast-models\", \"label\": \"Don't add\", \"kind\": \"plugin\"}"
     fi

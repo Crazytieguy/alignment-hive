@@ -11,7 +11,8 @@
 //!    a typed model ID runs it too (the windows check leaves the twins out:
 //!    most people never use them);
 //! 3. a user-level agent for each in `~/.claude/agents` (the plugin ships
-//!    none: most people's plans lack the tier).
+//!    none: most people's plans lack the tier), in place of the ones it
+//!    wrote for a retired model's twin, which `/model` no longer lists.
 //!
 //! The plan is made, and refused, before anything is written.
 
@@ -25,7 +26,7 @@ use super::{
     CHANGED, USER_SETTINGS_DISPLAY, Version, labels, picker_label, picker_model, picker_row,
     read_picker, set_recommended_windows, too_old, user_settings_file,
 };
-use crate::config::{Config, ULTRAFAST, fast_twin_id};
+use crate::config::{Config, ULTRAFAST, fast_twin_id, is_retired_gpt_route};
 use crate::state::Dirs;
 use crate::ultrafast::offered;
 
@@ -44,8 +45,8 @@ pub(crate) const AGENT_MARK: &str =
 fn agent_file(twin: &str, label: &str) -> String {
     format!(
         "---\nname: {twin}\ndescription: General-purpose agent driven by {label} on OpenAI's \
-         Ultrafast tier, up to 8x faster for 8x the usage. Use only when the person asks for \
-         Ultrafast. Read the model-router:delegating-to-models skill before delegating to \
+         Ultrafast tier, up to 4.5x faster for 6x the subscription usage. Use only when the \
+         person asks for Ultrafast. Read the model-router:delegating-to-models skill before delegating to \
          it.\nmodel: {twin}\n{AGENT_MARK}\n---\nComplete the task you are given.\n"
     )
 }
@@ -61,6 +62,8 @@ struct Edit {
     windows: Vec<(String, u64)>,
     /// The agent files to create, with their contents.
     agents: Vec<(PathBuf, String)>,
+    /// This command's agent files for retired twins, to remove.
+    retired: Vec<PathBuf>,
 }
 
 impl Edit {
@@ -156,8 +159,34 @@ fn plan(inputs: &Inputs<'_>, config: &Config, models: &[&str]) -> Result<Option<
         added,
         windows,
         agents,
+        retired: retired_agents(inputs.home),
     };
-    Ok((edit.settings.is_some() || !edit.agents.is_empty()).then_some(edit))
+    Ok(
+        (edit.settings.is_some() || !edit.agents.is_empty() || !edit.retired.is_empty())
+            .then_some(edit),
+    )
+}
+
+/// The agent files this command wrote for twins of models since retired
+/// (GPT-6.1 Sol's and GPT-6 Astra's): still served, but off `/model`, and
+/// given way to the current twins' agents. A file without [`AGENT_MARK`] is
+/// the person's own and stays.
+fn retired_agents(home: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(agents_dir(home)) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|file| {
+            file.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".md"))
+                .is_some_and(|twin| ULTRAFAST.strip(twin).is_some() && is_retired_gpt_route(twin))
+        })
+        .filter(|file| std::fs::read_to_string(file).is_ok_and(|text| text.contains(AGENT_MARK)))
+        .collect();
+    files.sort();
+    files
 }
 
 /// `doc` with a picker row for the twin of each of `models` whose base row
@@ -280,6 +309,16 @@ fn commit(inputs: &Inputs<'_>, edit: &Edit) -> anyhow::Result<Option<Value>> {
             }
         }
     }
+    let mut removed = Vec::new();
+    for file in &edit.retired {
+        match std::fs::remove_file(file) {
+            Ok(()) => removed.push(file.display().to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to remove {}", file.display()));
+            }
+        }
+    }
     Ok(Some(json!({
         "applied": true,
         "added": edit.added,
@@ -289,6 +328,7 @@ fn commit(inputs: &Inputs<'_>, edit: &Edit) -> anyhow::Result<Option<Value>> {
             .map(|(twin, window)| (twin.clone(), json!(window)))
             .collect::<serde_json::Map<_, _>>(),
         "agents": agents,
+        "removed": removed,
     })))
 }
 
@@ -388,9 +428,9 @@ mod tests {
     }
 
     const PICKER: &str = r#"{"modelPicker": {"options": [
-        {"model": "gpt-6.1-sol", "label": "GPT-6.1 Sol"},
-        {"model": "gpt-6.1-sol-fast", "label": "GPT-6.1 Sol Fast"},
-        {"model": "gpt-6-astra", "label": "GPT-6 Astra"},
+        {"model": "gpt-6.2-sol", "label": "GPT-6.2 Sol"},
+        {"model": "gpt-6.2-sol-fast", "label": "GPT-6.2 Sol Fast"},
+        {"model": "gpt-6.2-astra", "label": "GPT-6.2 Astra"},
         {"model": "opus"}
     ]}}"#;
 
@@ -418,7 +458,7 @@ mod tests {
             setup.run(CURRENT, true)["reason"],
             "the Codex plan lacks Ultrafast"
         );
-        setup.plan_lists(&["gpt-6.1-sol"]);
+        setup.plan_lists(&["gpt-6.2-sol"]);
         std::fs::write(
             setup.dirs.auth_dir().join("codex-a.json"),
             r#"{"type": "codex", "access_token": "t", "account_id": "other"}"#,
@@ -431,24 +471,25 @@ mod tests {
     fn a_plan_with_the_tier_gets_rows_windows_and_agents_for_what_it_lists() {
         let setup = Setup::new("");
         setup.user(PICKER);
-        setup.plan_lists(&["gpt-6.1-sol"]);
+        setup.plan_lists(&["gpt-6.2-sol"]);
         let report = setup.run(CURRENT, false);
         assert_eq!(
             report,
             json!({
                 "needed": true, "canApply": true,
-                "adds": ["gpt-6.1-sol-ultrafast"], "labels": ["GPT-6.1 Sol Ultrafast"],
+                "adds": ["gpt-6.2-sol-ultrafast"], "labels": ["GPT-6.2 Sol Ultrafast"],
                 "plan": "lists",
             })
         );
         let applied = setup.run(CURRENT, true);
-        let agent_path = agents_dir(&setup.home()).join("gpt-6.1-sol-ultrafast.md");
+        let agent_path = agents_dir(&setup.home()).join("gpt-6.2-sol-ultrafast.md");
         assert_eq!(
             applied,
             json!({
-                "applied": true, "added": ["gpt-6.1-sol-ultrafast"],
-                "windows": {"gpt-6.1-sol-ultrafast": 475_000},
+                "applied": true, "added": ["gpt-6.2-sol-ultrafast"],
+                "windows": {"gpt-6.2-sol-ultrafast": 475_000},
                 "agents": [agent_path.display().to_string()],
+                "removed": [],
             })
         );
         assert!(!setup.dirs.config_file().exists(), "no config change");
@@ -461,23 +502,23 @@ mod tests {
         assert_eq!(
             models,
             [
-                "gpt-6.1-sol",
-                "gpt-6.1-sol-fast",
-                "gpt-6.1-sol-ultrafast",
-                "gpt-6-astra",
+                "gpt-6.2-sol",
+                "gpt-6.2-sol-fast",
+                "gpt-6.2-sol-ultrafast",
+                "gpt-6.2-astra",
                 "opus"
             ]
         );
-        let agent = setup.agent("gpt-6.1-sol-ultrafast").unwrap();
+        let agent = setup.agent("gpt-6.2-sol-ultrafast").unwrap();
         assert!(
-            agent.contains("\nmodel: gpt-6.1-sol-ultrafast\n"),
+            agent.contains("\nmodel: gpt-6.2-sol-ultrafast\n"),
             "{agent}"
         );
         assert!(agent.contains(AGENT_MARK), "{agent}");
-        assert!(setup.agent("gpt-6-astra-ultrafast").is_none());
+        assert!(setup.agent("gpt-6.2-astra-ultrafast").is_none());
         assert!(
             setup.user_json()["modelSettings"]
-                .get("gpt-6-astra-ultrafast")
+                .get("gpt-6.2-astra-ultrafast")
                 .is_none()
         );
 
@@ -491,33 +532,34 @@ mod tests {
     #[test]
     fn an_api_key_gets_every_twin_and_a_window_without_a_picker() {
         let setup = Setup::new("[gpt]\nauth = \"api-key\"\n");
-        setup
-            .user(r#"{"modelSettings": {"gpt-6-astra-ultrafast": {"autoCompactWindow": 300000}}}"#);
+        setup.user(
+            r#"{"modelSettings": {"gpt-6.2-astra-ultrafast": {"autoCompactWindow": 300000}}}"#,
+        );
         std::fs::create_dir_all(agents_dir(&setup.home())).unwrap();
         std::fs::write(
-            agents_dir(&setup.home()).join("gpt-6-astra-ultrafast.md"),
+            agents_dir(&setup.home()).join("gpt-6.2-astra-ultrafast.md"),
             "mine",
         )
         .unwrap();
         let report = setup.run(CURRENT, false);
         assert_eq!(
             report["adds"],
-            json!(["gpt-6.1-sol-ultrafast", "gpt-6-astra-ultrafast"])
+            json!(["gpt-6.2-sol-ultrafast", "gpt-6.2-astra-ultrafast"])
         );
         assert_eq!(report["plan"], "api-key");
         let applied = setup.run(CURRENT, true);
         assert_eq!(applied["added"], json!([]));
         assert_eq!(
             applied["windows"],
-            json!({"gpt-6.1-sol-ultrafast": 475_000})
+            json!({"gpt-6.2-sol-ultrafast": 475_000})
         );
         assert_eq!(
-            setup.user_json()["modelSettings"]["gpt-6-astra-ultrafast"]["autoCompactWindow"],
+            setup.user_json()["modelSettings"]["gpt-6.2-astra-ultrafast"]["autoCompactWindow"],
             300_000,
             "an existing window is kept"
         );
-        assert_eq!(setup.agent("gpt-6-astra-ultrafast").unwrap(), "mine");
-        assert!(setup.agent("gpt-6.1-sol-ultrafast").is_some());
+        assert_eq!(setup.agent("gpt-6.2-astra-ultrafast").unwrap(), "mine");
+        assert!(setup.agent("gpt-6.2-sol-ultrafast").is_some());
         assert_eq!(setup.run(CURRENT, false)["needed"], false);
     }
 
@@ -525,7 +567,7 @@ mod tests {
     fn a_change_that_needs_the_person_writes_nothing() {
         let setup = Setup::new("");
         setup.user(PICKER);
-        setup.plan_lists(&["gpt-6.1-sol", "gpt-6-astra"]);
+        setup.plan_lists(&["gpt-6.2-sol", "gpt-6.2-astra"]);
         let old = Some(Version(2, 1, 200));
         let report = setup.run(old, false);
         assert_eq!(report["canApply"], false);
@@ -534,11 +576,11 @@ mod tests {
             "{report}"
         );
         assert_eq!(setup.run(old, true)["applied"], false);
-        assert!(setup.agent("gpt-6.1-sol-ultrafast").is_none());
+        assert!(setup.agent("gpt-6.2-sol-ultrafast").is_none());
 
         setup.user(r#"{"modelPicker": {"options": 3}}"#);
         assert_eq!(setup.run(CURRENT, true)["applied"], false);
-        assert!(setup.agent("gpt-6.1-sol-ultrafast").is_none());
+        assert!(setup.agent("gpt-6.2-sol-ultrafast").is_none());
     }
 
     #[test]
@@ -549,11 +591,105 @@ mod tests {
         assert_eq!(
             setup.user_json(),
             json!({"modelSettings": {
-                "gpt-6.1-sol-ultrafast": {"autoCompactWindow": 475_000},
-                "gpt-6-astra-ultrafast": {"autoCompactWindow": 258_400},
+                "gpt-6.2-sol-ultrafast": {"autoCompactWindow": 475_000},
+                "gpt-6.2-astra-ultrafast": {"autoCompactWindow": 258_400},
             }})
         );
-        assert!(setup.agent("gpt-6-astra-ultrafast").is_some());
+        assert!(setup.agent("gpt-6.2-astra-ultrafast").is_some());
+    }
+
+    /// An agent file in the user's agents, as an earlier `settings
+    /// ultrafast --apply` (or the person) wrote it for `twin`.
+    fn write_agent(setup: &Setup, twin: &str, text: &str) -> PathBuf {
+        let file = agents_dir(&setup.home()).join(format!("{twin}.md"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, text).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_retired_model_s_twin_agent_goes_once_the_new_twins_are_added() {
+        let setup = Setup::new("");
+        setup.user(PICKER);
+        setup.plan_lists(&["gpt-6.2-sol", "gpt-6.2-astra"]);
+        let sol = write_agent(
+            &setup,
+            "gpt-6.1-sol-ultrafast",
+            &agent_file("gpt-6.1-sol-ultrafast", "GPT-6.1 Sol"),
+        );
+        let astra = write_agent(
+            &setup,
+            "gpt-6-astra-ultrafast",
+            &agent_file("gpt-6-astra-ultrafast", "GPT-6 Astra"),
+        );
+        let applied = setup.run(CURRENT, true);
+        assert_eq!(
+            applied["added"],
+            json!(["gpt-6.2-sol-ultrafast", "gpt-6.2-astra-ultrafast"]),
+            "{applied}"
+        );
+        assert_eq!(applied["agents"].as_array().unwrap().len(), 2, "{applied}");
+        assert_eq!(
+            applied["removed"],
+            json!([astra.display().to_string(), sol.display().to_string()])
+        );
+        assert!(!sol.exists() && !astra.exists());
+        assert!(setup.agent("gpt-6.2-sol-ultrafast").is_some());
+        assert!(setup.agent("gpt-6.2-astra-ultrafast").is_some());
+        assert_eq!(setup.run(CURRENT, false)["needed"], false);
+    }
+
+    #[test]
+    fn a_retired_twin_agent_without_the_mark_is_the_person_s_own_and_stays() {
+        let setup = Setup::new("");
+        setup.user(PICKER);
+        setup.plan_lists(&["gpt-6.2-sol"]);
+        let mine = write_agent(&setup, "gpt-6.1-sol-ultrafast", "mine");
+        let applied = setup.run(CURRENT, true);
+        assert_eq!(applied["added"], json!(["gpt-6.2-sol-ultrafast"]));
+        assert_eq!(applied["removed"], json!([]));
+        assert_eq!(std::fs::read_to_string(&mine).unwrap(), "mine");
+        assert_eq!(setup.run(CURRENT, false)["needed"], false);
+        assert_eq!(
+            setup.run(CURRENT, true),
+            json!({"applied": true, "unchanged": true})
+        );
+    }
+
+    #[test]
+    fn a_removal_alone_is_still_a_change_to_apply() {
+        let setup = Setup::new("");
+        setup.user(PICKER);
+        setup.plan_lists(&["gpt-6.2-sol"]);
+        assert_eq!(setup.run(CURRENT, true)["applied"], true);
+        assert_eq!(setup.run(CURRENT, false)["needed"], false);
+
+        let sol = write_agent(
+            &setup,
+            "gpt-6.1-sol-ultrafast",
+            &agent_file("gpt-6.1-sol-ultrafast", "GPT-6.1 Sol"),
+        );
+        // No settings change: Claude Code's version does not matter.
+        let old = Some(Version(2, 1, 200));
+        for version in [CURRENT, old] {
+            let report = setup.run(version, false);
+            assert_eq!(
+                (&report["needed"], &report["canApply"]),
+                (&json!(true), &json!(true)),
+                "{report}"
+            );
+        }
+        let settings = setup.user_json();
+        assert_eq!(
+            setup.run(old, true),
+            json!({
+                "applied": true, "added": [], "windows": {}, "agents": [],
+                "removed": [sol.display().to_string()],
+            })
+        );
+        assert!(!sol.exists());
+        assert_eq!(setup.user_json(), settings);
+        assert_eq!(setup.run(CURRENT, false)["needed"], false);
     }
 
     #[test]
@@ -562,7 +698,7 @@ mod tests {
             "[upstreams.cliproxy]\nmode = \"external\"\n\
              base-url = \"http://127.0.0.1:8317\"\n",
         );
-        setup.plan_lists(&["gpt-6.1-sol", "gpt-6-astra"]);
+        setup.plan_lists(&["gpt-6.2-sol", "gpt-6.2-astra"]);
         let report = setup.run(CURRENT, false);
         assert_eq!(
             (&report["needed"], &report["plan"]),

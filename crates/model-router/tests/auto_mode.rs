@@ -1453,9 +1453,9 @@ async fn a_fast_twin_judges_on_the_priority_tier() {
         let address = fake.clone().serve().await;
         let mut config = config(address, true, true);
         if routed {
-            config.models.push(route("gpt-6.1-sol"));
+            config.models.push(route("gpt-6.2-sol"));
         }
-        config.auto_mode_classifier.model = "gpt-6.1-sol-fast".to_string();
+        config.auto_mode_classifier.model = "gpt-6.2-sol-fast".to_string();
         let app = model_router::proxy::app(config).await.unwrap();
         let (_, body) = send(&app, &turn_body(true)).await;
         assert_eq!(
@@ -1463,7 +1463,7 @@ async fn a_fast_twin_judges_on_the_priority_tier() {
             "evaluated",
             "routed: {routed}"
         );
-        let calls = asked(&fake, "gpt-6.1-sol").await;
+        let calls = asked(&fake, "gpt-6.2-sol").await;
         assert_eq!(calls.len(), 1, "routed: {routed}");
         assert_eq!(calls[0]["service_tier"], "priority", "routed: {routed}");
     }

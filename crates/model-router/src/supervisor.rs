@@ -190,7 +190,10 @@ fn ultrafast_payload_rule() -> String {
     use crate::service_tier::{ULTRAFAST, ULTRAFAST_RELAY_HEADER};
     use std::fmt::Write as _;
     let mut yaml = String::from("  override:\n    - models:\n");
-    for model in crate::config::ULTRAFAST_MODELS {
+    let models = crate::config::ULTRAFAST_MODELS
+        .into_iter()
+        .chain(crate::config::RETIRED_TWIN_MODELS);
+    for model in models {
         let _ = writeln!(yaml, "        - name: {}", yaml_quote(model));
         let _ = writeln!(yaml, "          protocol: {}", yaml_quote("codex"));
         yaml.push_str("          headers:\n");
@@ -1431,6 +1434,16 @@ mod tests {
                 rule,
                 serde_json::json!({
                     "models": [
+                        {
+                            "name": "gpt-6.2-sol",
+                            "protocol": "codex",
+                            "headers": {"x-model-router-service-tier": "ultrafast"},
+                        },
+                        {
+                            "name": "gpt-6.2-astra",
+                            "protocol": "codex",
+                            "headers": {"x-model-router-service-tier": "ultrafast"},
+                        },
                         {
                             "name": "gpt-6.1-sol",
                             "protocol": "codex",

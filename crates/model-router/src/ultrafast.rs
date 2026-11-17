@@ -500,12 +500,12 @@ mod tests {
     #[test]
     fn the_catalog_gives_the_models_with_the_tier() {
         let parsed = parse_catalog(&catalog(&[
-            ("gpt-6.1-sol", &["priority", "ultrafast"]),
-            ("gpt-6-astra", &["priority"]),
+            ("gpt-6.2-sol", &["priority", "ultrafast"]),
+            ("gpt-6.2-astra", &["priority"]),
             ("gpt-6-chat-thinking", &[]),
         ]))
         .unwrap();
-        assert_eq!(parsed, set(&["gpt-6.1-sol"]));
+        assert_eq!(parsed, set(&["gpt-6.2-sol"]));
         assert!(parse_catalog(b"{\"data\": []}").is_err());
         assert!(parse_catalog(b"<html>").is_err());
     }
@@ -619,13 +619,13 @@ mod tests {
             vec![
                 (
                     "t1",
-                    catalog(&[("gpt-6.1-sol", &["priority", "ultrafast"])]),
+                    catalog(&[("gpt-6.2-sol", &["priority", "ultrafast"])]),
                 ),
                 (
                     "t2",
                     catalog(&[
-                        ("gpt-6.1-sol", &["priority", "ultrafast"]),
-                        ("gpt-6-astra", &["ultrafast"]),
+                        ("gpt-6.2-sol", &["priority", "ultrafast"]),
+                        ("gpt-6.2-astra", &["ultrafast"]),
                     ]),
                 ),
             ],
@@ -642,8 +642,8 @@ mod tests {
 
         let gate = Gate::with_url(dirs.auth_dir(), &dirs, &url).unwrap();
         gate.read().await.unwrap();
-        assert_eq!(plan(&config, &dirs), Plan::Read(set(&["gpt-6.1-sol"])));
-        assert_eq!(offered(&config, &dirs), ["gpt-6.1-sol"]);
+        assert_eq!(plan(&config, &dirs), Plan::Read(set(&["gpt-6.2-sol"])));
+        assert_eq!(offered(&config, &dirs), ["gpt-6.2-sol"]);
         let text = std::fs::read_to_string(cache_file(&dirs)).unwrap();
         assert!(!text.contains("acct") && !text.contains("t1"), "{text}");
 
@@ -651,7 +651,7 @@ mod tests {
         relogin(&dirs, &[("codex-a.json", codex("stale", "acct-2"))]);
         assert!(gate.read().await.is_err());
         relogin(&dirs, &both);
-        assert_eq!(plan(&config, &dirs), Plan::Read(set(&["gpt-6.1-sol"])));
+        assert_eq!(plan(&config, &dirs), Plan::Read(set(&["gpt-6.2-sol"])));
 
         // It speaks for no other logins.
         relogin(
@@ -692,7 +692,7 @@ mod tests {
         let (url, hits) = catalog_server(
             vec![(
                 "t1",
-                catalog(&[("gpt-6.1-sol", &["priority", "ultrafast"])]),
+                catalog(&[("gpt-6.2-sol", &["priority", "ultrafast"])]),
             )],
             Duration::ZERO,
         )
@@ -701,10 +701,10 @@ mod tests {
         let gate = Arc::new(Gate::with_url(dirs.auth_dir(), &dirs, &url).unwrap());
 
         // No answer yet: read first.
-        assert_eq!(gate.decide("gpt-6.1-sol").await, Verdict::Forward);
+        assert_eq!(gate.decide("gpt-6.2-sol").await, Verdict::Forward);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(gate.decide("gpt-6.1-sol").await, Verdict::Forward);
-        assert_eq!(gate.decide("gpt-6-astra").await, Verdict::Refuse);
+        assert_eq!(gate.decide("gpt-6.2-sol").await, Verdict::Forward);
+        assert_eq!(gate.decide("gpt-6.2-astra").await, Verdict::Refuse);
         assert_eq!(hits.load(Ordering::SeqCst), 1, "a fresh answer stands");
 
         // A stale refusal is read again before it refuses.
@@ -712,13 +712,13 @@ mod tests {
         record_at(
             &dirs,
             &dirs.auth_dir(),
-            &["gpt-6-astra"],
+            &["gpt-6.2-astra"],
             now - UNLISTED_FOR.as_secs(),
         );
-        assert_eq!(gate.decide("gpt-6-astra").await, Verdict::Forward);
+        assert_eq!(gate.decide("gpt-6.2-astra").await, Verdict::Forward);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(
-            gate.decide("gpt-6.1-sol").await,
+            gate.decide("gpt-6.2-sol").await,
             Verdict::Forward,
             "the plan lists it now"
         );
@@ -728,12 +728,12 @@ mod tests {
         record_at(
             &dirs,
             &dirs.auth_dir(),
-            &["gpt-6-astra"],
+            &["gpt-6.2-astra"],
             now - LISTED_FOR.as_secs(),
         );
-        assert_eq!(gate.decide("gpt-6-astra").await, Verdict::Forward);
+        assert_eq!(gate.decide("gpt-6.2-astra").await, Verdict::Forward);
         hit(&hits, 3).await;
-        assert_eq!(gate.decide("gpt-6-astra").await, Verdict::Refuse);
+        assert_eq!(gate.decide("gpt-6.2-astra").await, Verdict::Refuse);
     }
 
     #[tokio::test]
@@ -748,22 +748,22 @@ mod tests {
         let turns: Vec<_> = (0..4)
             .map(|_| {
                 let gate = gate.clone();
-                tokio::spawn(async move { gate.decide("gpt-6.1-sol").await })
+                tokio::spawn(async move { gate.decide("gpt-6.2-sol").await })
             })
             .collect();
         for turn in turns {
             assert_eq!(turn.await.unwrap(), Verdict::Refuse);
         }
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(gate.decide("gpt-6.1-sol").await, Verdict::Refuse);
+        assert_eq!(gate.decide("gpt-6.2-sol").await, Verdict::Refuse);
         assert_eq!(hits.load(Ordering::SeqCst), 1, "within RETRY_AFTER");
         *gate.reading.lock().await = Instant::now().checked_sub(RETRY_AFTER);
-        assert_eq!(gate.decide("gpt-6.1-sol").await, Verdict::Refuse);
+        assert_eq!(gate.decide("gpt-6.2-sol").await, Verdict::Refuse);
         assert_eq!(hits.load(Ordering::SeqCst), 2);
 
         // With no answer at all, a failed read sends the turn at priority.
         std::fs::remove_file(cache_file(&dirs)).unwrap();
-        assert_eq!(gate.decide("gpt-6.1-sol").await, Verdict::Priority);
+        assert_eq!(gate.decide("gpt-6.2-sol").await, Verdict::Priority);
         assert_eq!(hits.load(Ordering::SeqCst), 2, "within RETRY_AFTER");
     }
 }

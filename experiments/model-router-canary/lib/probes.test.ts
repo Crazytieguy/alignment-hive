@@ -179,10 +179,10 @@ describe('catalog and config', () => {
 
   test('the -fast models are the shipped Codex models, and none before the twins existed', () => {
     const cat = parseCatalog(src);
-    expect(cat.fast).toContain('gpt-6.1-sol');
+    expect(cat.fast).toContain('gpt-6.2-sol');
     for (const id of cat.fast) expect(cat.gpt).toContain(id);
     expect(parseCatalog(src.replace(/const FAST: Twin\b/, 'const QUICK: Twin')).fast).toEqual([]);
-    expect(parseCatalog('const FAST_SUFFIX: &str = "-fast";\n' + src.replace(/const FAST: Twin\b/, 'const QUICK: Twin')).fast).toContain('gpt-6.1-sol');
+    expect(parseCatalog('const FAST_SUFFIX: &str = "-fast";\n' + src.replace(/const FAST: Twin\b/, 'const QUICK: Twin')).fast).toContain('gpt-6.2-sol');
   });
 
   const cat = { gpt: ['gpt-a', 'gpt-b'], grok: ['grok-x'], muse: ['muse-y'], fast: ['gpt-a'] };

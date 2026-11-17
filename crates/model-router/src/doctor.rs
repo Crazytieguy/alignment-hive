@@ -1484,7 +1484,9 @@ mod tests {
     }
 
     /// The Codex slugs every default config routes to.
-    const GPT_MODELS: [&str; 8] = [
+    const GPT_MODELS: [&str; 10] = [
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
         "gpt-6.1-sol",
         "gpt-6.1-terra",
         "gpt-6-astra",
@@ -1585,6 +1587,8 @@ mod tests {
         // The check is family-agnostic on purpose: a vanished Codex slug is
         // exactly as broken as a vanished Grok one.
         let body = models_body(&[
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
             "gpt-6.1-sol",
             "gpt-6.1-terra",
             "gpt-6-astra",
@@ -1628,7 +1632,7 @@ mod tests {
         let check = shipped_agent_routes_check(&config(&source));
         assert!(!check.ok);
         assert!(
-            check.detail.contains("lacks gpt-6-astra,"),
+            check.detail.contains("lacks gpt-6.2-astra,"),
             "{}",
             check.detail
         );
@@ -1654,7 +1658,7 @@ mod tests {
         assert!(
             check
                 .detail
-                .contains("lacks gpt-6.1-sol, gpt-6.1-terra, gpt-6-luna,"),
+                .contains("lacks gpt-6.2-astra, gpt-6.2-sol, gpt-6.1-terra, gpt-6-luna,"),
             "{}",
             check.detail
         );
@@ -1676,7 +1680,7 @@ mod tests {
         assert!(
             check
                 .detail
-                .contains("lacks gpt-6.1-sol, gpt-6.1-terra, which"),
+                .contains("lacks gpt-6.2-astra, gpt-6.2-sol, gpt-6.1-terra, which"),
             "{}",
             check.detail
         );
@@ -1697,23 +1701,52 @@ mod tests {
         let check = shipped_agent_routes_check(&config(&source));
         assert!(!check.ok);
         assert!(
-            check.detail.contains("lacks gpt-6.1-terra, which"),
+            check
+                .detail
+                .contains("lacks gpt-6.2-astra, gpt-6.2-sol, gpt-6.1-terra, which"),
             "{}",
             check.detail
         );
     }
 
     #[test]
+    fn a_models_list_written_before_gpt_6_2_is_named_with_the_fix() {
+        // A 0.1.25-era list: every built-in GPT route but the two GPT-6.2 ones.
+        let source = models_toml(&[
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ]);
+        let check = shipped_agent_routes_check(&config(&source));
+        assert!(!check.ok);
+        assert!(
+            check
+                .detail
+                .contains("lacks gpt-6.2-astra, gpt-6.2-sol, which"),
+            "{}",
+            check.detail
+        );
+        assert!(!check.detail.contains("gpt-6.1-sol"), "{}", check.detail);
+        assert!(!check.detail.contains("gpt-6-astra"), "{}", check.detail);
+        assert!(!check.detail.contains("no -fast twin"), "{}", check.detail);
+    }
+
+    #[test]
     fn a_shipped_route_pointed_at_a_model_without_a_fast_tier_names_its_twin() {
-        let source = models_toml(&["gpt-6-astra", "gpt-6.1-terra", "gpt-6-luna"])
-            + "[[models]]\nrouting-id = \"gpt-6.1-sol\"\nupstream-model = \"gpt-6-sol\"\n\
+        let source = models_toml(&["gpt-6.2-astra", "gpt-6.1-terra", "gpt-6-luna"])
+            + "[[models]]\nrouting-id = \"gpt-6.2-sol\"\nupstream-model = \"gpt-6.1-sol\"\n\
                display-name = \"Sol\"\n";
         let check = shipped_agent_routes_check(&config(&source));
         assert!(!check.ok);
         assert!(
             check
                 .detail
-                .starts_with("no -fast twin for gpt-6.1-sol, which the shipped -fast agents need (gpt-6.1-sol-fast)"),
+                .starts_with("no -fast twin for gpt-6.2-sol, which the shipped -fast agents need (gpt-6.2-sol-fast)"),
             "{}",
             check.detail
         );
@@ -1736,31 +1769,31 @@ mod tests {
         assert!(ultrafast_check(&subscription, &dirs).is_none(), "lacks");
         assert!(ultrafast_check(&config("[gpt]\nauth = \"api-key\"\n"), &dirs).is_none());
 
-        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6.1-sol"]);
+        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6.2-sol"]);
         let check = ultrafast_check(&subscription, &dirs).unwrap();
         assert!(check.ok && !check.warn, "{check:?}");
         assert_eq!(
             check.detail,
-            "gpt-6.1-sol-ultrafast (the Codex plan lists the tier); gpt-6-astra-ultrafast turns \
+            "gpt-6.2-sol-ultrafast (the Codex plan lists the tier); gpt-6.2-astra-ultrafast turns \
              are refused"
         );
-        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6.1-sol", "gpt-6-astra"]);
+        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6.2-sol", "gpt-6.2-astra"]);
         assert_eq!(
             ultrafast_check(&subscription, &dirs).unwrap().detail,
-            "gpt-6.1-sol-ultrafast, gpt-6-astra-ultrafast (the Codex plan lists the tier)"
+            "gpt-6.2-sol-ultrafast, gpt-6.2-astra-ultrafast (the Codex plan lists the tier)"
         );
     }
 
     #[test]
     fn a_model_override_pointing_a_shipped_route_at_a_model_without_a_fast_tier_names_its_twin() {
-        let source = "[[model-overrides]]\nrouting-id = \"gpt-6.1-sol\"\n\
-                      upstream-model = \"gpt-6-sol\"\n";
+        let source = "[[model-overrides]]\nrouting-id = \"gpt-6.2-sol\"\n\
+                      upstream-model = \"gpt-6.1-sol\"\n";
         let check = shipped_agent_routes_check(&config(source));
         assert!(!check.ok);
         assert!(
             check.detail.starts_with(
-                "no -fast twin for gpt-6.1-sol, which the shipped -fast agents need \
-                 (gpt-6.1-sol-fast)"
+                "no -fast twin for gpt-6.2-sol, which the shipped -fast agents need \
+                 (gpt-6.2-sol-fast)"
             ),
             "{}",
             check.detail
@@ -1782,7 +1815,12 @@ mod tests {
     #[test]
     fn a_legacy_models_block_gets_a_deprecation_warning() {
         // Even one that keeps every shipped route: it still drops future ones.
-        let source = models_toml(&["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"]);
+        let source = models_toml(&[
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
+            "gpt-6.1-terra",
+            "gpt-6-luna",
+        ]);
         let config = config(&source);
         assert!(shipped_agent_routes_check(&config).ok);
         let check = legacy_models_block_check(&config).unwrap();
@@ -1800,8 +1838,8 @@ mod tests {
     fn a_custom_list_that_keeps_the_shipped_routes_passes() {
         let source = models_toml(&[
             "mine",
-            "gpt-6-astra",
-            "gpt-6.1-sol",
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
             "gpt-6.1-terra",
             "gpt-6-luna",
         ]);
