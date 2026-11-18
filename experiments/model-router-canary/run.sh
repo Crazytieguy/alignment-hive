@@ -1,5 +1,5 @@
 #!/bin/sh
-# Launched hourly by launchd (install.sh). `canary.ts tick` returns at once unless something is due: the live checks
+# Launched nightly by launchd (install.sh). `canary.ts tick` returns at once unless something is due: the live checks
 # once a day or when Claude Code or the router changed, a new CLIProxyAPI release once it is old enough. When a run
 # needs attention (exit 2) or the canary itself failed (exit 1), starts a background Claude Code session on the
 # report, in this repository, in auto mode. A quiet run starts no session.
@@ -16,8 +16,8 @@ code=$?
 
 report="$(tail -n 1 "$data/last-stdout.txt")"
 if [ ! -f "$report" ]; then
-  # A crash before the report was written leaves no path; the launchd log then holds the error. It would recur every
-  # hour, so it starts one session a day.
+  # A crash before the report was written leaves no path; the launchd log then holds the error. Manual reruns also
+  # use this wrapper, so start at most one crash session a day.
   [ -n "$(find "$data/crash-session" -mtime -1 2>/dev/null)" ] && exit 1
   touch "$data/crash-session"
   report="$data/launchd.log (the canary exited $code before writing a report)"

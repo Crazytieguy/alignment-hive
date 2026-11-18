@@ -1,5 +1,5 @@
 #!/bin/sh
-# Schedules run.sh hourly with launchd (macOS). `sh install.sh` installs or updates the job; `sh install.sh --remove`
+# Schedules run.sh daily at 04:00 local time with launchd (macOS). `sh install.sh` installs or updates the job; `sh install.sh --remove`
 # removes it. The job runs from this checkout, so install from the main checkout, not a worktree. It keeps this
 # shell's PATH (where claude, bun, docker, uv and gh are found) and any XDG_* or CANARY_DATA overrides.
 set -eu
@@ -37,8 +37,16 @@ cat > "$plist" <<EOF
 <plist version="1.0">
 <dict>
   <key>Label</key><string>$label</string>
-  <key>ProgramArguments</key><array><string>/bin/sh</string><string>$here/run.sh</string></array>
-  <key>StartInterval</key><integer>3600</integer>
+  <!-- launchd catches up missed calendar events on wake; don't start a daytime benchmark. -->
+  <key>ProgramArguments</key><array>
+    <string>/bin/sh</string><string>-c</string>
+    <string>[ "\$(date +%H)" = 04 ] || exit 0; exec /bin/sh "\$1"</string>
+    <string>$label</string><string>$here/run.sh</string>
+  </array>
+  <key>StartCalendarInterval</key><dict>
+    <key>Hour</key><integer>4</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
   <key>EnvironmentVariables</key><dict>
 $env_xml
   </dict>
@@ -48,4 +56,4 @@ $env_xml
 </plist>
 EOF
 launchctl bootstrap "$domain" "$plist"
-echo "Installed $label: hourly. Run now: launchctl kickstart $domain/$label"
+echo "Installed $label: daily at 04:00 local time (late wakes outside the 04:00 hour are skipped). Run manually: bun $here/canary.ts tick"

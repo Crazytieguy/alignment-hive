@@ -6,10 +6,10 @@ It runs on macOS (launchd, and the keychain login the nested `claude` runs share
 
 ## When it runs
 
-launchd starts `run.sh` every hour. Most hours it checks two versions and the release list and stops there; a release list that can't be fetched for a day is a finding of its own. It runs:
+launchd starts `run.sh` daily at **04:00 local time**. If the laptop sleeps through the scheduled time and wakes outside the 04:00–04:59 window, that run is skipped rather than starting a daytime benchmark. This limits when a run starts, not when it finishes; a benchmark or follow-up session can continue past that hour. Each tick checks two versions and the release list; a release list that can't be fetched for a day is a finding of its own. It runs:
 
-- **The live checks** once a day, and as soon as Claude Code or the router changes version, so a Claude Code update that breaks routing is caught the hour it lands. Once a week they add the context-overflow probes, requests of about 1.2M tokens.
-- **A candidate** when the newest CLIProxyAPI release above the pin is at least 4 days old and hasn't been evaluated. Upstream ships about nine releases a week and fixes most regressions it ships within three days, never by pulling the release. Once a newer release has aged, older ones are passed over. An inconclusive candidate is retried six hours later, up to three times.
+- **The live checks** when a day has elapsed or Claude Code or the router has changed version. Updates are checked at the next nightly tick, not immediately. Once a week they add the context-overflow probes, requests of about 1.2M tokens.
+- **A candidate** when the newest CLIProxyAPI release above the pin is at least 4 days old and hasn't been evaluated. Upstream ships about nine releases a week and fixes most regressions it ships within three days, never by pulling the release. Once a newer release has aged, older ones are passed over. An inconclusive candidate becomes eligible for retry six hours later, up to three times; scheduled retries wait until the next nightly tick.
 
 When a run finds something, `run.sh` starts a background Claude Code session (`claude --bg --name model-router-canary`) in this repository, in auto mode, with the report and `session-prompt.md`. The session fixes a live regression, re-pins to a passing candidate (or works around a failing one, or reports it upstream), or fixes the canary. The same finding starts at most one session a day; a quiet run starts none and spends no Claude quota.
 
@@ -52,7 +52,7 @@ bun canary.ts status          # recent runs and candidate verdicts
 bun test                      # unit tests, no network
 ```
 
-Schedule it with `sh install.sh` from the main checkout; it keeps that shell's `PATH` and any `XDG_*` overrides. `sh install.sh --remove` takes it out, and `launchctl kickstart gui/$(id -u)/com.alignment-hive.model-router-canary` runs a tick now.
+Schedule it with `sh install.sh` from the main checkout; it keeps that shell's `PATH` and any `XDG_*` overrides. `sh install.sh --remove` takes it out. To run immediately outside the nightly window, use `bun canary.ts tick` from this folder; `launchctl kickstart` respects the same nightly window as the schedule.
 
 ## Where things live
 

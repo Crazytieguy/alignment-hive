@@ -1,5 +1,5 @@
 // The model-router canary. Usage (from this folder):
-//   bun canary.ts tick                          what launchd runs hourly: whatever is due, else nothing
+//   bun canary.ts tick                          what launchd runs nightly: whatever is due, else nothing
 //   bun canary.ts live [--full]                 live checks only
 //   bun canary.ts candidate [--version X] [--bench | --no-bench]   evaluate one release (default: the newest aged one), even if seen
 //   bun canary.ts bench [--version X] [--attempts N] [--tasks a,b]   Terminal-Bench subset: pinned vs candidate sandboxes
@@ -39,7 +39,7 @@ const MUSE_WONDER_FULL = 'muse-wonder-full-1.0';
 /** Sandbox ports are the first free ones from here that the live install doesn't use. */
 const SANDBOX_PORT_BASE = 8797;
 const CANDIDATES = join(DATA, 'candidates.json');
-/** Which findings started a session when, so an hourly tick doesn't start one per hour for the same finding. */
+/** Which findings started a session when, so repeated ticks don't start another for the same finding that day. */
 const SESSIONS = join(DATA, 'sessions.json');
 /** Candidate-only failures that settle a verdict at once; any other single failure is retried once to rule out a blip. */
 const STRUCTURAL = /^(catalog|models|sandbox-start|config-keys|bench-errors|bench-rerun-errors)$/;
