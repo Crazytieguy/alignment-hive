@@ -695,9 +695,9 @@ async fn forward_to_anthropic(
 const COMPACTION_HEADER: &str = "x-claude-code-compaction";
 
 /// The DOM-level rewrites every GPT-branch turn gets, in one parse: the
-/// tools the history adds mid-conversation declared in `tools[]`
-/// ([`crate::tool_changes`]), the identity system block
-/// ([`crate::identity`]), the service tier the route asks for
+/// tools the history adds or withdraws mid-conversation folded the way the
+/// route's backend takes them ([`crate::tool_changes`]), the identity system
+/// block ([`crate::identity`]), the service tier the route asks for
 /// ([`crate::service_tier`]), the removal of tool-schema patterns the Codex
 /// validator cannot compile ([`crate::tool_schema`]), and on a compaction
 /// request a text-only reply. A message-thread `create` loses its `thread`
@@ -725,7 +725,8 @@ fn rewrite_gpt_body(
     let mut document: serde_json::Value =
         serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON: {error}"))?;
     // First: the compaction branch below reads whether `tools` is empty, and
-    // the schema shim must reach the declared tools.
+    // the schema shim must reach the tools as the fold leaves them, in
+    // `tools[]` or in the history.
     crate::tool_changes::apply(&mut document, route.family);
     if let Some(object) = document.as_object_mut() {
         // A thread `create` (anything else was refused in `gpt_response`):

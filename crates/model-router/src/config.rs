@@ -186,16 +186,23 @@ impl ModelFamily {
         }
     }
 
-    /// Whether the tools Claude Code adds or withdraws mid-conversation, in
-    /// a system message's `tool_addition`/`tool_removal` blocks, must be
-    /// declared in `tools[]` ([`crate::tool_changes`]): the child's translators
-    /// ignore `tool_removal`, and before 8.0.48 `tool_addition` too.
+    /// Whether a tool Claude Code adds mid-conversation, in a system
+    /// message's `tool_addition` block, stays in the history for the child
+    /// to write as an append-only `additional_tools` item, instead of being
+    /// declared in `tools[]` ([`crate::tool_changes`]). The Codex backend
+    /// takes the item (the child's Codex translator writes it since 8.0.48),
+    /// and from GPT-6.2 drops the reasoning items that precede a change to
+    /// `tools`. xAI accepts no such item (the child folds one back into
+    /// `tools`), Meta is unmeasured, and Chat Completions has none. Every
+    /// family has `tool_removal` folded by the router: no translator of the
+    /// child reads it.
     ///
     /// Matched exhaustively on purpose: a new family must decide.
     #[must_use]
-    pub const fn hoists_tool_changes(self) -> bool {
+    pub const fn appends_tool_additions(self) -> bool {
         match self {
-            Self::Gpt | Self::Grok | Self::Muse | Self::OpenAiCompat => true,
+            Self::Gpt => true,
+            Self::Grok | Self::Muse | Self::OpenAiCompat => false,
         }
     }
 }

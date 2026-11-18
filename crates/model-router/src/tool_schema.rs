@@ -65,23 +65,36 @@ const SCHEMA_VALUE_KEYWORDS: [&str; 16] = [
 ];
 
 /// Removes every `pattern` keyword carrying a Unicode property escape from
-/// the schemas of an Anthropic Messages request: each `tools[*].input_schema`
-/// and a structured-output `output_config.format.schema`. Returns the names
-/// of the tools that lost a pattern (for the caller's log line); a body with
-/// none is left untouched.
+/// the schemas of an Anthropic Messages request: each `tools[*].input_schema`,
+/// the definition of each tool a system message adds mid-conversation (a
+/// `tool_addition` block [`crate::tool_changes`] left in the history, which
+/// the child declares upstream from there), and a structured-output
+/// `output_config.format.schema`. Returns the names of the tools that lost a
+/// pattern (for the caller's log line); a body with none is left untouched.
 pub(crate) fn drop_unportable_patterns(document: &mut Value) -> Vec<String> {
     let mut affected = Vec::new();
     if let Some(tools) = document.get_mut("tools").and_then(Value::as_array_mut) {
         for tool in tools {
-            let Some(schema) = tool.get_mut("input_schema") else {
+            drop_in_tool(tool, &mut affected);
+        }
+    }
+    if let Some(messages) = document.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            if message.get("role").and_then(Value::as_str) != Some("system") {
+                continue;
+            }
+            let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
                 continue;
             };
-            if drop_in_schema(schema) > 0 {
-                let name = tool
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("<unnamed>");
-                affected.push(name.to_string());
+            for block in content {
+                if block.get("type").and_then(Value::as_str) != Some("tool_addition") {
+                    continue;
+                }
+                // Whatever the `tool`'s own type: the child reads any
+                // addition that carries a definition.
+                if let Some(definition) = block.pointer_mut("/tool/definition") {
+                    drop_in_tool(definition, &mut affected);
+                }
             }
         }
     }
@@ -91,6 +104,21 @@ pub(crate) fn drop_unportable_patterns(document: &mut Value) -> Vec<String> {
         affected.push("<output_config.format.schema>".to_string());
     }
     affected
+}
+
+/// Removes the unportable patterns of one tool definition's `input_schema`,
+/// adding its name to `affected` when it lost any.
+fn drop_in_tool(tool: &mut Value, affected: &mut Vec<String>) {
+    let Some(schema) = tool.get_mut("input_schema") else {
+        return;
+    };
+    if drop_in_schema(schema) > 0 {
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("<unnamed>");
+        affected.push(name.to_string());
+    }
 }
 
 /// Walks one schema through the JSON Schema keywords only — never through
@@ -301,5 +329,46 @@ mod tests {
                 .is_none()
         );
         assert_eq!(document["tools"][1]["input_schema"], "not a schema");
+    }
+
+    /// A tool a system message adds mid-conversation is declared upstream
+    /// from the history, so its definition there is covered; the same text
+    /// anywhere else is conversation, not a schema.
+    #[test]
+    fn a_tool_added_in_the_history_loses_the_offending_pattern_too() {
+        let artifact = artifact_body()["tools"][1].clone();
+        let addition = |definition: &Value| {
+            json!({"type": "tool_addition",
+                "tool": {"type": "tool_definition", "definition": definition}})
+        };
+        let mut document = json!({
+            "model": "gpt-test",
+            "tools": [],
+            "messages": [
+                {"role": "user", "content": [addition(&artifact)]},
+                {"role": "system", "content": [
+                    {"type": "text", "text": "Artifact is now available."},
+                    addition(&artifact),
+                    {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "Glob"}},
+                    {"type": "tool_removal", "tool": {"definition": artifact}},
+                ]},
+                {"role": "system", "content": "plain text"},
+            ],
+        });
+        let original = document.clone();
+        assert_eq!(drop_unportable_patterns(&mut document), ["Artifact"]);
+
+        let properties = &document["messages"][1]["content"][1]["tool"]["definition"]["input_schema"]
+            ["properties"];
+        assert!(properties["field"].get("pattern").is_none());
+        assert_eq!(properties["doc_id"]["pattern"], ARTIFACT_DOC_ID);
+        // Everything but that one keyword is as it was.
+        let mut expected = original;
+        expected["messages"][1]["content"][1]["tool"]["definition"]["input_schema"]["properties"]
+            ["field"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pattern");
+        assert_eq!(document, expected);
     }
 }

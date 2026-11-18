@@ -2505,11 +2505,14 @@ async fn gpt_turn_drops_tool_schema_patterns_the_codex_validator_rejects() {
 }
 
 /// A tool Claude Code adds mid-conversation arrives as a system message's
-/// `tool_addition` block, which the child drops: a GPT turn gets it declared
-/// in `tools[]` (through the schema shim too) and loses the deferred-tool
-/// placeholder, while a Claude turn is forwarded byte for byte.
+/// `tool_addition` block. A GPT turn keeps it there, for the child to append
+/// as an `additional_tools` item, so the upstream `tools` stay the ones the
+/// conversation started with (GPT-6.2 drops the reasoning that precedes a
+/// change to them); a Grok turn gets it declared in `tools[]`. Both go
+/// through the schema shim and lose the deferred-tool placeholder, while a
+/// Claude turn is forwarded byte for byte.
 #[tokio::test]
-async fn gpt_turn_declares_tools_added_mid_conversation() {
+async fn routed_turns_declare_tools_added_mid_conversation() {
     fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
         plain_message_response()
     }
@@ -2517,7 +2520,7 @@ async fn gpt_turn_declares_tools_added_mid_conversation() {
     let (anthropic_address, anthropic_observed) = spawn_fake(handler).await;
     let config = Config {
         anthropic_upstream_base: format!("http://{anthropic_address}"),
-        ..websearch_config(cpa_address)
+        ..grok_websearch_config(cpa_address)
     };
     let app = model_router::proxy::app(config).await.unwrap();
     let late_artifact = artifact_tools()[1].clone();
@@ -2546,35 +2549,53 @@ async fn gpt_turn_declares_tools_added_mid_conversation() {
         .unwrap()
     };
 
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/messages")
-                .header("content-type", "application/json")
-                .body(Body::from(body_for("claude-gpt-test")))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let names = |document: &serde_json::Value| -> Vec<String> {
+        document["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    for model in ["claude-gpt-test", "grok-4.5"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body_for(model)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{model}");
+    }
     let forwarded = cpa_observed.lock().await;
-    assert_eq!(forwarded.len(), 1);
-    let document: serde_json::Value = serde_json::from_slice(&forwarded[0].body).unwrap();
-    let tools = document["tools"].as_array().unwrap();
-    let names: Vec<_> = tools
-        .iter()
-        .map(|tool| tool["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, ["Bash", "Artifact"]);
-    assert!(
-        tools[1]["input_schema"]["properties"]["field"]
-            .get("pattern")
-            .is_none()
-    );
+    assert_eq!(forwarded.len(), 2);
+    let mut shimmed = late_artifact.clone();
+    shimmed["input_schema"]["properties"]["field"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pattern");
+
+    let gpt: serde_json::Value = serde_json::from_slice(&forwarded[0].body).unwrap();
+    assert_eq!(names(&gpt), ["Bash"]);
     assert_eq!(
-        document["messages"][1],
+        gpt["messages"][1],
+        serde_json::json!({"role": "system", "content": [
+            {"type": "text", "text": "Artifact is now available."},
+            {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": shimmed}},
+        ]})
+    );
+
+    let grok: serde_json::Value = serde_json::from_slice(&forwarded[1].body).unwrap();
+    assert_eq!(names(&grok), ["Bash", "Artifact"]);
+    assert_eq!(grok["tools"][1], shimmed);
+    assert_eq!(
+        grok["messages"][1],
         serde_json::json!({"role": "system", "content": [{"type": "text", "text": "Artifact is now available."}]})
     );
     drop(forwarded);
