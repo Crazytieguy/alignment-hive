@@ -140,7 +140,7 @@ Skip if `pluginConfigs` in `~/.claude/settings.json` already has the hive plugin
 
 > **Automatic recall** (beta): runs an automatic memory recall step before sending each of your prompts, finding relevant context from this project's past sessions, so you repeat yourself less. Each prompt waits up to 30 seconds.
 
-If model-router is not installed, add: without it, recall runs on Sonnet, which finds less than GPT-6.1 Sol and adds about 5% to your Claude usage; with model-router (recommended above), it runs on Sol and uses none.
+If model-router is not installed, add: without it, recall runs on Sonnet, which finds less than GPT-6.2 Sol and adds about 5% to your Claude usage; with model-router (recommended above), it runs on Sol and uses none.
 
 On **Tell me more**, present the Automatic recall paragraph of the hive README (fetched as under "Installing and Tell me more"), then ask again with **Yes** / **No**.
 

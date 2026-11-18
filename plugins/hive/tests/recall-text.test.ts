@@ -398,6 +398,19 @@ test('report: each entry as the reader saw it, with context only where given, an
     { loc: 'ffff0000:1', context: 'made up' },
     { loc: 'aaaa0001:4#79cff63a', context: '' },
   ])
+  // A line that starts with a loc cites it, however the model dressed the line; a loc further in cites nothing.
+  const dressed = ['aaaa0001:1 |', '[aaaa0001:2] | the repo', '1. aaaa0001:3', '* **aaaa0001:4** | bold', '- [aaaa0001:5] assistant | labelled', '  aaaa0001:6#79cff63a | a thread']
+  expect(citations(dressed.join('\n'))).toEqual([
+    { loc: 'aaaa0001:1', context: '' },
+    { loc: 'aaaa0001:2', context: 'the repo' },
+    { loc: 'aaaa0001:3', context: '' },
+    { loc: 'aaaa0001:4', context: 'bold' },
+    { loc: 'aaaa0001:5', context: 'labelled' },
+    { loc: 'aaaa0001:6#79cff63a', context: 'a thread' },
+  ])
+  expect(citations('- aaaa0001:3 | superseded by bbbb0002:7\nThe entry aaaa0001:9 is in the current session.\n- [39:1] | no session\n- aaaa0001:3x |\nnone')).toEqual([
+    { loc: 'aaaa0001:3', context: 'superseded by bbbb0002:7' },
+  ])
   const whole = report('- aaaa0001:3 |', h)!
   expect(whole).toContain('> [user] We use tabs. Also, lunch is at noon. (aaaa0001:3, 2026-10-19)')
   expect(whole).not.toContain('Context:')

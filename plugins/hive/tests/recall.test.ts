@@ -9,8 +9,8 @@ const SESSION = 'abcd1234-0000-4000-8000-000000000000'
 const ENTRY = { loc: 'feed0001:7', time: '2026-10-19T09:00:00Z', kind: 'user', text: 'Always use tabs in this repo, never spaces.' }
 const REPLY = '- feed0001:7 | '
 const usage = { input_tokens: 10, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-const FAST = 'gpt-6.1-sol-fast'
-const SOL = 'gpt-6.1-sol'
+const FAST = 'gpt-6.2-sol-fast'
+const SOL = 'gpt-6.2-sol'
 const SOCKET = '/tmp/hive-run/local-test.sock'
 // An ArtifactComments read of one thread, and that thread as `hive local outline` prints it.
 const THREAD = ['Thread 79cff63a-231a-426f-b106-f112accd6dc5', '  open · Claude: activated · created 2026-10-20', '  [the user (owner), sent to you — 2026-10-20T15:29]', '      0a1b2c3d| Indent this file.'].join('\n')
@@ -291,6 +291,14 @@ describe('automatic recall', () => {
     expect(contexts.map(c => c.join(''))).toEqual([1, 2, 3].map(() => expect.stringContaining('did not finish')))
   })
 
+  test('on, a stored choice the option does not offer: it reads as auto', { options: { recall: true, recallModel: 'gpt-6.1-sol-fast' } }, async ($, on) => {
+    const { asked, contexts } = world(on)
+    await start($)
+    await $.prompt.submit(typed('Format the file.'))
+    expect(asked).toEqual([SOL])
+    expect(contexts).toEqual([[reportOf([{ loc: ENTRY.loc, label: 'user', text: ENTRY.text, date: '2026-10-19', context: '' }], '2026-10-19', { prompt: '' })]])
+  })
+
   test('on: past 30 seconds the prompt goes on, saying recall did not finish', { options: { recall: true } }, async ($, on) => {
     const { contexts, clock, state } = world(on)
     await start($)
@@ -511,7 +519,7 @@ describe('the local server', () => {
     // Started once, then known.
     expect(state.ensures).toBe(1)
     expect(logs).toContainEqual(expect.stringMatching(/^hive recall: read 2 sessions in \d+ ms$/))
-    expect(logs).toContainEqual(expect.stringMatching(/^hive recall: gpt-6\.1-sol answered in \d+ ms/))
+    expect(logs).toContainEqual(expect.stringMatching(/^hive recall: gpt-6\.2-sol answered in \d+ ms/))
   })
 
   test('a server that fails is started again and asked once more; then the CLI reads, for the rest of the recall', { options: { recall: true } }, async ($, on) => {

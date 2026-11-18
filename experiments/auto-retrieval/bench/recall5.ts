@@ -11,7 +11,8 @@ import { index } from './score4';
 
 // Round 6: the shipped prompt and history (chunked by content, sessions read until the budget is covered).
 // `effort` reaches the model: claude -p sends adaptive thinking, so CLIProxyAPI passes it on (low unless set).
-// `rereadOf`: no model call; that variant's replies with the dash put back on cite lines written without one.
+// `rereadOf`: no model call; that variant's replies with the dash put back on cite lines written without one (rounds 11
+// and 12 ran while the plugin's parser took a cite line only with its dash; it now goes by the loc).
 // `scripted`: sessions a script ran are left out, as the plugin leaves them out. It goes by the CLI's `scripted` mark,
 // which the bench's CLI (older) does not give: $BENCH/scripted.json lists the sessions today's CLI marks
 // (`hive local sessions -n 3000 --project <project>`, the locs of the rows with `scripted`).
@@ -44,8 +45,8 @@ const VARIANTS: Record<string, Variant> = {
   // changed since round 9) and through the same gateway.
   'recall11-sol61': { model: 'gpt-6.1-sol' },
   'recall11-sol62': { model: 'gpt-6.2-sol' },
-  // 6.1 Sol wrote 11 of its 59 replies without the dash the plugin's parser needs (`<loc> | <context>` lines), which
-  // the plugin reads as nothing found: its replies as a parser that takes such lines would read them.
+  // 6.1 Sol wrote 11 of its 59 replies without the dash the plugin's parser needed (`<loc> | <context>` lines), which
+  // the plugin read as nothing found: its replies as a parser that takes such lines reads them.
   'recall11-sol61-dashed': { model: 'gpt-6.1-sol', rereadOf: 'recall11-sol61' },
   // Checks, left out of pooling and scoring (`@`): the same call through the bench's own gateway, and repeated.
   'recall11-sol61@live': { model: 'gpt-6.1-sol' },

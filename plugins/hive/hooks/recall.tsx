@@ -12,7 +12,7 @@ import type { HiveRecalled } from '../types'
 // with the prompt; likewise for comment threads new to the main agent, with the read that brought them; and for what
 // the main agent describes through the recall tool, as the tool's result.
 
-const SOL = 'gpt-6.1-sol'
+const SOL = 'gpt-6.2-sol'
 const FALLBACK = 'sonnet'
 // The whole step, CLI reads included; past it the prompt goes on with a note that recall did not finish.
 const TIMEOUT_MS = 30_000

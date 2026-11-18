@@ -410,8 +410,10 @@ export function promptBlocks(h: History, session: string, ask: Ask, isEveryChunk
   return texts.map((text, i) => (i === last || (isEveryChunk && i < last) ? { text, cache: true as const } : { text }))
 }
 
-// A cited line: `- <loc> | <context>`, as models write it: the loc maybe in brackets or backticks.
-const CITE = /^\s*-\s*[[`]?([0-9a-f]{8}(?:\/[\w-]+)*:\d+(?:#[0-9a-f]{8})?)[\]`]?\s*(?:\|(.*))?$/
+// A cited line is one that starts with a loc; its context is what follows the first pipe. Nothing else about the line
+// counts, as models write `- <loc> | <context>` their own way: without the dash, numbered, the loc in brackets,
+// backticks or bold, a label after it. A loc further into a line (a context naming another entry) cites nothing.
+const CITE = /^[\s>]*(?:[-*+•]\s*|\d+[.)]\s*)?[[`(*_]*([0-9a-f]{8}(?:\/[\w-]+)*:\d+(?:#[0-9a-f]{8})?)(?![\w#])[^|]*(?:\|(.*))?$/
 
 /** The reply's citations, in order, each loc once. */
 export function citations(reply: string): Array<{ loc: string; context: string }> {
