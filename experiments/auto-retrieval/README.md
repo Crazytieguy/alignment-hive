@@ -28,4 +28,8 @@ bun cost5.ts 2026-09-21 2026-10-19 800 800000      # recall's cost over real use
 
 Effort: the bench calls `claude -p --effort low`, which sends adaptive thinking with the effort, so Sol and Sonnet ran at low. The plugin's `$.model.complete` sends the effort with no thinking block: Sonnet 5.5 thinks adaptively without one, so it matched the bench all along; Sol ran at medium until model-router pinned CLIProxyAPI 8.0.44, which reads the effort without one.
 
+Gateway: recall's `claude` reads `$BENCH/settings.json` (the user's model-router); `BENCH_SETTINGS=<file>` gives `recall5.ts` another settings file, for a model only another gateway serves.
+
+Scripted sessions: the plugin leaves out sessions a script ran, going by a mark the bench's CLI (older) does not give. Variants from round 12 on take the mark from `$BENCH/scripted.json`, the sessions today's CLI marks. Without it their prompts, which the plugin now keeps whole, fill much of the history.
+
 Scoring: a judged claim counts as delivered when an excerpt the main agent received contains its evidence span (`credit.ts`); recall is the share of a case's relevant judged value delivered, averaged over cases. `BENCH_CASES` limits scoring to the cases whose claims were fully judged.

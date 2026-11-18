@@ -11,7 +11,11 @@ import { index } from './score4';
 
 // Round 6: the shipped prompt and history (chunked by content, sessions read until the budget is covered).
 // `effort` reaches the model: claude -p sends adaptive thinking, so CLIProxyAPI passes it on (low unless set).
-type Variant = { model: string; budget?: number; effort?: string };
+// `rereadOf`: no model call; that variant's replies with the dash put back on cite lines written without one.
+// `scripted`: sessions a script ran are left out, as the plugin leaves them out. It goes by the CLI's `scripted` mark,
+// which the bench's CLI (older) does not give: $BENCH/scripted.json lists the sessions today's CLI marks
+// (`hive local sessions -n 3000 --project <project>`, the locs of the rows with `scripted`).
+type Variant = { model: string; budget?: number; effort?: string; rereadOf?: string; scripted?: boolean };
 const VARIANTS: Record<string, Variant> = {
   'recall6-sol': { model: 'gpt-6.1-sol' },
   'recall6-sol-1200k': { model: 'gpt-6.1-sol', budget: 1_200_000 },
@@ -36,8 +40,27 @@ const VARIANTS: Record<string, Variant> = {
   'recall10-sol-medium': { model: 'gpt-6.1-sol', effort: 'medium' },
   'recall10-terra-medium': { model: 'gpt-6.1-terra', effort: 'medium' },
   'recall10-terra': { model: 'gpt-6.1-terra' },
+  // Round 11: GPT-6.2 Sol against 6.1 Sol, both run the same day on the plugin's current prompt and history (both
+  // changed since round 9) and through the same gateway.
+  'recall11-sol61': { model: 'gpt-6.1-sol' },
+  'recall11-sol62': { model: 'gpt-6.2-sol' },
+  // 6.1 Sol wrote 11 of its 59 replies without the dash the plugin's parser needs (`<loc> | <context>` lines), which
+  // the plugin reads as nothing found: its replies as a parser that takes such lines would read them.
+  'recall11-sol61-dashed': { model: 'gpt-6.1-sol', rereadOf: 'recall11-sol61' },
+  // Checks, left out of pooling and scoring (`@`): the same call through the bench's own gateway, and repeated.
+  'recall11-sol61@live': { model: 'gpt-6.1-sol' },
+  'recall11-sol61@again': { model: 'gpt-6.1-sol' },
+  // Round 12: round 11 without the sessions scripts ran. The plugin now keeps a typed message whole and counts on the
+  // CLI to mark scripted sessions; unmarked, their prompts (up to 240k characters each) took 43-82% of the history in
+  // 12 of round 11's 59 cases.
+  'recall12-sol61': { model: 'gpt-6.1-sol', scripted: true },
+  'recall12-sol62': { model: 'gpt-6.2-sol', scripted: true },
+  'recall12-sol61-dashed': { model: 'gpt-6.1-sol', scripted: true, rereadOf: 'recall12-sol61' },
 };
-const SETTINGS = join(BENCH, 'settings.json');
+// BENCH_SETTINGS=<file>: settings for recall's claude, to send it through a gateway other than the bench's.
+const SETTINGS = process.env.BENCH_SETTINGS ?? join(BENCH, 'settings.json');
+const SCRIPTED = join(BENCH, 'scripted.json');
+const scripted = new Set<string>(existsSync(SCRIPTED) ? JSON.parse(readFileSync(SCRIPTED, 'utf8')) : []);
 
 const args = process.argv.slice(2);
 const parAt = args.indexOf('--par');
@@ -80,6 +103,14 @@ function caseHive(c: (typeof index)[number]) {
   };
 }
 
+/** A finished run's output and time, its reply's cite lines all starting with a dash. */
+function reread(dir: string): { code: number | null; stdout: string; stderr: string; callMs: number } {
+  const out = JSON.parse(readFileSync(join(dir, 'out.json'), 'utf8')) as Record<string, unknown>;
+  const meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')) as { code: number | null; call_ms: number; stderr: string };
+  if (typeof out.result === 'string') out.result = out.result.replace(/^(\s*)(?=[[`]?[0-9a-f]{8}[/:])/gm, '$1- ');
+  return { code: meta.code, stdout: JSON.stringify(out), stderr: meta.stderr, callMs: meta.call_ms };
+}
+
 async function runOne(c: (typeof index)[number], name: string, v: Variant): Promise<void> {
   const dir = join(BENCH, 'runs', c.id, name);
   if (existsSync(join(dir, 'answer.md'))) return;
@@ -89,20 +120,24 @@ async function runOne(c: (typeof index)[number], name: string, v: Variant): Prom
   const session = c.session.slice(0, 8);
   const budget = v.budget ?? budgetFor(v.model);
   // As the plugin reads them (recall.ts).
-  const listed = (await hive(['sessions', '-n', '500', '--project', PROJECT])) as Array<Listed>;
+  const all = (await hive(['sessions', '-n', '500', '--project', PROJECT])) as Array<Listed>;
+  const listed = v.scripted ? all.map((s) => (scripted.has(s.loc) ? { ...s, scripted: true } : s)) : all;
   const sessions = await sessionsFor(listed, async (locs) => (await hive(['outline', ...locs, '--replies', '--clip', '0'])) as Array<Row>, budget);
   const h = history(sessions, now, budget, session);
   const prompt = readFileSync(join(BENCH, 'cases', c.id, 'prompt.txt'), 'utf8');
   const text = promptBlocks(h, session, { prompt }).map((b) => b.text).join('');
   const t0 = performance.now();
-  const r = await run(
-    'claude',
-    ['-p', '--model', v.model, '--effort', v.effort ?? 'low', '--system-prompt', INSTRUCTIONS, '--tools', '', '--strict-mcp-config', '--setting-sources', 'project', '--settings', SETTINGS, '--output-format', 'json'],
-    // A Claude model would write the whole prompt to the cache, which no later case reads.
-    { ...CLAUDE_ENV, DISABLE_PROMPT_CACHING: '1' },
-    text,
-  );
-  const callMs = Math.round(performance.now() - t0);
+  const kept = v.rereadOf ? reread(join(BENCH, 'runs', c.id, v.rereadOf)) : undefined;
+  const r =
+    kept ??
+    (await run(
+      'claude',
+      ['-p', '--model', v.model, '--effort', v.effort ?? 'low', '--system-prompt', INSTRUCTIONS, '--tools', '', '--strict-mcp-config', '--setting-sources', 'project', '--settings', SETTINGS, '--output-format', 'json'],
+      // A Claude model would write the whole prompt to the cache, which no later case reads.
+      { ...CLAUDE_ENV, DISABLE_PROMPT_CACHING: '1' },
+      text,
+    ));
+  const callMs = kept?.callMs ?? Math.round(performance.now() - t0);
   let out: Record<string, unknown> = {};
   try {
     out = JSON.parse(r.stdout);

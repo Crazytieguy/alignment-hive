@@ -6,7 +6,7 @@
 //   bun judge4.ts merge [cases|all]                            -> claims/<id>/verdicts.json, $BENCH/claims/summary.json
 // Judges see neutral ids (k1, k2, ... in hashed order); keymap.json maps them to claim ids, decoys.json marks decoys.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Claim, ClaimsFile } from './claims';
 import { normalize } from './claims';
@@ -254,9 +254,11 @@ function merge(cases: Array<Record<string, string>>) {
       const full = join(d, `verdict-${j}.json`);
       if (!existsSync(full)) continue;
       const v = readJson<Verdict>(full);
-      // Increments judged later (verdict-<judge>-r<k>.json) add their claims.
-      for (let k = 1; existsSync(join(d, `verdict-${j}-r${k}.json`)); k++) {
-        const r = readJson<Verdict>(join(d, `verdict-${j}-r${k}.json`));
+      // Increments judged later (verdict-<judge>-r<k>.json) add their claims. A round that added no claim has no file,
+      // so every file there is counts: stopping at the first missing round left the later rounds' claims unjudged.
+      const later = readdirSync(d).filter((f) => f.startsWith(`verdict-${j}-r`) && f.endsWith('.json'));
+      for (const name of later.sort((x, y) => Number(x.slice(`verdict-${j}-r`.length, -5)) - Number(y.slice(`verdict-${j}-r`.length, -5)))) {
+        const r = readJson<Verdict>(join(d, name));
         v.claims.push(...r.claims);
         cost += r.cost ?? 0;
       }
