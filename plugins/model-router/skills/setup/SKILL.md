@@ -48,20 +48,26 @@ here works until the binary resolves.
 
 ## Install flow
 
-1. **Diagnose**: `$ROUTER doctor`. If everything is already green, skip to
-   step 5.
+1. **Diagnose**: `$ROUTER doctor`. Go through the steps below, but run a
+   step only where doctor or the settings it names show it isn't done,
+   and don't ask again what the user already answered (an existing
+   setting or config entry is their answer). `settings windows` and
+   `settings models` in step 5 change nothing when there is nothing to
+   update, so run them on every pass. On an install
+   that already works, skip step 7's offers unless the user asks. When
+   the user asks about a particular step or option, or to redo one, go
+   to it directly.
 2. **Upstream binary**: `$ROUTER ensure-upstream` — downloads the pinned,
    checksum-verified CLIProxyAPI release into the cache. No-op when present.
 3. **GPT auth**: `$ROUTER doctor` reports auth state. If it found and
    imported an existing CLIProxyAPI Codex login, say so and move on. If not,
    ask whether the user will sign in with a ChatGPT subscription
    (recommended) or use an OpenAI API key (billed per token). For the
-   subscription, the user must
-   run the interactive login themselves (it opens a browser
-   for Codex OAuth), either way works: paste the full expanded
+   subscription, the user must run the interactive login themselves (it
+   opens a browser for Codex OAuth). Either paste the full expanded
    `.../scripts/bootstrap.sh login` command for them to run in a separate
    terminal, or have them type `! $ROUTER login` (expanded to the real path)
-   in the prompt. For an API key, write `[gpt]` / `auth = "api-key"` to
+   in the prompt. For an API key, write `auth = "api-key"` under `[gpt]` in
    `~/.config/model-router/config.toml`, and add a placeholder to
    `~/.config/model-router/secrets.toml` (create it chmod 600 if absent):
    ```toml
@@ -121,11 +127,9 @@ here works until the binary resolves.
    Then size the routes: `$ROUTER settings windows --apply --project-dir
    <project>`. It sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (every route's
    context window) to 1000000 and gives each route a `modelSettings`
-   `autoCompactWindow`, where it compacts: Codex's default for the GPT routes
-   (258400, as input past 272K is billed at a higher rate; 475000 for
-   gpt-6.1-sol and gpt-6.1-terra; they accept up to 828400), else its real
-   window. It also migrates an earlier setup's lower declaration, and moves
-   an entry still at a Codex default that has since changed. When
+   `autoCompactWindow`, where Claude Code compacts: Codex's own default
+   for the GPT routes, else the route's real window. It also updates
+   entries an earlier setup wrote. When
    it prints `"applied": false`, its `reason` says what needs the user. A
    reason naming the checked-in `.claude/settings.json` as shared: ask
    whether to write there (collaborators get the windows too), or to
@@ -136,23 +140,30 @@ here works until the binary resolves.
    --apply --project-dir <project>`. It edits `modelPicker` in
    `~/.claude/settings.json` (the only file Claude Code reads it from):
    adds the shipped GPT routes' rows with their `modelSettings` windows,
-   drops retired GPT rows (GPT-6 Sol, GPT-5.6), keeps every other row, and
-   replaces an earlier install's `ANTHROPIC_CUSTOM_MODEL_OPTION` pair. When
+   replaces rows of GPT models that are no longer shipped, keeps every
+   other row, and replaces an earlier install's
+   `ANTHROPIC_CUSTOM_MODEL_OPTION` pair. When
    it prints `"applied": false`, its `reason` says what needs the user.
-   `--fast` adds the optional Fast twins' rows (1.5–2x faster, 2.5x the usage),
-   also offered by the band; add them in setup only when the user asks.
-   Ultrafast (GPT-6.1 Sol and GPT-6 Astra, up to 8x faster for 8x the
-   usage) needs a plan that has it: Pro $500, some Enterprise and Edu, or
-   any API key (at API Ultrafast prices). The router always serves the
-   `-ultrafast` routes and refuses their turns when the Codex plan lacks
-   the tier. `$ROUTER settings ultrafast --check` reads the plan, then
-   prints `"needed": true` with `labels` when there are twins to set up:
+   `--fast` adds the optional Fast twins' rows (1.5–2x faster; 2x the
+   usage on the 6.2 models, 2.5x on Terra and Luna),
+   also offered by the session-start notice; add them in setup only when
+   the user asks.
+   Ultrafast (GPT-6.2 Sol and GPT-6.2 Astra, up to 4.5x faster for 6x the
+   usage) needs a plan that has it: Pro $200 (Sol only), Pro $500, some
+   Enterprise and Edu, or an API key (at API Ultrafast prices; the router
+   doesn't check the key's access). With a managed CLIProxyAPI the
+   router always serves the `-ultrafast` routes and refuses a twin's
+   turns when the Codex plan lacks the tier for it. `$ROUTER settings
+   ultrafast --check` reads the plan, then prints `"needed": true` with
+   `labels`, the twins this plan has, when there is something to set up:
    on a subscription, offer them; on an API key, only when the user asks.
    `--apply` adds `-ultrafast` rows after their bases, their windows, and
-   user agents in `~/.claude/agents`. Its `plan` says why nothing is
+   user agents in `~/.claude/agents`. Its `plan` says why
+   nothing is
    needed: `lists` (already set up), `lacks` (the plan doesn't have the
    tier), `unread` (the read failed, as printed: retry once the service
-   runs with a working Codex login). Add
+   runs with a working Codex login), `unserved` (an external CLIProxyAPI,
+   which gets no `-ultrafast` routes). Add
    a row per configured Grok, Muse or open-weights route (`routed-models`
    in `$ROUTER doctor`; Muse: per `references/muse.md`, no Full row while
    `muse-plan` warns) by hand, and drop a row when its route goes: rows are
@@ -162,10 +173,10 @@ here works until the binary resolves.
    picker, reachable through agents or `--model`): project-scoped wiring,
    where user-level rows would show in every project, including ones that
    don't go through the gateway; and Claude Code below 2.1.242 (`claude
-   --version`), where the key is unmeasured.
+   --version`), where `modelPicker` is untested.
    ```json
-   "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-6-astra",
-   "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-6 Astra"
+   "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-6.2-astra",
+   "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-6.2 Astra"
    ```
 6. Tell the user to restart Claude Code sessions (settings are read at
    startup), and that the GPT agents and `delegating-to-models` skill are now
@@ -176,14 +187,14 @@ here works until the binary resolves.
    block exists it silently overrides shell-provided values. (If the user
    declined step 5, prefixing `ANTHROPIC_BASE_URL=<base_url>` onto the
    routing test is instead required.)
-   Routing: `claude -p 'reply with ok' --model gpt-6-astra`. Under the
+   Routing: `claude -p 'reply with ok' --model gpt-6.2-sol`. Under the
    HTTPS-proxy wiring, also offer `claude remote-control` as a check.
    Picker rows: `/model` in a fresh interactive session lists them after
    the Claude models.
-   The desktop app's model menu lists only Claude models; there, typing
-   `/model <routing-id>` in the message box picks a route. Tell the user
-   when `$CLAUDE_CODE_ENTRYPOINT` is `claude-desktop` (this session runs in
-   the desktop app).
+   When `$CLAUDE_CODE_ENTRYPOINT` is `claude-desktop` (this session runs
+   in the desktop app), tell the user that the app's model menu lists only
+   Claude models, and that typing `/model <routing-id>` in the message box
+   picks a route.
 7. Ask whether the user also wants (a) open-weights models (Kimi, GLM, ...)
    served through an OpenAI-compatible host they have an API key for — if
    yes, read `references/open-weights.md` and follow it; (b) Grok models
@@ -222,8 +233,8 @@ here works until the binary resolves.
 
 ## Moving to the HTTPS-proxy wiring
 
-When doctor's `wiring` check names `ANTHROPIC_BASE_URL` (the session band
-offers this too), the rest of the install stays as it is: run the
+When doctor's `wiring` check names `ANTHROPIC_BASE_URL` (the session-start
+notice offers this too), the rest of the install stays as it is: run the
 HTTPS-proxy bullet of step 5 (`trust-ca` on macOS, then `settings proxy
 --apply`), which replaces the base URL in place. Same notes as there: say
 that macOS asks for a password, mark Linux and WSL as untested, and on a
@@ -262,13 +273,21 @@ describes.
    alone restores direct Anthropic access. On `"status": "shared-file"` it
    edits nothing: the checked-in project file holds them, so ask before
    removing them there. Optionally remove the other keys step 5 added,
-   `modelPicker` included.
-2. `$ROUTER service uninstall`. On macOS, `$ROUTER trust-ca --remove` takes
-   the router's CA out of the keychain.
-3. Delete the Ultrafast agents the router wrote, if any: the files in
-   `~/.claude/agents` whose frontmatter has the line `# Written by
-   model-router` (`gpt-6.1-sol-ultrafast.md`, `gpt-6-astra-ultrafast.md`).
-   Their routes are gone with the router.
+   and the routed rows from `modelPicker` (the user's other rows stay).
+2. Delete the agents whose routes go with the router: the Ultrafast
+   agents it wrote (files in `~/.claude/agents` whose frontmatter has the
+   line `# Written by model-router`), and the Grok, Muse and open-weights
+   agents setup created (in `~/.claude/agents` or a project's
+   `.claude/agents`, with a `model:` naming a `grok-` or `muse-` route,
+   or a routing-id under `[[openai-providers.models]]` in
+   `~/.config/model-router/config.toml`). Ask before deleting an agent
+   the user may have written or edited.
+3. `$ROUTER service uninstall`; on macOS, `$ROUTER trust-ca --remove`
+   takes the router's CA out of the keychain. Under the HTTPS-proxy
+   wiring this session keeps going through the router until Claude Code
+   restarts, so once the service stops it has no connection: say so, and
+   give the user these commands (and step 4's) to run themselves, or run
+   them as your last action.
 4. Optionally delete `~/.config/model-router`, `~/.local/state/model-router`,
    and `~/.cache/model-router` (the state dir includes the Codex auth login —
    warn before deleting).
