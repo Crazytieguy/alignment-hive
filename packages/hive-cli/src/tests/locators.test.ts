@@ -185,9 +185,13 @@ describe('printing', () => {
         return old;
       };
       const old = await rebuild();
-      // WeakRef keeps its target alive through the job that created it; collect in a later one.
-      await Bun.sleep(0);
-      Bun.gc(true);
+      // WeakRef keeps its target alive through the job that created it (or that last called deref), so each
+      // collection runs in a later one. Bun scans the stack conservatively, so a stale word can hold the listing
+      // through a collection or two; one the index still holds survives them all.
+      for (let i = 0; i < 10 && old.deref() !== undefined; i++) {
+        await Bun.sleep(i === 0 ? 0 : 10);
+        Bun.gc(true);
+      }
       expect(old.deref()).toBeUndefined();
     } finally {
       clearMemo();
