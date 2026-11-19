@@ -9,6 +9,7 @@ import {
   getProjectIdentifiers,
   getStateDir,
   isProjectSharingEnabled,
+  isSharingDisabledLocally,
   projectDisplayName,
   statePaths,
 } from '../lib/config';
@@ -48,6 +49,8 @@ interface DetectedProject {
   displayName: string;
   identifiers: ProjectIds;
   path: string;
+  /** Every local checkout's state dir: separate clones of one repo share a row but each keeps its own opt-out. */
+  stateDirs: Set<string>;
 }
 
 /** Projects with a live cwd under ~/.claude/projects/, one per display name, sorted. */
@@ -66,9 +69,9 @@ function detectProjects(): Array<DetectedProject> {
     // Worktrees resolve to the same identifiers as their main checkout and dedupe here.
     const ids = getProjectIdentifiers(cwd);
     const displayName = projectDisplayName(ids);
-    if (!seen.has(displayName)) {
-      seen.set(displayName, { displayName, identifiers: ids, path: cwd });
-    }
+    const known = seen.get(displayName);
+    if (known) known.stateDirs.add(getStateDir(cwd));
+    else seen.set(displayName, { displayName, identifiers: ids, path: cwd, stateDirs: new Set([getStateDir(cwd)]) });
   }
 
   return [...seen.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -140,7 +143,14 @@ async function consentSetupInner(): Promise<number> {
     return 0;
   }
 
-  const isEnabled = (p: DetectedProject): boolean => isProjectSharingEnabled(allProjectSharing, p.identifiers);
+  // A project shows as shared only when the server has it enabled and no checkout's local opt-out holds it back:
+  // `consent disable` writes its marker even when it can't reach the server. Read once, so what the user changes is
+  // judged against what they were shown.
+  const onServer = (p: DetectedProject): boolean => isProjectSharingEnabled(allProjectSharing, p.identifiers);
+  const optedOut = new Set(
+    projects.filter((p) => [...p.stateDirs].some(isSharingDisabledLocally)).map((p) => p.displayName),
+  );
+  const isEnabled = (p: DetectedProject): boolean => onServer(p) && !optedOut.has(p.displayName);
 
   const selected = await checkbox(
     {
@@ -153,8 +163,9 @@ async function consentSetupInner(): Promise<number> {
 
   const selectedSet = new Set(selected);
   const toEnable = projects.filter((p) => selectedSet.has(p.displayName) && !isEnabled(p));
-  // Only disable projects that exist locally — don't touch projects from other machines
-  const toDisable = projects.filter((p) => !selectedSet.has(p.displayName) && isEnabled(p));
+  // Only disable projects that exist locally — don't touch projects from other machines. A project left unticked
+  // while only a local opt-out held it back is disabled on the server too, which an offline `consent disable` missed.
+  const toDisable = projects.filter((p) => !selectedSet.has(p.displayName) && onServer(p));
 
   if (toEnable.length > 0 || toDisable.length > 0) {
     await updateProjectSharing([
@@ -162,7 +173,7 @@ async function consentSetupInner(): Promise<number> {
       ...toDisable.map((p) => ({ identifier: p.identifiers, sessionSharing: false })),
     ]);
     for (const project of toEnable) {
-      rmSync(statePaths(getStateDir(project.path)).sharingDisabled, { force: true });
+      for (const stateDir of project.stateDirs) rmSync(statePaths(stateDir).sharingDisabled, { force: true });
       console.log(`  ✓ ${msg.enableSuccess(project.displayName)}`);
     }
     for (const project of toDisable) {
