@@ -8,6 +8,7 @@ interface SessionViewerProps {
 export function SessionViewer({ url }: SessionViewerProps) {
   return (
     <SessionViewerFromUrl
+      key={url}
       url={url}
       renderAgentLink={(agentId) => (
         <Link
