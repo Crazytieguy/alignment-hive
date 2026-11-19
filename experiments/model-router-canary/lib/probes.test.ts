@@ -27,6 +27,8 @@ import {
   parseModelList,
   parseServiceTiers,
   parseSse,
+  restartWaiter,
+  restarting,
   solidPng,
   toReply,
   websearchBody,
@@ -394,4 +396,42 @@ describe('validators', () => {
 test('only Grok and Muse checks count as family checks', () => {
   for (const name of ['reach/grok-4.7', 'reach/muse-wonder-1.0', 'tool-replay/grok-4.7', 'edit/muse-wonder-1.0']) expect(isFamilyCheck(name)).toBe(true);
   for (const name of ['reach/gpt-6-luna', 'tool-replay', 'gpt-edit', 'models']) expect(isFamilyCheck(name)).toBe(false);
+});
+
+describe('a restarting live router', () => {
+  test('a refused connection and the router answering for a child not yet ready are a restart; anything else is not', () => {
+    expect(restarting({ status: 0, body: '', error: 'Error: connect ECONNREFUSED 127.0.0.1:8787' })).toBe(true);
+    const notReady = JSON.stringify({
+      type: 'error',
+      error: { type: 'api_error', message: 'the cliproxy upstream is not ready (starting up, unauthenticated, or crashed); run `model-router doctor` to diagnose' },
+    });
+    expect(restarting({ status: 502, body: notReady })).toBe(true);
+    // A 502 from a provider, or a timeout, may have reached upstream: not retried.
+    expect(restarting({ status: 502, body: '{"type":"error","error":{"type":"api_error","message":"upstream connect error"}}' })).toBe(false);
+    expect(restarting({ status: 0, body: '', error: 'timeout' })).toBe(false);
+    expect(restarting({ status: 200, body: '{}' })).toBe(false);
+  });
+
+  test('the wait ends as soon as the router is ready', async () => {
+    let polls = 0;
+    const wait = restartWaiter(1000, async () => ++polls === 3, 5);
+    expect(await wait()).toBe(true);
+    expect(polls).toBe(3);
+  });
+
+  test('a router that never comes back costs one budget for the run, not one per probe', async () => {
+    let polls = 0;
+    const wait = restartWaiter(
+      60,
+      async () => {
+        polls++;
+        return false;
+      },
+      10,
+    );
+    const t0 = performance.now();
+    for (let i = 0; i < 20; i++) expect(await wait()).toBe(false);
+    expect(performance.now() - t0).toBeLessThan(200);
+    expect(polls).toBeLessThanOrEqual(7);
+  });
 });

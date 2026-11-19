@@ -24,6 +24,8 @@ When a run finds something, `run.sh` starts a background Claude Code session (`c
   - on the primary GPT model (`gpt-6-luna`): a two-turn tool round trip that replays the reasoning signature, a prompt-cache hit, an image, a web search that must be answered by the alpha/search backend rather than the fallback (skipped if `[web-search] mode` isn't the default), and request latency against the last two weeks.
 - Nested `claude -p` cells through your real wiring (HTTPS proxy or base URL), on the installed Claude Code version: a GPT session that reads and edits a file, and a Claude Haiku "ok" for the passthrough.
 
+A probe that finds the live router restarting (the port refused, or the router's own "cliproxy upstream is not ready") is sent once more when the service is back, waiting at most 90 s in all per run. Other sessions restart it: the first Claude Code session after a plugin update moves the service onto the new binary, and the triage and changelog jobs start sessions at 04:00 too.
+
 With API-key GPT auth, the live probes bill your OpenAI key each day.
 
 **Candidate tier:** needs the managed CLIProxyAPI child and a Codex subscription login; other setups skip it.

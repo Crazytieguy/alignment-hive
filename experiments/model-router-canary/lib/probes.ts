@@ -4,7 +4,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { LIVE, LIVE_ROUTER_LOG, LIVE_ROUTER_PORT, REPO, http, logMark, logSince, run, type HttpResponse } from './env';
+import { LIVE, LIVE_ROUTER_LOG, LIVE_ROUTER_PORT, REPO, http, logMark, logSince, run, sleep, type HttpResponse } from './env';
 import { historicalMedian, type Recorder, type RouterTarget, type Status, type Tier } from './report';
 
 /** Routing IDs (what Claude Code sends) per family, each served by the target's child. */
@@ -413,15 +413,67 @@ function messagesBody(model: string, messages: Array<unknown>, extra: Body = {})
   return { model, max_tokens: 64, thinking: { type: 'adaptive' }, output_config: { effort: 'low' }, messages, ...extra };
 }
 
-/** POST /v1/messages on the target. The x-api-key is a placeholder: the GPT branch strips client credentials. */
+/**
+ * Whether a reply shows the router restarting rather than failing: the port refused the connection, or the router is
+ * up but its child isn't ready yet, which proxy.rs answers itself with a 502 before anything reaches a provider.
+ */
+export function restarting(r: Pick<HttpResponse, 'status' | 'body' | 'error'>): boolean {
+  if (/ECONNREFUSED/.test(r.error ?? '')) return true;
+  return r.status === 502 && /cliproxy upstream is not ready/.test(r.body);
+}
+
+/**
+ * A waiter for a restarting router: each call polls `ready` until it says yes (true) or the budget runs out (false).
+ * The budget is shared by every call, so a router that never comes back costs one budget per run, not one per probe.
+ */
+export function restartWaiter(budgetMs: number, ready: (timeoutMs: number) => Promise<boolean>, pollMs = 1000): () => Promise<boolean> {
+  let left = budgetMs;
+  return async () => {
+    while (left > 0) {
+      const t0 = performance.now();
+      await sleep(Math.min(pollMs, left));
+      const ok = await ready(Math.max(1, Math.min(2000, left - (performance.now() - t0))));
+      left -= performance.now() - t0;
+      if (ok) return true;
+    }
+    return false;
+  };
+}
+
+/**
+ * The live service, back from a restart with its child ready, within 90 s per run (the child may download first).
+ * Other sessions restart it: any Claude Code session's SessionStart runs `service refresh` after a plugin update, and
+ * the triage and changelog jobs start sessions at 04:00, the canary's own hour.
+ */
+const liveRestart = new Map<number, () => Promise<boolean>>();
+function waitForLiveRestart(t: RouterTarget): Promise<boolean> {
+  let wait = liveRestart.get(t.port);
+  if (!wait) {
+    wait = restartWaiter(90_000, async (timeoutMs) => {
+      const r = await http(`http://127.0.0.1:${t.port}/__model-router/health`, { timeoutMs });
+      const h = r.status === 200 ? tryJson(r.body) : undefined;
+      return h?.status === 'ok' && h?.['cliproxy-upstream'] === 'ready';
+    });
+    liveRestart.set(t.port, wait);
+  }
+  return wait();
+}
+
+/**
+ * POST /v1/messages on the target. The x-api-key is a placeholder: the GPT branch strips client credentials. A live
+ * request that finds the router restarting goes once more when it's back (waitForLiveRestart); a sandbox's stands.
+ */
 async function send(t: RouterTarget, body: Body, timeoutMs = TIMEOUT_MS): Promise<Reply> {
   const stream = body.stream === true;
-  const r = await http(`${t.baseUrl}/v1/messages`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', 'x-api-key': 'canary' },
-    body: JSON.stringify(body),
-    timeoutMs,
-  });
+  const once = (): Promise<HttpResponse> =>
+    http(`${t.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', 'x-api-key': 'canary' },
+      body: JSON.stringify(body),
+      timeoutMs,
+    });
+  let r = await once();
+  if (t.label === 'live' && restarting(r) && (await waitForLiveRestart(t))) r = await once();
   return toReply(r, stream);
 }
 
