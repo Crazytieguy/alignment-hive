@@ -512,7 +512,7 @@ async fn refusal_response(
 /// The route to send a turn for `route` (none: Claude's) on, or the text
 /// of its refusal:
 /// the logins may refuse it ([`login_refusal`]); an `-ultrafast` twin's
-/// goes by the Codex plan ([`crate::ultrafast::Gate::decide`]), at priority
+/// goes by the Codex plan ([`crate::ultrafast::decide`]), at priority
 /// while the plan is unread, refused where it lacks the tier. The route
 /// comes back with the cyber access program its requests select
 /// ([`with_cyber_access`]).
@@ -527,15 +527,15 @@ async fn plan_route<'a>(
     if let Some(message) = login_refusal(state, Some(route)).await {
         return Err(message);
     }
-    let Some(gate) = state
+    let Some(catalog) = state
         .config
-        .codex_plan
+        .codex_catalog
         .as_ref()
         .filter(|_| route.tier == ServiceTier::Ultrafast)
     else {
         return Ok(Some(with_cyber_access(state, Cow::Borrowed(route)).await));
     };
-    let route = match gate.decide(route.split_upstream_model().0).await {
+    let route = match crate::ultrafast::decide(catalog, route.split_upstream_model().0).await {
         Verdict::Forward => Cow::Borrowed(route),
         Verdict::Refuse => {
             let message = ultrafast_refusal(route);
@@ -1858,7 +1858,7 @@ mod tests {
 
     /// An `-ultrafast` twin's turn reaches the managed child with the relay
     /// header and no tier in the body; no other route's does, whatever the
-    /// client sent. With no gate (an API key), every twin turn goes out.
+    /// client sent. With no catalog to ask, every twin turn goes out.
     #[tokio::test]
     async fn only_an_ultrafast_twin_turn_carries_the_relay() {
         let models = [
@@ -1950,16 +1950,16 @@ mod tests {
             r#"{"type": "codex", "access_token": "t", "account_id": "acct"}"#,
         )
         .unwrap();
-        let with_gate = |source: &str| {
+        let with_catalog = |source: &str| {
             let mut config = crate::config::parse_and_prepare(source);
             // Nothing listens there: a read fails at once.
-            let gate = crate::ultrafast::Gate::with_url(
+            let catalog = crate::codex_catalog::Catalog::with_url(
                 dirs.auth_dir(),
                 &dirs,
                 "http://127.0.0.1:9/backend-api/codex/models",
             )
             .unwrap();
-            config.codex_plan = Some(Arc::new(gate));
+            config.codex_catalog = Some(Arc::new(catalog));
             config
         };
         let on = "[gpt]\ndaybreak = true\n\
@@ -1973,7 +1973,7 @@ mod tests {
             "gpt-6.1-terra",
         ];
 
-        let (answers, seen) = ultrafast_turns(with_gate(on), &models).await;
+        let (answers, seen) = ultrafast_turns(with_catalog(on), &models).await;
         assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
         assert_eq!(
             cyber_relayed(&seen),
@@ -1981,7 +1981,7 @@ mod tests {
             "unread"
         );
 
-        crate::ultrafast::record_cyber(
+        crate::codex_catalog::record_cyber(
             &dirs,
             &dirs.auth_dir(),
             &[
@@ -1992,7 +1992,7 @@ mod tests {
                 ("gpt-6.1-terra", &[Standard]),
             ],
         );
-        let (answers, seen) = ultrafast_turns(with_gate(on), &models).await;
+        let (answers, seen) = ultrafast_turns(with_catalog(on), &models).await;
         assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
         assert_eq!(
             cyber_relayed(&seen),
@@ -2008,22 +2008,22 @@ mod tests {
         // Off: standard on every route, whatever the plan lists, and with
         // no plan at all (an API key).
         let off = "[gpt]\ndaybreak = false\n";
-        let (_, seen) = ultrafast_turns(with_gate(off), &models).await;
+        let (_, seen) = ultrafast_turns(with_catalog(off), &models).await;
         assert_eq!(cyber_relayed(&seen), [Some("standard"); 5]);
-        std::fs::remove_file(crate::ultrafast::cache_file(&dirs)).unwrap();
-        let (_, seen) = ultrafast_turns(with_gate(off), &models).await;
+        std::fs::remove_file(crate::codex_catalog::cache_file(&dirs)).unwrap();
+        let (_, seen) = ultrafast_turns(with_catalog(off), &models).await;
         assert_eq!(cyber_relayed(&seen), [Some("standard"); 5], "unread");
         let api_key = format!("{off}auth = \"api-key\"\n");
         let (_, seen) = ultrafast_turns(crate::config::parse_and_prepare(&api_key), &models).await;
         assert_eq!(cyber_relayed(&seen), [Some("standard"); 5], "no plan");
-        crate::ultrafast::record_cyber(
+        crate::codex_catalog::record_cyber(
             &dirs,
             &dirs.auth_dir(),
             &[("gpt-6-sol", &[Standard, DaybreakBlue])],
         );
 
         // Unset: the plan's programs select nothing.
-        let (_, seen) = ultrafast_turns(with_gate(""), &models).await;
+        let (_, seen) = ultrafast_turns(with_catalog(""), &models).await;
         assert_eq!(cyber_relayed(&seen), [None; 5]);
     }
 
@@ -2039,20 +2039,20 @@ mod tests {
             let mut config =
                 crate::config::parse_and_prepare("[gpt]\nauth = \"api-key\"\ndaybreak = true\n");
             config.gpt.api_key = Some("sk-test".to_owned());
-            let gate = crate::ultrafast::Gate::with_url(
-                crate::ultrafast::Source::of(&config, &dirs).unwrap(),
+            let catalog = crate::codex_catalog::Catalog::with_url(
+                crate::codex_catalog::Source::of(&config, &dirs).unwrap(),
                 &dirs,
                 "http://127.0.0.1:9/backend-api/codex/models",
             )
             .unwrap();
-            config.codex_plan = Some(Arc::new(gate));
+            config.codex_catalog = Some(Arc::new(catalog));
             config
         };
         let key_models = ["gpt-6-sol", "gpt-6.2-sol-ultrafast", "gpt-6.1-terra"];
         let (answers, seen) = ultrafast_turns(with_key(), &key_models).await;
         assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
         assert_eq!(cyber_relayed(&seen), [None; 3], "the key's is unread");
-        crate::ultrafast::record_cyber_for_key(
+        crate::codex_catalog::record_cyber_for_key(
             &dirs,
             &with_key(),
             &[
@@ -2085,21 +2085,21 @@ mod tests {
             r#"{"type": "codex", "access_token": "t", "account_id": "acct"}"#,
         )
         .unwrap();
-        let with_gate = || {
+        let with_catalog = || {
             let mut config = Config::default();
             // Nothing listens there: a read fails at once.
-            let gate = crate::ultrafast::Gate::with_url(
+            let catalog = crate::codex_catalog::Catalog::with_url(
                 dirs.auth_dir(),
                 &dirs,
                 "http://127.0.0.1:9/backend-api/codex/models",
             )
             .unwrap();
-            config.codex_plan = Some(Arc::new(gate));
+            config.codex_catalog = Some(Arc::new(catalog));
             config
         };
         let models = ["gpt-6.2-sol-ultrafast", "gpt-6.2-astra-ultrafast"];
 
-        let (answers, seen) = ultrafast_turns(with_gate(), &models).await;
+        let (answers, seen) = ultrafast_turns(with_catalog(), &models).await;
         assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
         assert_eq!(
             relayed(&seen),
@@ -2107,8 +2107,8 @@ mod tests {
             "unread"
         );
 
-        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6.2-astra"]);
-        let (answers, seen) = ultrafast_turns(with_gate(), &models).await;
+        crate::codex_catalog::record(&dirs, &dirs.auth_dir(), &["gpt-6.2-astra"]);
+        let (answers, seen) = ultrafast_turns(with_catalog(), &models).await;
         assert_eq!(answers[0].0, StatusCode::BAD_REQUEST);
         assert!(
             answers[0].1.contains(

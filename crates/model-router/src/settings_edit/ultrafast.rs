@@ -399,7 +399,7 @@ mod tests {
             self.root.path().join("home")
         }
         fn plan_lists(&self, models: &[&str]) {
-            crate::ultrafast::record(&self.dirs, &self.dirs.auth_dir(), models);
+            crate::codex_catalog::record(&self.dirs, &self.dirs.auth_dir(), models);
         }
         fn user(&self, body: &str) {
             write_settings(&self.home(), "settings.json", body);

@@ -266,7 +266,7 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         // With `[gpt] daybreak` on, show the programs as the catalog lists
         // them now; the running service goes by the same answer.
         let read_error = if config.gpt.daybreak == Some(true) {
-            crate::ultrafast::read_now(&config, dirs)
+            crate::codex_catalog::read_now(&config, dirs)
                 .await
                 .err()
                 .map(|error| format!("{error:#}"))
@@ -275,10 +275,10 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
             // is read too, so setup need not wait for the service's first
             // read to learn what it lists. Briefly, and saying nothing of
             // a failure: nothing here goes by the answer yet.
-            if crate::ultrafast::cyber_programs(&config, dirs).is_none() {
+            if crate::codex_catalog::cyber_programs(&config, dirs).is_none() {
                 let _ = tokio::time::timeout(
                     UNREAD_CATALOG_WAIT,
-                    crate::ultrafast::read_now(&config, dirs),
+                    crate::codex_catalog::read_now(&config, dirs),
                 )
                 .await;
             }
@@ -1071,7 +1071,7 @@ fn daybreak_check(config: &Config, dirs: &Dirs, read_error: Option<&str>) -> Opt
     } = CatalogNames::of(config);
     let plan = CyberRoutes {
         routes: crate::cyber_access::base_routes(config).collect(),
-        listed: crate::ultrafast::cyber_programs(config, dirs),
+        listed: crate::codex_catalog::cyber_programs(config, dirs),
     };
     let named = plan.on(|route| route.cyber_access);
     let named = (!named.is_empty()).then(|| format!("{named} (set by cyber-access)"));
@@ -1975,11 +1975,11 @@ mod tests {
         .unwrap();
         let subscription = config("");
         assert!(ultrafast_check(&subscription, &dirs).is_none(), "unread");
-        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &[]);
+        crate::codex_catalog::record(&dirs, &dirs.auth_dir(), &[]);
         assert!(ultrafast_check(&subscription, &dirs).is_none(), "lacks");
         assert!(ultrafast_check(&config("[gpt]\nauth = \"api-key\"\n"), &dirs).is_none());
 
-        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6.2-sol"]);
+        crate::codex_catalog::record(&dirs, &dirs.auth_dir(), &["gpt-6.2-sol"]);
         let check = ultrafast_check(&subscription, &dirs).unwrap();
         assert!(check.ok && !check.warn, "{check:?}");
         assert_eq!(
@@ -1987,7 +1987,7 @@ mod tests {
             "gpt-6.2-sol-ultrafast (the Codex plan lists the tier); gpt-6.2-astra-ultrafast turns \
              are refused"
         );
-        crate::ultrafast::record(&dirs, &dirs.auth_dir(), &["gpt-6.2-sol", "gpt-6.2-astra"]);
+        crate::codex_catalog::record(&dirs, &dirs.auth_dir(), &["gpt-6.2-sol", "gpt-6.2-astra"]);
         assert_eq!(
             ultrafast_check(&subscription, &dirs).unwrap().detail,
             "gpt-6.2-sol-ultrafast, gpt-6.2-astra-ultrafast (the Codex plan lists the tier)"
@@ -2062,7 +2062,7 @@ mod tests {
             .iter()
             .map(|route| (route.routing_id.as_str(), [Standard].as_slice()))
             .collect();
-        crate::ultrafast::record_cyber(&dirs, &dirs.auth_dir(), &every_model);
+        crate::codex_catalog::record_cyber(&dirs, &dirs.auth_dir(), &every_model);
         assert!(daybreak_check(&unset, &dirs, None).is_none());
         assert!(detail(&on, true).contains("lists no Daybreak program for any routed GPT model"));
         assert!(detail(&on_and_named, true).contains("lists no Daybreak program"));
@@ -2089,7 +2089,7 @@ mod tests {
         let unset = config("");
         let on = config("[gpt]\ndaybreak = true\n");
         let on_and_named = config(&format!("[gpt]\ndaybreak = true\n{NAMED_STANDARD}"));
-        crate::ultrafast::record_cyber(
+        crate::codex_catalog::record_cyber(
             &dirs,
             &dirs.auth_dir(),
             &[
@@ -2132,7 +2132,7 @@ mod tests {
 
         // A plan that lists it only for the one route with its own program
         // is no reason to say the plan lists none.
-        crate::ultrafast::record_cyber(
+        crate::codex_catalog::record_cyber(
             &dirs,
             &dirs.auth_dir(),
             &[("gpt-6.2-sol", &[Standard, DaybreakRed])],
@@ -2148,7 +2148,7 @@ mod tests {
             .iter()
             .map(|route| (route.routing_id.as_str(), [DaybreakBlue].as_slice()))
             .collect();
-        crate::ultrafast::record_cyber(&dirs, &dirs.auth_dir(), &every_model);
+        crate::codex_catalog::record_cyber(&dirs, &dirs.auth_dir(), &every_model);
         assert!(detail(&on, false).ends_with("(the Codex plan lists them)"));
     }
 
@@ -2171,7 +2171,7 @@ mod tests {
              with, so it selects no Daybreak program"
         );
         // The Codex logins' answer is not the key's.
-        crate::ultrafast::record_cyber(
+        crate::codex_catalog::record_cyber(
             &dirs,
             &dirs.auth_dir(),
             &[("gpt-6-sol", &[Standard, DaybreakBlue])],
@@ -2183,7 +2183,7 @@ mod tests {
              selects no Daybreak program"
         );
 
-        crate::ultrafast::record_cyber_for_key(&dirs, &on, &[("gpt-6-sol", &[Standard])]);
+        crate::codex_catalog::record_cyber_for_key(&dirs, &on, &[("gpt-6-sol", &[Standard])]);
         assert!(daybreak_check(&unset, &dirs, None).is_none());
         assert!(detail(&on, true).ends_with(
             "the API key's model catalog lists no Daybreak program for any routed GPT model, \
@@ -2191,7 +2191,7 @@ mod tests {
              https://help.openai.com/en/articles/20001259"
         ));
 
-        crate::ultrafast::record_cyber_for_key(
+        crate::codex_catalog::record_cyber_for_key(
             &dirs,
             &on,
             &[("gpt-6-sol", &[Standard, DaybreakBlue])],

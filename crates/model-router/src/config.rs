@@ -343,14 +343,14 @@ pub struct Config {
     #[serde(skip)]
     pub opt_in_models: Vec<ModelRoute>,
 
-    /// What the account's Codex catalog lists ([`crate::ultrafast::Gate`]):
+    /// The account's Codex catalog ([`crate::codex_catalog::Catalog`]):
     /// a subscription's refuses an `-ultrafast` twin's turn when the plan
     /// lacks the tier, and either sign-in's gives `[gpt] daybreak = true`
     /// each model's Daybreak program. Set by `serve` where there is a
-    /// catalog to ask ([`crate::ultrafast::Source::of`]); `None` forwards
+    /// catalog to ask ([`crate::codex_catalog::Source::of`]); `None` forwards
     /// every twin turn and selects no Daybreak program.
     #[serde(skip)]
-    pub codex_plan: Option<std::sync::Arc<crate::ultrafast::Gate>>,
+    pub codex_catalog: Option<std::sync::Arc<crate::codex_catalog::Catalog>>,
 
     #[serde(skip)]
     pub native_search: NativeSearchLimits,

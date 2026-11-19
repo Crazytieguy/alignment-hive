@@ -330,7 +330,7 @@ async fn main() -> anyhow::Result<()> {
             if let SettingsCommand::Ultrafast { check: true, .. } = command
                 && let Ok(config) = Config::load(&config_path)
                 && config.gpt.auth == model_router::config::GptAuth::Subscription
-                && let Err(error) = model_router::ultrafast::read_now(&config, &dirs).await
+                && let Err(error) = model_router::codex_catalog::read_now(&config, &dirs).await
             {
                 eprintln!("could not read the Codex plan's service tiers: {error:#}");
             }
@@ -610,12 +610,12 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
     // Ultrafast tier, for the twins' turns and the session-start offer
     // (every API key has the tier), and each model's cyber access
     // programs, for `[gpt] daybreak` with either sign-in.
-    if let Some(source) = model_router::ultrafast::Source::of(&config, dirs) {
-        match model_router::ultrafast::Gate::new(source, dirs) {
-            Ok(gate) => {
-                let gate = std::sync::Arc::new(gate);
-                gate.clone().spawn_first_read();
-                config.codex_plan = Some(gate);
+    if let Some(source) = model_router::codex_catalog::Source::of(&config, dirs) {
+        match model_router::codex_catalog::Catalog::new(source, dirs) {
+            Ok(catalog) => {
+                let catalog = std::sync::Arc::new(catalog);
+                catalog.clone().spawn_first_read();
+                config.codex_catalog = Some(catalog);
             }
             Err(error) => tracing::warn!(
                 "cannot read the Codex catalog, so a subscription's -ultrafast turns go out \

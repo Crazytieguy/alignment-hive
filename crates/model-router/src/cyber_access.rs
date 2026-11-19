@@ -40,7 +40,7 @@
 //! that catalog from the Codex backend for a `ChatGPT` sign-in and an API
 //! key alike, and sends the program with either (codex-rs
 //! `model-provider/src/models_endpoint.rs`, `core/src/cyber_access_program.rs`).
-//! `[gpt] daybreak` follows it ([`selected`], [`crate::ultrafast::Source`]),
+//! `[gpt] daybreak` follows it ([`selected`], [`crate::codex_catalog::Source`]),
 //! with three differences:
 //! - Unset, the router sends no field, where Codex's default sends
 //!   `standard`: a router that never heard of the key sent none, and an
@@ -169,13 +169,13 @@ pub fn selected(
 
 /// [`selected`] for a request `config` is about to send on `route`, asking
 /// the catalog only when the answer depends on it
-/// ([`crate::ultrafast::Gate::cyber_listed`]).
+/// ([`crate::codex_catalog::Catalog::cyber_listed`]).
 pub(crate) async fn select_for_request(config: &Config, route: &ModelRoute) -> Option<CyberAccess> {
     let daybreak = config.gpt.daybreak;
-    let asks_plan =
+    let asks_catalog =
         route.family == ModelFamily::Gpt && route.cyber_access.is_none() && daybreak == Some(true);
-    let listed = match config.codex_plan.as_ref().filter(|_| asks_plan) {
-        Some(plan) => plan.cyber_listed(route.split_upstream_model().0).await,
+    let listed = match config.codex_catalog.as_ref().filter(|_| asks_catalog) {
+        Some(catalog) => catalog.cyber_listed(route.split_upstream_model().0).await,
         None => None,
     };
     selected(route, daybreak, listed.as_ref())
@@ -215,7 +215,7 @@ pub fn undecided<'a>(config: &'a Config, listed: Option<&Programs>) -> Vec<&'a M
 #[must_use]
 pub fn settings_report(config: Option<&Config>, dirs: &crate::state::Dirs) -> Value {
     let routes: Vec<&str> = config.map_or_else(Vec::new, |config| {
-        let listed = crate::ultrafast::cyber_programs(config, dirs);
+        let listed = crate::codex_catalog::cyber_programs(config, dirs);
         undecided(config, listed.as_ref())
             .iter()
             .map(|route| route.routing_id.as_str())
@@ -411,7 +411,7 @@ mod tests {
         let quiet = r#"{"needed":false,"routes":[]}"#;
         assert_eq!(settings_report(Some(&config), &dirs).to_string(), quiet);
         assert_eq!(settings_report(None, &dirs).to_string(), quiet);
-        crate::ultrafast::record_cyber(
+        crate::codex_catalog::record_cyber(
             &dirs,
             &dirs.auth_dir(),
             &[
