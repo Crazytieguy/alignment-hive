@@ -78,6 +78,24 @@ pub(crate) struct Runtime {
     outage: Mutex<Option<String>>,
 }
 
+/// The cyber access program each stage's calls select: its route's, as an
+/// agent's turns on that route do ([`crate::cyber_access`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StagePrograms {
+    judge: Option<crate::cyber_access::CyberAccess>,
+    screen: Option<crate::cyber_access::CyberAccess>,
+}
+
+impl StagePrograms {
+    /// `upstream` as the judge's calls reach it, and as the screen's do.
+    fn targets(self, upstream: &ForwardTarget) -> (ForwardTarget, ForwardTarget) {
+        (
+            upstream.selecting(self.judge),
+            upstream.selecting(self.screen),
+        )
+    }
+}
+
 /// One stage's classifier and the route it runs on.
 struct Stage {
     classifier: classify::Classifier,
@@ -190,6 +208,19 @@ impl Runtime {
         self.screen.as_ref().map(|screen| &screen.route)
     }
 
+    /// What each stage's calls select under `config` right now.
+    pub(crate) async fn programs(&self, config: &Config) -> StagePrograms {
+        StagePrograms {
+            judge: crate::cyber_access::select_for_request(config, &self.judge.route).await,
+            screen: match &self.screen {
+                Some(screen) => {
+                    crate::cyber_access::select_for_request(config, &screen.route).await
+                }
+                None => None,
+            },
+        }
+    }
+
     fn stay_out_for_outage(&self, why: String) -> ReplyMode {
         let mut outage = self.outage.lock().expect("lock");
         if outage.as_deref() != Some(why.as_str()) {
@@ -209,14 +240,16 @@ impl Runtime {
     }
 
     /// What to do with the reply to the request `body`, given where the
-    /// classifier could be reached (`upstream`) and any login refusal for
-    /// the judge's route and the screen's. A refused screen is skipped: the
-    /// judge classifies every call of the reply.
+    /// classifier could be reached (`upstream`), what its stages' calls
+    /// select there (`programs`) and any login refusal for the judge's route
+    /// and the screen's. A refused screen is skipped: the judge classifies
+    /// every call of the reply.
     pub(crate) fn plan(
         self: &Arc<Self>,
         headers: &HeaderMap,
         body: &[u8],
         upstream: Option<ForwardTarget>,
+        programs: StagePrograms,
         refusal: Option<String>,
         screen_refusal: Option<String>,
     ) -> ReplyMode {
@@ -294,9 +327,11 @@ impl Runtime {
         let prepared = prepared.shared();
         // Start loading the policy now, alongside the upstream's reply.
         tokio::spawn(prepared.clone());
+        let (upstream, screen_upstream) = programs.targets(&upstream);
         ReplyMode::Judge(Arc::new(Judge {
             runtime: self.clone(),
             upstream,
+            screen_upstream,
             entries: transcript.entries,
             claude_md: transcript.claude_md,
             session,
@@ -377,7 +412,10 @@ type PreparedFuture = Pin<Box<dyn Future<Output = Result<Arc<Prepared>, Arc<str>
 /// Everything one request's reply is judged with.
 pub(crate) struct Judge {
     runtime: Arc<Runtime>,
+    /// Where the judge's calls go, and the screen's: the same upstream,
+    /// each selecting its own stage's program ([`StagePrograms`]).
     upstream: ForwardTarget,
+    screen_upstream: ForwardTarget,
     entries: Vec<transcript::Entry>,
     /// The user's CLAUDE.md configuration, for its own block.
     claude_md: Option<String>,
@@ -449,7 +487,7 @@ impl Judge {
             let outcome = screen
                 .classifier
                 .classify(
-                    &self.upstream,
+                    &self.screen_upstream,
                     &text.prompt(&prepared.policy),
                     (id, name),
                     &message,
@@ -489,12 +527,14 @@ pub(super) fn test_judge(tools: &[(&str, Value)]) -> Arc<Judge> {
     config.auto_mode_classifier.enabled = true;
     let runtime = Runtime::new(&config, &reqwest::Client::new(), None).expect("enabled");
     let prepared: PreparedFuture = Box::pin(async { Err(Arc::<str>::from("no policy in tests")) });
+    let upstream = || ForwardTarget {
+        base_url: "http://127.0.0.1:9".to_string(),
+        credential: None,
+    };
     Arc::new(Judge {
         runtime,
-        upstream: ForwardTarget {
-            base_url: "http://127.0.0.1:9".to_string(),
-            credential: None,
-        },
+        upstream: upstream(),
+        screen_upstream: upstream(),
         entries: Vec::new(),
         claude_md: None,
         session: "{}".to_string(),
@@ -509,6 +549,71 @@ pub(super) fn test_judge(tools: &[(&str, Value)]) -> Arc<Judge> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    use super::{ForwardTarget, Runtime, StagePrograms};
+
+    /// Each stage's calls select what its own route does: a route's own
+    /// program, else `standard` with `[gpt] daybreak` off, and nothing with
+    /// it unset.
+    #[tokio::test]
+    async fn each_stage_s_calls_select_its_route_s_cyber_access_program() {
+        use crate::cyber_access::{CyberAccess, RELAY_HEADER};
+        let runtime = |source: &str| {
+            let config = crate::config::parse_and_prepare(&format!(
+                "[auto-mode-classifier]\nenabled = true\n{source}"
+            ));
+            let runtime = Runtime::new(&config, &reqwest::Client::new(), None).expect("enabled");
+            (config, runtime)
+        };
+        let (config, unset) = runtime("");
+        assert_eq!(unset.programs(&config).await, StagePrograms::default());
+
+        // The default judge is gpt-6.1-sol and the default screen gpt-6-luna.
+        let (config, off) = runtime(
+            "[gpt]\ndaybreak = false\n[[model-overrides]]\nrouting-id = \"gpt-6.1-sol\"\n\
+             cyber-access = \"daybreak_blue\"\n",
+        );
+        let programs = off.programs(&config).await;
+        assert_eq!(
+            programs,
+            StagePrograms {
+                judge: Some(CyberAccess::DaybreakBlue),
+                screen: Some(CyberAccess::Standard),
+            }
+        );
+        // A model named without a route is a GPT route of its own.
+        let (config, unrouted) = runtime(
+            "model = \"codex-auto-review\"\nscreen-model = \"\"\n[gpt]\ndaybreak = false\n",
+        );
+        assert_eq!(
+            unrouted.programs(&config).await,
+            StagePrograms {
+                judge: Some(CyberAccess::Standard),
+                screen: None,
+            }
+        );
+
+        let upstream = ForwardTarget {
+            base_url: "http://127.0.0.1:9".to_string(),
+            credential: Some(crate::headers::GptUpstreamCredential::new("secret").unwrap()),
+        };
+        let relayed = |target: &ForwardTarget| {
+            let mut headers = axum::http::HeaderMap::new();
+            target
+                .credential
+                .as_ref()
+                .unwrap()
+                .insert_into(&mut headers);
+            headers
+                .get(RELAY_HEADER)
+                .map(|value| value.to_str().unwrap().to_owned())
+        };
+        let (judge, screen) = programs.targets(&upstream);
+        assert_eq!(relayed(&judge).as_deref(), Some("daybreak_blue"));
+        assert_eq!(relayed(&screen).as_deref(), Some("standard"));
+        let (judge, screen) = StagePrograms::default().targets(&upstream);
+        assert_eq!((relayed(&judge), relayed(&screen)), (None, None));
+    }
 
     /// A tool Claude Code declares mid-conversation has its schema read; one
     /// it withdrew has none.

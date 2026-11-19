@@ -16,6 +16,7 @@ mod claude_settings;
 mod client_window;
 pub mod config;
 mod context_check;
+pub mod cyber_access;
 pub mod discovery;
 pub mod doctor;
 mod exclusions;

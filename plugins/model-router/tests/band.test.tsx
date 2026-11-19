@@ -570,6 +570,41 @@ describe('model-router rows that overlap', () => {
     await ui.unmount()
   })
 
+  const daybreak = {
+    id: 'daybreak',
+    severity: 'action',
+    text: 'Daybreak may already apply to GPT requests: choose it or standard safeguards',
+    version: 'daybreak:gpt-6-sol,gpt-6-luna',
+    actions: setup,
+  }
+
+  test('the Daybreak row offers Run setup, which edits no settings', async ($, on) => {
+    const { commands, settingsCalls } = await startWithSettings($, on, [daybreak], {})
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect((await ui.findAll({ type: 'Button' })).map(button => button.key)).toEqual([
+      'model-router:daybreak:setup',
+      'model-router:daybreak:dismiss',
+    ])
+    await ui.press({ key: 'model-router:daybreak:setup' })
+    expect(commands).toEqual(['model-router:setup'])
+    expect(settingsCalls).toEqual([])
+    await ui.unmount()
+  })
+
+  test('a dismissed Daybreak row stays hidden while the catalog lists it for the same routes', async ($, on) => {
+    await start($, on, [daybreak], { 'dismissed:daybreak': daybreak.version })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await ui.find({ key: 'model-router:daybreak:setup' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a dismissed Daybreak row returns when the catalog lists it for other routes', async ($, on) => {
+    await start($, on, [daybreak], { 'dismissed:daybreak': 'daybreak:gpt-6-sol' })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await ui.find({ key: 'model-router:daybreak:setup' })).toBeDefined()
+    await ui.unmount()
+  })
+
   test('an edit checks the rows again, so a row the edit did the work of goes', async ($, on) => {
     const checks = await startChecking($, on, (_env, edited) => (edited ? [] : [newModel, windowsRow]))
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })

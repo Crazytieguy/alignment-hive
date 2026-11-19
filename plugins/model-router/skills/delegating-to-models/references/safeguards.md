@@ -16,6 +16,16 @@ account-level enforcement on the user's own account; how much they cover
 varies by interface, and the router doesn't send Codex's own prompt
 mitigations.
 
+Daybreak, OpenAI's trusted-access program for verified defenders, gives
+an approved account fewer cyber refusals: with Daybreak Blue on GPT-6
+Luna, GPT-6 Sol and earlier models; with Daybreak Red also on GPT-6.1
+Terra, GPT-6.1 Sol, GPT-6 Astra and the 6.2 models. The router selects
+Daybreak or standard safeguards on a route once the user has set that up
+(the setup skill's `references/daybreak.md`), and the `daybreak` line of
+the router's `doctor`, when there is one, names what each route selects;
+a route that selects neither leaves the choice to OpenAI.
+[OpenAI overview, read 2026-11-18](https://help.openai.com/en/articles/20001258).
+
 - **Fable 5.2 / Mythos 5.2** — the same model at two safeguard levels:
   Fable 5.2 is generally available, Mythos 5.2 through Anthropic's
   cyber and life-sciences verification programs. As with Opus 5.5
@@ -72,13 +82,8 @@ mitigations.
   cover more dual-use requests, including autonomous vulnerability
   discovery and chained exploit development, and OpenAI says this will
   restrict some legitimate vulnerability research and security testing.
-  Dual-use biology restrictions were tightened too. At launch OpenAI
-  said Daybreak access (its trusted-access program for verified
-  defenders) was still to come for them, and the system card limits
-  reduced cyber refusals on 6.2 Astra to organizations approved for
-  Daybreak Red. Daybreak access is specific to the approved program,
-  models and product surfaces, so it may not carry over to requests
-  through the router.
+  Dual-use biology restrictions were tightened too. Of the Daybreak
+  levels above, only Red reduces their cyber refusals.
   [System card, 2026-11-17](https://deploymentsafety.openai.com/gpt-6-2-astra-sol);
   [launch post](https://openai.com/index/introducing-gpt-6-2-astra-sol/).
 - **GPT-6.1 Terra** — Critical in cyber and High in bio/chem, a step
@@ -93,7 +98,7 @@ mitigations.
   extra cyber restrictions of the Critical-rated models. `gpt-6-sol` has
   no shipped agent but routes as a Workflow model or a user agent, and
   is the GPT model to try for legitimate security work the others
-  refuse.
+  refuse. Daybreak Blue covers both.
   [Sol/Luna appendix, 2026-09-22](https://deploymentsafety.openai.com/gpt-6-astra/sec:appendix-sol-luna/).
 - **Grok 4.7 (xAI)** — structurally the lightest safeguard stack of the
   framework-backed vendors above (no fallback model, monitoring or

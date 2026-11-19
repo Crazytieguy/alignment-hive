@@ -45,6 +45,15 @@ present themselves as Claude.
   during `/model-router:setup`. Grok and Muse use your own xAI or Muse Code
   subscription login. Muse is not a supported path under Meta's terms
   (see Compliance), and setup shows you the terms first.
+- OpenAI Daybreak (Trusted Access for Cyber), for accounts OpenAI has
+  approved: `/model-router:setup` lets you choose Daybreak (fewer cyber
+  refusals on the models your approval covers) or standard safeguards for
+  GPT requests, after showing what Daybreak means for your data. The
+  session-start notice says when OpenAI lists Daybreak for your account
+  and you haven't chosen. To detect this, the router reads your account's
+  model catalog from OpenAI's Codex backend (chatgpt.com), as Codex does:
+  with the Codex login, or with an API key unless you chose standard
+  safeguards.
 - Working WebSearch in GPT sessions, answered from the routed model's own
   search backend in a few seconds, with links.
 - An experimental auto-mode classifier, off by default (setup asks once).

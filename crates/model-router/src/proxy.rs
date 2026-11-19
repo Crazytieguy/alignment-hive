@@ -513,7 +513,9 @@ async fn refusal_response(
 /// of its refusal:
 /// the logins may refuse it ([`login_refusal`]); an `-ultrafast` twin's
 /// goes by the Codex plan ([`crate::ultrafast::Gate::decide`]), at priority
-/// while the plan is unread, refused where it lacks the tier.
+/// while the plan is unread, refused where it lacks the tier. The route
+/// comes back with the cyber access program its requests select
+/// ([`with_cyber_access`]).
 async fn plan_route<'a>(
     state: &AppState,
     route: Option<&'a crate::config::ModelRoute>,
@@ -527,30 +529,46 @@ async fn plan_route<'a>(
     }
     let Some(gate) = state
         .config
-        .ultrafast_gate
+        .codex_plan
         .as_ref()
         .filter(|_| route.tier == ServiceTier::Ultrafast)
     else {
-        return Ok(Some(Cow::Borrowed(route)));
+        return Ok(Some(with_cyber_access(state, Cow::Borrowed(route)).await));
     };
-    match gate.decide(route.split_upstream_model().0).await {
-        Verdict::Forward => Ok(Some(Cow::Borrowed(route))),
+    let route = match gate.decide(route.split_upstream_model().0).await {
+        Verdict::Forward => Cow::Borrowed(route),
         Verdict::Refuse => {
             let message = ultrafast_refusal(route);
             tracing::warn!(route = %route.routing_id, %message, "refused an Ultrafast turn");
-            Err(message)
+            return Err(message);
         }
         Verdict::Priority => {
             tracing::warn!(
                 route = %route.routing_id,
                 "sent an Ultrafast turn at priority: the Codex plan cannot be read"
             );
-            Ok(Some(Cow::Owned(crate::config::ModelRoute {
+            Cow::Owned(crate::config::ModelRoute {
                 tier: ServiceTier::Priority,
                 ..route.clone()
-            })))
+            })
         }
+    };
+    Ok(Some(with_cyber_access(state, route).await))
+}
+
+/// `route` with the cyber access program its requests select
+/// ([`crate::cyber_access::select_for_request`]) in place of the one it names.
+async fn with_cyber_access<'a>(
+    state: &AppState,
+    route: std::borrow::Cow<'a, crate::config::ModelRoute>,
+) -> std::borrow::Cow<'a, crate::config::ModelRoute> {
+    let program = crate::cyber_access::select_for_request(&state.config, &route).await;
+    if program == route.cyber_access {
+        return route;
     }
+    let mut route = route.into_owned();
+    route.cyber_access = program;
+    std::borrow::Cow::Owned(route)
 }
 
 /// The client-facing text for an `-ultrafast` twin's turn the Codex plan
@@ -862,6 +880,7 @@ async fn gpt_response(
         rewritten,
         &route.upstream_model,
         route.tier,
+        route.cyber_access,
         policies,
         capture,
         tap,
@@ -886,9 +905,17 @@ async fn auto_mode_plan(
         return Some(crate::auto_mode::ReplyMode::StripOnly);
     }
     let upstream = gpt_forward_target(&state.cliproxy_upstream);
+    let programs = runtime.programs(&state.config).await;
     let refusal = login_refusal(state, Some(runtime.judge_route())).await;
     let screen_refusal = login_refusal(state, runtime.screen_route()).await;
-    Some(runtime.plan(&parts.headers, body, upstream, refusal, screen_refusal))
+    Some(runtime.plan(
+        &parts.headers,
+        body,
+        upstream,
+        programs,
+        refusal,
+        screen_refusal,
+    ))
 }
 
 /// The inbound headers a GPT-bound forward should carry: rewritten to the
@@ -944,6 +971,8 @@ fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPoli
 /// upstream (or the stub / an actionable local error). `tier` is the
 /// route's for its own turns, `Standard` for a side call: only Ultrafast
 /// changes the headers ([`headers::GptUpstreamCredential::for_tier`]).
+/// `cyber_access` is the program the request's route selects
+/// ([`headers::GptUpstreamCredential::for_cyber_access`]).
 #[allow(clippy::too_many_arguments)]
 async fn forward_gpt(
     state: &AppState,
@@ -951,6 +980,7 @@ async fn forward_gpt(
     rewritten: Bytes,
     upstream_model: &str,
     tier: crate::service_tier::ServiceTier,
+    cyber_access: Option<crate::cyber_access::CyberAccess>,
     policies: GptPolicies,
     capture: Option<RequestCapture>,
     tap: Option<SniffTap>,
@@ -959,9 +989,16 @@ async fn forward_gpt(
     let inbound_headers = cache_headers.as_ref().unwrap_or(&parts.headers);
     match gpt_target(&state.cliproxy_upstream) {
         GptTarget::Forward(mut target) => {
+            if let Some(program) = cyber_access {
+                tracing::debug!(
+                    model = upstream_model,
+                    program = program.as_str(),
+                    "this request selects a cyber access program"
+                );
+            }
             target.credential = target
                 .credential
-                .map(|credential| credential.for_tier(tier));
+                .map(|credential| credential.for_tier(tier).for_cyber_access(cyber_access));
             forward(
                 state,
                 &target.base_url,
@@ -991,6 +1028,20 @@ async fn forward_gpt(
 pub(crate) struct ForwardTarget {
     pub(crate) base_url: String,
     pub(crate) credential: Option<headers::GptUpstreamCredential>,
+}
+
+impl ForwardTarget {
+    /// The same target for a model request whose route selects `program`
+    /// ([`headers::GptUpstreamCredential::for_cyber_access`]).
+    pub(crate) fn selecting(&self, program: Option<crate::cyber_access::CyberAccess>) -> Self {
+        Self {
+            base_url: self.base_url.clone(),
+            credential: self
+                .credential
+                .clone()
+                .map(|credential| credential.for_cyber_access(program)),
+        }
+    }
 }
 
 enum GptTarget {
@@ -1779,6 +1830,7 @@ mod tests {
             let request = Request::post("/v1/messages")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(ULTRAFAST_RELAY_HEADER, "ultrafast")
+                .header(crate::cyber_access::RELAY_HEADER, "daybreak_red")
                 .body(Body::from(body.to_string()))
                 .unwrap();
             let response = app.clone().oneshot(request).await.unwrap();
@@ -1830,6 +1882,197 @@ mod tests {
         assert_eq!(seen[1].1["model"], "gpt-6.2-astra");
     }
 
+    fn cyber_relayed(seen: &[(HeaderMap, serde_json::Value)]) -> Vec<Option<&str>> {
+        seen.iter()
+            .map(|(headers, _)| {
+                let mut values = headers.get_all(crate::cyber_access::RELAY_HEADER).iter();
+                let value = values.next().map(|value| value.to_str().unwrap());
+                assert!(values.next().is_none(), "one relay at most");
+                value
+            })
+            .collect()
+    }
+
+    /// A route that names a cyber access program sends its turns, and its
+    /// twins', to the managed child with the relay; no other route's turn
+    /// carries one, whatever the client sent.
+    #[tokio::test]
+    async fn a_route_with_cyber_access_carries_its_relay() {
+        let config = crate::config::parse_and_prepare(
+            "[[model-overrides]]\nrouting-id = \"gpt-6-luna\"\ncyber-access = \"daybreak_blue\"\n\
+             [[model-overrides]]\nrouting-id = \"gpt-6.2-sol\"\ncyber-access = \"standard\"\n",
+        );
+        let models = [
+            "gpt-6-luna",
+            "gpt-6-luna-fast",
+            "gpt-6.2-sol",
+            "gpt-6.2-sol-ultrafast",
+            "gpt-6-sol",
+        ];
+        let (answers, seen) = ultrafast_turns(config, &models).await;
+        assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
+        assert_eq!(
+            cyber_relayed(&seen),
+            [
+                Some("daybreak_blue"),
+                Some("daybreak_blue"),
+                Some("standard"),
+                Some("standard"),
+                None,
+            ]
+        );
+        // The program rides beside the tiers, not in their place.
+        assert_eq!(
+            relayed(&seen),
+            [
+                (None, None),
+                (None, Some("priority")),
+                (None, None),
+                (Some("ultrafast"), None),
+                (None, None),
+            ]
+        );
+    }
+
+    /// With `[gpt] daybreak` on, a turn selects the Daybreak program the
+    /// Codex plan lists for its model, a route's own program first; a
+    /// model the plan lists none for, and every turn while the plan cannot
+    /// be read, goes out without one. Off, every turn selects `standard`,
+    /// read or not.
+    #[tokio::test]
+    async fn a_daybreak_turn_goes_by_the_plan() {
+        use crate::cyber_access::CyberAccess::{DaybreakBlue, DaybreakRed, Standard};
+        let root = tempfile::tempdir().unwrap();
+        let dirs = crate::state::Dirs::under(root.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        std::fs::write(
+            dirs.auth_dir().join("codex-a.json"),
+            r#"{"type": "codex", "access_token": "t", "account_id": "acct"}"#,
+        )
+        .unwrap();
+        let with_gate = |source: &str| {
+            let mut config = crate::config::parse_and_prepare(source);
+            // Nothing listens there: a read fails at once.
+            let gate = crate::ultrafast::Gate::with_url(
+                dirs.auth_dir(),
+                &dirs,
+                "http://127.0.0.1:9/backend-api/codex/models",
+            )
+            .unwrap();
+            config.codex_plan = Some(Arc::new(gate));
+            config
+        };
+        let on = "[gpt]\ndaybreak = true\n\
+                  [[model-overrides]]\nrouting-id = \"gpt-6.1-sol\"\n\
+                  cyber-access = \"standard\"\n";
+        let models = [
+            "gpt-6-sol",
+            "gpt-6-luna-fast",
+            "gpt-6.2-sol",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+        ];
+
+        let (answers, seen) = ultrafast_turns(with_gate(on), &models).await;
+        assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
+        assert_eq!(
+            cyber_relayed(&seen),
+            [None, None, None, Some("standard"), None],
+            "unread"
+        );
+
+        crate::ultrafast::record_cyber(
+            &dirs,
+            &dirs.auth_dir(),
+            &[
+                ("gpt-6-sol", &[Standard, DaybreakBlue]),
+                ("gpt-6-luna", &[Standard, DaybreakBlue]),
+                ("gpt-6.2-sol", &[Standard, DaybreakRed]),
+                ("gpt-6.1-sol", &[Standard, DaybreakBlue]),
+                ("gpt-6.1-terra", &[Standard]),
+            ],
+        );
+        let (answers, seen) = ultrafast_turns(with_gate(on), &models).await;
+        assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
+        assert_eq!(
+            cyber_relayed(&seen),
+            [
+                Some("daybreak_blue"),
+                Some("daybreak_blue"),
+                Some("daybreak_red"),
+                Some("standard"),
+                None,
+            ]
+        );
+
+        // Off: standard on every route, whatever the plan lists, and with
+        // no plan at all (an API key).
+        let off = "[gpt]\ndaybreak = false\n";
+        let (_, seen) = ultrafast_turns(with_gate(off), &models).await;
+        assert_eq!(cyber_relayed(&seen), [Some("standard"); 5]);
+        std::fs::remove_file(crate::ultrafast::cache_file(&dirs)).unwrap();
+        let (_, seen) = ultrafast_turns(with_gate(off), &models).await;
+        assert_eq!(cyber_relayed(&seen), [Some("standard"); 5], "unread");
+        let api_key = format!("{off}auth = \"api-key\"\n");
+        let (_, seen) = ultrafast_turns(crate::config::parse_and_prepare(&api_key), &models).await;
+        assert_eq!(cyber_relayed(&seen), [Some("standard"); 5], "no plan");
+        crate::ultrafast::record_cyber(
+            &dirs,
+            &dirs.auth_dir(),
+            &[("gpt-6-sol", &[Standard, DaybreakBlue])],
+        );
+
+        // Unset: the plan's programs select nothing.
+        let (_, seen) = ultrafast_turns(with_gate(""), &models).await;
+        assert_eq!(cyber_relayed(&seen), [None; 5]);
+    }
+
+    /// An API key's Daybreak turns go by its own catalog, and its Ultrafast
+    /// twins go out whatever that lists.
+    #[tokio::test]
+    async fn an_api_key_s_daybreak_turn_goes_by_its_own_catalog() {
+        use crate::cyber_access::CyberAccess::{DaybreakBlue, Standard};
+        let root = tempfile::tempdir().unwrap();
+        let dirs = crate::state::Dirs::under(root.path());
+        std::fs::create_dir_all(&dirs.state_dir).unwrap();
+        let with_key = || {
+            let mut config =
+                crate::config::parse_and_prepare("[gpt]\nauth = \"api-key\"\ndaybreak = true\n");
+            config.gpt.api_key = Some("sk-test".to_owned());
+            let gate = crate::ultrafast::Gate::with_url(
+                crate::ultrafast::Source::of(&config, &dirs).unwrap(),
+                &dirs,
+                "http://127.0.0.1:9/backend-api/codex/models",
+            )
+            .unwrap();
+            config.codex_plan = Some(Arc::new(gate));
+            config
+        };
+        let key_models = ["gpt-6-sol", "gpt-6.2-sol-ultrafast", "gpt-6.1-terra"];
+        let (answers, seen) = ultrafast_turns(with_key(), &key_models).await;
+        assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
+        assert_eq!(cyber_relayed(&seen), [None; 3], "the key's is unread");
+        crate::ultrafast::record_cyber_for_key(
+            &dirs,
+            &with_key(),
+            &[
+                ("gpt-6-sol", &[Standard, DaybreakBlue]),
+                ("gpt-6.2-sol", &[Standard, DaybreakBlue]),
+            ],
+        );
+        let (answers, seen) = ultrafast_turns(with_key(), &key_models).await;
+        assert!(answers.iter().all(|(status, _)| *status == StatusCode::OK));
+        assert_eq!(
+            cyber_relayed(&seen),
+            [Some("daybreak_blue"), Some("daybreak_blue"), None]
+        );
+        assert_eq!(
+            relayed(&seen)[1],
+            (Some("ultrafast"), None),
+            "the twin's turn is not held to the catalog's tiers"
+        );
+    }
+
     /// A subscription's twin turns go by the Codex plan: refused where it
     /// does not list the tier, at priority while it is unread.
     #[tokio::test]
@@ -1851,7 +2094,7 @@ mod tests {
                 "http://127.0.0.1:9/backend-api/codex/models",
             )
             .unwrap();
-            config.ultrafast_gate = Some(Arc::new(gate));
+            config.codex_plan = Some(Arc::new(gate));
             config
         };
         let models = ["gpt-6.2-sol-ultrafast", "gpt-6.2-astra-ultrafast"];

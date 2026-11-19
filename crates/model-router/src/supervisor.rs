@@ -189,7 +189,7 @@ impl ChildCredentials {
 fn ultrafast_payload_rule() -> String {
     use crate::service_tier::{ULTRAFAST, ULTRAFAST_RELAY_HEADER};
     use std::fmt::Write as _;
-    let mut yaml = String::from("  override:\n    - models:\n");
+    let mut yaml = String::from("    - models:\n");
     let models = crate::config::ULTRAFAST_MODELS
         .into_iter()
         .chain(crate::config::RETIRED_TWIN_MODELS);
@@ -211,6 +211,37 @@ fn ultrafast_payload_rule() -> String {
         yaml_quote("service_tier"),
         yaml_quote(ULTRAFAST)
     );
+    yaml
+}
+
+/// The `payload:` entries that write a turn's cyber access program
+/// ([`crate::cyber_access`]), which the Claude translator has no field for,
+/// into the final Codex body: one per program, each matching only a request
+/// the router marked with that program
+/// ([`crate::cyber_access::RELAY_HEADER`]).
+fn cyber_access_payload_rules() -> String {
+    use crate::cyber_access::{BODY_FIELD, CyberAccess, RELAY_HEADER};
+    use std::fmt::Write as _;
+    let mut yaml = String::new();
+    for program in CyberAccess::ALL {
+        yaml.push_str("    - models:\n");
+        let _ = writeln!(yaml, "        - name: {}", yaml_quote("*"));
+        let _ = writeln!(yaml, "          protocol: {}", yaml_quote("codex"));
+        yaml.push_str("          headers:\n");
+        let _ = writeln!(
+            yaml,
+            "            {}: {}",
+            yaml_quote(RELAY_HEADER),
+            yaml_quote(program.as_str())
+        );
+        yaml.push_str("      params:\n");
+        let _ = writeln!(
+            yaml,
+            "        {}: {}",
+            yaml_quote(BODY_FIELD),
+            yaml_quote(program.as_str())
+        );
+    }
     yaml
 }
 
@@ -336,12 +367,14 @@ routing:
     yaml
 }
 
-/// The `payload:` section: the `-ultrafast` twins' rule, which matches only
-/// a request the router marked, and one rule per pinned model.
+/// The `payload:` section: the `-ultrafast` twins' rule and the cyber
+/// access rules, which match only a request the router marked, and one rule
+/// per pinned model.
 fn payload_section(pinned: &[(&ProviderModel, &Vec<String>)]) -> String {
     use std::fmt::Write as _;
-    let mut yaml = String::from("\npayload:\n");
+    let mut yaml = String::from("\npayload:\n  override:\n");
     yaml.push_str(&ultrafast_payload_rule());
+    yaml.push_str(&cyber_access_payload_rules());
     // Since 8.0.53 the child forwards a Claude request's `max_tokens` to
     // Codex, xAI and Meta as `max_output_tokens`, where reasoning counts
     // against it: Claude Code's 32000 would cut long high-effort GPT turns
@@ -1186,6 +1219,7 @@ mod tests {
             gpt: GptConfig {
                 auth,
                 api_key: api_key.map(str::to_string),
+                ..GptConfig::default()
             },
             ..ChildCredentials::default()
         }
@@ -1420,6 +1454,39 @@ mod tests {
     }
 
     #[test]
+    fn each_cyber_access_program_has_a_header_matched_rule() {
+        let yaml = upstream_config_yaml(1, Path::new("/a"), "s", &ChildCredentials::default());
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let rules: serde_json::Value =
+            serde_yaml::from_value(parsed["payload"]["override"].clone()).unwrap();
+        let rule = |program: &str| {
+            serde_json::json!({
+                "models": [{
+                    "name": "*",
+                    "protocol": "codex",
+                    "headers": {"x-model-router-cyber-access": program},
+                }],
+                "params": {"access_programs.cyber": program},
+            })
+        };
+        let cyber: Vec<&serde_json::Value> = rules
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|rule| rule["params"].get("access_programs.cyber").is_some())
+            .collect();
+        assert_eq!(
+            cyber,
+            [
+                &rule("standard"),
+                &rule("daybreak_blue"),
+                &rule("daybreak_red")
+            ],
+            "{yaml}"
+        );
+    }
+
+    #[test]
     fn the_ultrafast_rule_is_one_header_matched_rule_beside_the_pins() {
         let mut provider = test_provider("openrouter", "glm-5.2");
         provider.models[0].pinned_providers = Some(vec!["decart".to_string()]);
@@ -1428,7 +1495,7 @@ mod tests {
             let yaml = upstream_config_yaml(1, Path::new("/a"), "s", &credentials);
             let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
             let rules = parsed["payload"]["override"].as_sequence().unwrap();
-            assert_eq!(rules.len(), 1, "{yaml}");
+            assert_eq!(rules.len(), 4, "{yaml}");
             let rule: serde_json::Value = serde_yaml::from_value(rules[0].clone()).unwrap();
             assert_eq!(
                 rule,

@@ -88,11 +88,15 @@ pub(super) async fn gpt_origin_on_claude_branch(
             .and_then(|body| at_tier(&body, route.tier.side_call_tier()))
         {
             Ok(rewritten) => {
+                // No turn planned this route: its own program, not the
+                // Claude carrier's none.
+                let route =
+                    super::with_cyber_access(state, std::borrow::Cow::Borrowed(route)).await;
                 match gpt_backend_answer(
                     state,
                     parts,
                     &Bytes::from(rewritten),
-                    route,
+                    &route,
                     subcall,
                     &target,
                     capture,
@@ -204,6 +208,7 @@ pub(super) async fn gpt_branch_subcall(
         rewritten,
         &route.upstream_model,
         ServiceTier::Standard,
+        route.cyber_access,
         policies,
         capture,
         None,
@@ -376,7 +381,7 @@ async fn gpt_backend_answer(
             }
         }
     }
-    match legacy_websearch(state, parts, rewritten, target).await {
+    match legacy_websearch(state, parts, rewritten, target, route.cyber_access).await {
         Ok(mut message) => {
             if let Some(usage) = message.get_mut("usage") {
                 crate::usage::inject_estimated_input_tokens(
@@ -761,16 +766,21 @@ fn at_tier(body: &[u8], tier: ServiceTier) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Forwards the sub-call to the LLM upstream with streaming disabled and
-/// buffers the complete message so its links can be repaired.
+/// buffers the complete message so its links can be repaired. A model
+/// request like any other on its route, so it selects the route's
+/// `cyber_access` ([`crate::cyber_access`]); the search backend's own call
+/// (`alpha_search`) is not one.
 async fn legacy_websearch(
     state: &AppState,
     parts: &axum::http::request::Parts,
     rewritten: &Bytes,
     target: &ForwardTarget,
+    cyber_access: Option<crate::cyber_access::CyberAccess>,
 ) -> anyhow::Result<serde_json::Value> {
     let mut document = serde_json::from_slice::<serde_json::Value>(rewritten)?;
     document["stream"] = serde_json::Value::Bool(false);
     let cache_headers = cache_identity_headers(parts, rewritten);
+    let target = target.selecting(cyber_access);
     let mut outgoing_headers = headers::request_headers(
         cache_headers.as_ref().unwrap_or(&parts.headers),
         true,
@@ -1000,5 +1010,115 @@ mod tests {
             "Meta login meta-a@example.com.json",
         )
         .await;
+    }
+
+    /// A search the model answers is a model request on its route, so it
+    /// selects the route's cyber access program whichever request carried it:
+    /// the scrape path behind a failed Codex search, on the route's own
+    /// sub-call and on a Claude-carried one, and the plain forward with
+    /// search off. The Codex search backend's call selects none.
+    #[tokio::test]
+    async fn a_search_the_model_answers_selects_its_route_s_cyber_access_program() {
+        use crate::cyber_access::RELAY_HEADER;
+        type Seen = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+        // Records each request's path and relay; a turn calls `WebSearch`,
+        // and the Codex search backend is down.
+        async fn child(seen: Seen) -> String {
+            let turn = [
+                serde_json::json!({"type":"content_block_start","index":0,
+                    "content_block":{"type":"tool_use","id":"toolu_1","name":"WebSearch","input":{}}}),
+                serde_json::json!({"type":"content_block_delta","index":0,
+                    "delta":{"type":"input_json_delta",
+                             "partial_json":"{\"query\":\"bun release notes\"}"}}),
+                serde_json::json!({"type":"content_block_stop","index":0}),
+            ]
+            .map(|data| format!("event: x\ndata: {data}\n\n"))
+            .concat();
+            let app = axum::Router::new().fallback(axum::routing::any(
+                move |request: axum::extract::Request| {
+                    let (seen, turn) = (seen.clone(), turn.clone());
+                    async move {
+                        let path = request.uri().path().to_string();
+                        let relay = request
+                            .headers()
+                            .get(RELAY_HEADER)
+                            .map(|value| value.to_str().unwrap().to_owned());
+                        seen.lock().unwrap().push((path.clone(), relay));
+                        if path == "/v1/messages" {
+                            ([(header::CONTENT_TYPE, "text/event-stream")], turn).into_response()
+                        } else {
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                    }
+                },
+            ));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            format!("http://{address}")
+        }
+        let metadata = serde_json::json!({"user_id":
+            r#"{"device_id":"d","account_uuid":"a","session_id":"sess-1"}"#});
+        let turn = serde_json::json!({
+            "model": "gpt-6-luna", "max_tokens": 64, "stream": true, "metadata": metadata,
+            "messages": [{"role": "user", "content": "find bun release notes"}],
+            "tools": [{"name": "WebSearch", "description": "Search the web",
+                       "input_schema": {"type": "object"}}],
+        });
+        let subcall = |model: &str| {
+            serde_json::json!({
+                "model": model, "max_tokens": 4096, "stream": true, "metadata": metadata,
+                "messages": [{"role": "user", "content": [{"type": "text",
+                    "text": "Perform a web search for the query: bun release notes"}]}],
+                "system": [{"type": "text",
+                    "text": "You are an assistant for performing a web search tool use"}],
+                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
+            })
+        };
+        let relays = |seen: &Seen| -> Vec<(String, Option<String>)> {
+            std::mem::take(&mut *seen.lock().unwrap())
+        };
+        let on = |path: &str, relay: Option<&str>| (path.to_string(), relay.map(str::to_owned));
+        let named = "[[model-overrides]]\nrouting-id = \"gpt-6-luna\"\n\
+                     cyber-access = \"daybreak_blue\"\n";
+
+        for (source, program) in [
+            ("[gpt]\ndaybreak = false\n", Some("standard")),
+            (named, Some("daybreak_blue")),
+            ("", None),
+        ] {
+            let seen = Seen::default();
+            let mut config = crate::config::parse_and_prepare(source);
+            // Nothing listens there: a search that reaches Anthropic fails.
+            config.anthropic_upstream_base = "http://127.0.0.1:9".to_string();
+            let handle =
+                crate::supervisor::ManagedHandle::ready_for_tests(child(seen.clone()).await);
+            let (app, _) = super::super::build(config, Some(handle)).await.unwrap();
+
+            // The search on the route's own sub-call, then on a Claude one.
+            // The fake's scrape answer is no message, so the route's own
+            // sub-call goes on to the plain forward, and the Claude one to
+            // Anthropic.
+            for (carrier, forwards) in [("gpt-6-luna", 2), ("claude-sonnet-4-5", 1)] {
+                // The agent's turn, which records the search's origin.
+                let (status, body) = send(&app, turn.clone()).await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                assert_eq!(relays(&seen), [on("/v1/messages", program)], "{source}");
+                send(&app, subcall(carrier)).await;
+                let mut expected = vec![on("/v1/alpha/search", None)];
+                expected.extend(std::iter::repeat_n(on("/v1/messages", program), forwards));
+                assert_eq!(relays(&seen), expected, "{source} carried by {carrier}");
+            }
+        }
+
+        // Search off: the sub-call is forwarded as it came.
+        let seen = Seen::default();
+        let config = crate::config::parse_and_prepare(
+            "[web-search]\nmode = \"off\"\n[gpt]\ndaybreak = false\n",
+        );
+        let handle = crate::supervisor::ManagedHandle::ready_for_tests(child(seen.clone()).await);
+        let (app, _) = super::super::build(config, Some(handle)).await.unwrap();
+        send(&app, subcall("gpt-6-luna")).await;
+        assert_eq!(relays(&seen), [on("/v1/messages", Some("standard"))]);
     }
 }

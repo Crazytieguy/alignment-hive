@@ -237,7 +237,12 @@ export function normalizeGo(code: string): Array<string> {
 /** Every YAML key model-router writes into the child's config, read from supervisor.rs `upstream_config_yaml`. */
 export function routerYamlKeys(supervisorRs: string): Array<string> {
   // The function and the helpers that render its sections.
-  const fns = ['pub fn upstream_config_yaml(', 'fn payload_section(', 'fn ultrafast_payload_rule('];
+  const fns = [
+    'pub fn upstream_config_yaml(',
+    'fn payload_section(',
+    'fn ultrafast_payload_rule(',
+    'fn cyber_access_payload_rules(',
+  ];
   if (!supervisorRs.includes(fns[0]!)) return [];
   const body = fns
     .map((decl) => {

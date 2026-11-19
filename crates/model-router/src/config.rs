@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_inline_default::serde_inline_default;
 
 use crate::client_window::{EnvSetting, Undeclared, UsageScale, client_context_window};
+use crate::cyber_access::CyberAccess;
 
 mod catalog;
 
@@ -342,11 +343,14 @@ pub struct Config {
     #[serde(skip)]
     pub opt_in_models: Vec<ModelRoute>,
 
-    /// Refuses an `-ultrafast` twin's turn when the Codex plan lacks the
-    /// tier ([`crate::ultrafast::Gate`]). Set by `serve` for a managed
-    /// subscription; `None` forwards every turn (an API key has the tier).
+    /// What the account's Codex catalog lists ([`crate::ultrafast::Gate`]):
+    /// a subscription's refuses an `-ultrafast` twin's turn when the plan
+    /// lacks the tier, and either sign-in's gives `[gpt] daybreak = true`
+    /// each model's Daybreak program. Set by `serve` where there is a
+    /// catalog to ask ([`crate::ultrafast::Source::of`]); `None` forwards
+    /// every twin turn and selects no Daybreak program.
     #[serde(skip)]
-    pub ultrafast_gate: Option<std::sync::Arc<crate::ultrafast::Gate>>,
+    pub codex_plan: Option<std::sync::Arc<crate::ultrafast::Gate>>,
 
     #[serde(skip)]
     pub native_search: NativeSearchLimits,
@@ -390,6 +394,14 @@ pub struct GptConfig {
     /// so.
     #[serde(skip)]
     pub api_key: Option<String>,
+
+    /// `OpenAI` Daybreak, after Codex's setting ([`crate::cyber_access`]):
+    /// `true`, each GPT route's requests select the Daybreak program the
+    /// account's Codex catalog lists for its model (the Codex logins', or
+    /// the API key's); `false`, they select `standard`; unset, they select
+    /// nothing and `OpenAI` decides. The managed child only; a route's own
+    /// `cyber-access` wins.
+    pub daybreak: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -723,6 +735,11 @@ pub struct ModelRoute {
     /// read from TOML.
     #[serde(skip)]
     pub tier: crate::service_tier::ServiceTier,
+
+    /// The `access_programs.cyber` value this route's turns select
+    /// ([`crate::cyber_access`]): GPT routes on the managed child only.
+    /// `None` names none; `[gpt] daybreak` may still pick one per turn.
+    pub cyber_access: Option<CyberAccess>,
 }
 
 impl ModelRoute {
@@ -768,6 +785,7 @@ pub struct ModelOverride {
     family: Option<ModelFamily>,
     context_window: Option<u64>,
     context_window_scaling: Option<bool>,
+    cyber_access: Option<CyberAccess>,
 }
 
 impl ModelOverride {
@@ -781,6 +799,7 @@ impl ModelOverride {
             family,
             context_window,
             context_window_scaling,
+            cyber_access,
         } = self;
         if let Some(upstream) = upstream {
             route.upstream = upstream;
@@ -799,6 +818,9 @@ impl ModelOverride {
         }
         if let Some(scaling) = context_window_scaling {
             route.context_window_scaling = scaling;
+        }
+        if cyber_access.is_some() {
+            route.cyber_access = cyber_access;
         }
     }
 
@@ -923,7 +945,8 @@ fn template_models_section(models: &[ModelRoute]) -> String {
          built-in routes by routing-id:\n# one naming a built-in route changes only the fields \
          it sets, and one with a\n# new routing-id adds a route (upstream-model and \
          display-name required).\n# Fields: upstream-model, display-name, family (\"gpt\", \
-         \"grok\", \"muse\"),\n# context-window.\n#[[model-overrides]]\n#routing-id = \
+         \"grok\", \"muse\"),\n# context-window, cyber-access (described under [gpt] \
+         below).\n#[[model-overrides]]\n#routing-id = \
          \"{example}\"\n#display-name = \"{example_name} (custom)\"\n#\n#[[model-overrides]]\n\
          #routing-id = \"my-route\"\n#upstream-model = \"some-model\"\n#display-name = \"My \
          Route\"\n"
@@ -1403,6 +1426,7 @@ impl Config {
         }
 
         self.validate_gpt_auth(cliproxy)?;
+        self.validate_cyber_access(cliproxy)?;
         self.validate_openai_providers(cliproxy)?;
         self.validate_auto_mode_classifier()
     }
@@ -1473,6 +1497,36 @@ impl Config {
             ensure!(
                 !api_key.is_empty(),
                 "[gpt] api-key in secrets.toml is empty"
+            );
+        }
+        Ok(())
+    }
+
+    /// A program reaches `OpenAI` only through the managed child's payload
+    /// rules, and only a GPT route has the programs
+    /// ([`crate::cyber_access`]).
+    fn validate_cyber_access(&self, cliproxy: &UpstreamConfig) -> anyhow::Result<()> {
+        let external = cliproxy.mode == UpstreamMode::External;
+        ensure!(
+            self.gpt.daybreak.is_none() || !external,
+            "[gpt] daybreak requires [upstreams.{CLIPROXY_UPSTREAM}] mode = \"managed\": the \
+             managed CLIProxyAPI writes the program into each request"
+        );
+        for route in self
+            .effective_models()
+            .filter(|route| route.cyber_access.is_some())
+        {
+            ensure!(
+                route.family == ModelFamily::Gpt,
+                "model {} sets cyber-access, which only OpenAI's GPT models have",
+                route.routing_id
+            );
+            ensure!(
+                !external,
+                "model {} sets cyber-access, which requires [upstreams.{CLIPROXY_UPSTREAM}] \
+                 mode = \"managed\": the managed CLIProxyAPI writes the program into each \
+                 request",
+                route.routing_id
             );
         }
         Ok(())
@@ -1720,9 +1774,37 @@ impl Config {
 # any Codex login is then ignored. The key goes in secrets.toml, never here:
 #   [gpt]
 #   api-key = "sk-..."
+# With either, the router reads the account's Codex model catalog from
+# OpenAI's Codex backend (chatgpt.com), as Codex does: with the Codex login
+# for the Ultrafast tier and Daybreak, with the API key for Daybreak alone
+# (and not at all with a key under `daybreak = false`).
 #[gpt]
 # Default: "subscription"
 #auth = "api-key"
+# OpenAI Daybreak (Trusted Access for Cyber), for accounts OpenAI has
+# approved: fewer cyber refusals on the models the approval covers. On a
+# personal account OpenAI may train on Daybreak sessions even with model
+# training turned off.
+# true: each GPT model's requests select the Daybreak program the
+# account's own Codex model catalog lists for it, as Codex's Daybreak
+# setting does; a model it lists none for selects nothing.
+# false: every GPT model's requests select standard safeguards.
+# Unset: the router selects nothing and OpenAI decides. On an API project
+# with the access a model needs, that is Daybreak on GPT-6 Sol and Luna
+# (Blue or Red) and on GPT-6 Astra and GPT-6.1 Sol (Red); OpenAI does not
+# say what it is on the subscription sign-in.
+# `doctor` shows what each model selects. The managed CLIProxyAPI only.
+# Default: unset
+#daybreak = true
+# To name one model's program yourself, set cyber-access on its route: it
+# wins over `daybreak`. The values are OpenAI's `access_programs.cyber`:
+# "standard", "daybreak_blue" (what every general-purpose GPT model in
+# OpenAI's guide takes for Daybreak, with Blue or Red approval) or
+# "daybreak_red" (its cyber-specialised models). A request that selects a
+# program the model or the account lacks fails.
+#[[model-overrides]]
+#routing-id = "gpt-6-sol"
+#cyber-access = "daybreak_blue"
 
 {grok}
 {muse}
@@ -2200,6 +2282,84 @@ mod tests {
         let error = format!("{:#}", Config::load(&path).unwrap_err());
         assert!(!error.contains("SENTINEL"), "{error}");
         assert!(error.contains("secrets.toml"), "{error}");
+    }
+
+    #[test]
+    fn a_route_s_cyber_access_is_read_from_its_override_and_shared_with_its_twins() {
+        let defaults = parse_and_prepare("");
+        assert_eq!(defaults.gpt.daybreak, None);
+        assert!(
+            defaults
+                .effective_models()
+                .chain(&defaults.opt_in_models)
+                .all(|route| route.cyber_access.is_none())
+        );
+
+        let config = parse_and_prepare(
+            "[[model-overrides]]\nrouting-id = \"gpt-6.2-sol\"\ncyber-access = \"daybreak_red\"\n\
+             [[model-overrides]]\nrouting-id = \"gpt-6-luna\"\ncyber-access = \"standard\"\n",
+        );
+        let program = |id: &str| config.route(id).unwrap().cyber_access;
+        assert_eq!(program("gpt-6.2-sol"), Some(CyberAccess::DaybreakRed));
+        assert_eq!(program("gpt-6.2-sol-fast"), Some(CyberAccess::DaybreakRed));
+        assert_eq!(
+            program("gpt-6.2-sol-ultrafast"),
+            Some(CyberAccess::DaybreakRed)
+        );
+        assert_eq!(program("gpt-6-luna-fast"), Some(CyberAccess::Standard));
+        assert_eq!(program("gpt-6.2-astra"), None);
+        // The route keeps everything else it had.
+        assert_eq!(
+            config.route("gpt-6.2-sol").unwrap().context_window,
+            defaults.route("gpt-6.2-sol").unwrap().context_window
+        );
+
+        // The values are the API's own spelling, and nothing else.
+        let error = toml::from_str::<Config>(
+            "[[model-overrides]]\nrouting-id = \"gpt-6-sol\"\ncyber-access = \"daybreak-blue\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("daybreak_blue"), "{error}");
+    }
+
+    #[test]
+    fn cyber_access_needs_a_gpt_route_on_the_managed_child() {
+        let named = "[[model-overrides]]\nrouting-id = \"gpt-6-sol\"\n\
+                     cyber-access = \"daybreak_blue\"\n";
+        // Either sign-in can name a model's program.
+        let api_key = parse_and_prepare(&format!("[gpt]\nauth = \"api-key\"\n{named}"));
+        assert_eq!(
+            api_key.route("gpt-6-sol").unwrap().cyber_access,
+            Some(CyberAccess::DaybreakBlue)
+        );
+        for (source, daybreak) in [("true", Some(true)), ("false", Some(false))] {
+            let config = parse_and_prepare(&format!("[gpt]\ndaybreak = {source}\n"));
+            assert_eq!(config.gpt.daybreak, daybreak);
+        }
+        // An API key has a catalog to go by too.
+        for (source, daybreak) in [("true", Some(true)), ("false", Some(false))] {
+            let config =
+                parse_and_prepare(&format!("[gpt]\nauth = \"api-key\"\ndaybreak = {source}\n"));
+            assert_eq!(config.gpt.daybreak, daybreak);
+        }
+        for source in [
+            format!("[gpt]\ndaybreak = true\n{EXTERNAL_UPSTREAM}"),
+            format!("[gpt]\ndaybreak = false\n{EXTERNAL_UPSTREAM}"),
+            format!("{named}{EXTERNAL_UPSTREAM}"),
+        ] {
+            let error = prepare_error(&source);
+            assert!(error.contains("mode = \"managed\""), "{error}");
+        }
+        let error = prepare_error(
+            "[grok]\nenabled = true\n[[model-overrides]]\nrouting-id = \"my-grok\"\n\
+             upstream-model = \"grok-4.7\"\ndisplay-name = \"G\"\nfamily = \"grok\"\n\
+             cyber-access = \"standard\"\n",
+        );
+        assert!(
+            error.contains("my-grok sets cyber-access, which only OpenAI's GPT models have"),
+            "{error}"
+        );
     }
 
     #[test]

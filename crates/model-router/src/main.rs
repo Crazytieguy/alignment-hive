@@ -131,6 +131,16 @@ enum SettingsCommand {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+    /// Whether to raise `OpenAI` Daybreak with the person: the GPT routes
+    /// the account's catalog lists a Daybreak program for while `[gpt]
+    /// daybreak` is unset and the route names none. A report only: the
+    /// choice goes in the router's config, which setup writes.
+    Daybreak {
+        /// Accepted like every settings operation's; the answer is the
+        /// same whichever the project.
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
     /// Wire Claude Code to the router as its HTTPS proxy, replacing this
     /// install's `ANTHROPIC_BASE_URL` (a report, unless --apply).
     Proxy {
@@ -316,8 +326,10 @@ async fn main() -> anyhow::Result<()> {
         Command::TrustCa { remove } => trust_ca(&dirs, remove),
         Command::Settings { command } => {
             // A config that does not load is reported by the operation.
+            // The tier goes by a subscription's plan alone.
             if let SettingsCommand::Ultrafast { check: true, .. } = command
                 && let Ok(config) = Config::load(&config_path)
+                && config.gpt.auth == model_router::config::GptAuth::Subscription
                 && let Err(error) = model_router::ultrafast::read_now(&config, &dirs).await
             {
                 eprintln!("could not read the Codex plan's service tiers: {error:#}");
@@ -402,6 +414,10 @@ fn settings(
                 apply.then_some(lock.as_path()),
             )
         }
+        SettingsCommand::Daybreak { .. } => Ok(model_router::cyber_access::settings_report(
+            config.as_ref().ok(),
+            dirs,
+        )),
         SettingsCommand::Windows {
             apply,
             project_dir,
@@ -590,21 +606,20 @@ async fn serve(dirs: &Dirs, config_path: &std::path::Path) -> anyhow::Result<()>
         }
         None => (None, None),
     };
-    // Whether the Codex plan has the Ultrafast tier, for the twins' turns
-    // and the session-start offer: only a subscription has a plan to ask
-    // about (every API key has the tier).
-    if config.gpt.auth == model_router::config::GptAuth::Subscription
-        && let Some(auth_dir) = config.auth_dir.clone()
-    {
-        match model_router::ultrafast::Gate::new(auth_dir, dirs) {
+    // The account's Codex catalog: whether a subscription's plan has the
+    // Ultrafast tier, for the twins' turns and the session-start offer
+    // (every API key has the tier), and each model's cyber access
+    // programs, for `[gpt] daybreak` with either sign-in.
+    if let Some(source) = model_router::ultrafast::Source::of(&config, dirs) {
+        match model_router::ultrafast::Gate::new(source, dirs) {
             Ok(gate) => {
                 let gate = std::sync::Arc::new(gate);
                 gate.clone().spawn_first_read();
-                config.ultrafast_gate = Some(gate);
+                config.codex_plan = Some(gate);
             }
             Err(error) => tracing::warn!(
-                "cannot read the Codex plan's service tiers, so -ultrafast turns go out \
-                 unchecked: {error:#}"
+                "cannot read the Codex catalog, so a subscription's -ultrafast turns go out \
+                 unchecked and `[gpt] daybreak = true` selects no Daybreak program: {error:#}"
             ),
         }
     }

@@ -41,13 +41,17 @@ pub fn is_credential_header(name: &str) -> bool {
 /// sensitive, and, in Muse Contributor mode, the trigger for the Contributor
 /// header relay ([`crate::muse::CONTRIBUTOR_TRIGGER`]). An `-ultrafast`
 /// twin's own turns also carry the Ultrafast relay
-/// ([`crate::service_tier::ULTRAFAST_RELAY_HEADER`], [`Self::for_tier`]).
+/// ([`crate::service_tier::ULTRAFAST_RELAY_HEADER`], [`Self::for_tier`]),
+/// and a model request whose route selects a cyber access program carries
+/// its relay
+/// ([`crate::cyber_access::RELAY_HEADER`], [`Self::for_cyber_access`]).
 #[derive(Clone)]
 pub struct GptUpstreamCredential {
     api_key: HeaderValue,
     authorization: HeaderValue,
     muse_contributor: bool,
     ultrafast: bool,
+    cyber_access: Option<crate::cyber_access::CyberAccess>,
 }
 
 impl GptUpstreamCredential {
@@ -65,6 +69,7 @@ impl GptUpstreamCredential {
             authorization,
             muse_contributor: false,
             ultrafast: false,
+            cyber_access: None,
         })
     }
 
@@ -74,6 +79,17 @@ impl GptUpstreamCredential {
     pub fn for_tier(self, tier: crate::service_tier::ServiceTier) -> Self {
         Self {
             ultrafast: tier == crate::service_tier::ServiceTier::Ultrafast,
+            ..self
+        }
+    }
+
+    /// The same credential, adding the cyber access relay to the request
+    /// when its route selects a program: for a model request on that route
+    /// only.
+    #[must_use]
+    pub fn for_cyber_access(self, program: Option<crate::cyber_access::CyberAccess>) -> Self {
+        Self {
+            cyber_access: program,
             ..self
         }
     }
@@ -104,6 +120,12 @@ impl GptUpstreamCredential {
             headers.insert(
                 crate::service_tier::ULTRAFAST_RELAY_HEADER,
                 HeaderValue::from_static(crate::service_tier::ULTRAFAST),
+            );
+        }
+        if let Some(program) = self.cyber_access {
+            headers.insert(
+                crate::cyber_access::RELAY_HEADER,
+                HeaderValue::from_static(program.as_str()),
             );
         }
     }
@@ -146,8 +168,8 @@ pub fn request_headers(
     body_changed: bool,
     gpt_credential: Option<&GptUpstreamCredential>,
 ) -> HeaderMap {
-    // A client's Contributor trigger or Ultrafast relay never passes: only
-    // the credential decides them.
+    // A client's Contributor trigger, Ultrafast relay or cyber access relay
+    // never passes: only the credential decides them.
     let mut output = filter(input, |name| {
         name == header::HOST
             || (body_changed && name == header::CONTENT_LENGTH)
@@ -155,7 +177,8 @@ pub fn request_headers(
                 && (is_credential_header(name.as_str())
                     || name == "anthropic-beta"
                     || name == crate::muse::CONTRIBUTOR_TRIGGER
-                    || name == crate::service_tier::ULTRAFAST_RELAY_HEADER))
+                    || name == crate::service_tier::ULTRAFAST_RELAY_HEADER
+                    || name == crate::cyber_access::RELAY_HEADER))
     });
     if strip_credentials && let Some(credential) = gpt_credential {
         credential.insert_into(&mut output);
@@ -314,5 +337,24 @@ mod tests {
         // The Claude branch forwards to Anthropic as it came.
         let headers = request_headers(&inbound, false, false, None);
         assert_eq!(headers[CONTRIBUTOR_TRIGGER], "1");
+    }
+
+    #[test]
+    fn only_a_credential_that_selects_a_cyber_program_carries_its_relay() {
+        use crate::cyber_access::{CyberAccess, RELAY_HEADER};
+        let mut inbound = sample_headers();
+        inbound.insert(RELAY_HEADER, HeaderValue::from_static("daybreak_red"));
+        let plain = GptUpstreamCredential::new("secret").unwrap();
+        // A client's relay is stripped on the way to the child.
+        for credential in [Some(&plain), None] {
+            let headers = request_headers(&inbound, true, true, credential);
+            assert!(!headers.contains_key(RELAY_HEADER));
+        }
+        for program in CyberAccess::ALL {
+            let credential = plain.clone().for_cyber_access(Some(program));
+            let headers = request_headers(&inbound, true, true, Some(&credential));
+            assert_eq!(headers[RELAY_HEADER], program.as_str());
+            assert_eq!(headers.get_all(RELAY_HEADER).iter().count(), 1);
+        }
     }
 }

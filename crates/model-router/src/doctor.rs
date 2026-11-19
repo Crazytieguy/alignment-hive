@@ -263,7 +263,29 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         }
         checks.extend(legacy_models_block_check(&config));
         checks.push(shipped_agent_routes_check(&config));
+        // With `[gpt] daybreak` on, show the programs as the catalog lists
+        // them now; the running service goes by the same answer.
+        let read_error = if config.gpt.daybreak == Some(true) {
+            crate::ultrafast::read_now(&config, dirs)
+                .await
+                .err()
+                .map(|error| format!("{error:#}"))
+        } else {
+            // A catalog nobody has read for these logins or this key yet
+            // is read too, so setup need not wait for the service's first
+            // read to learn what it lists. Briefly, and saying nothing of
+            // a failure: nothing here goes by the answer yet.
+            if crate::ultrafast::cyber_programs(&config, dirs).is_none() {
+                let _ = tokio::time::timeout(
+                    UNREAD_CATALOG_WAIT,
+                    crate::ultrafast::read_now(&config, dirs),
+                )
+                .await;
+            }
+            None
+        };
         checks.extend(ultrafast_check(&config, dirs));
+        checks.extend(daybreak_check(&config, dirs, read_error.as_deref()));
         checks.extend(auto_mode_fallback_check(
             &config,
             config_path,
@@ -913,24 +935,6 @@ fn muse_plan_check(muse_routes: &[&ModelRoute], logins: Option<&Walk>) -> Option
     })
 }
 
-/// Compares the upstream model IDs the config routes to against the list
-/// the managed child actually serves.
-///
-/// Covers every built-in route regardless of family — a renamed
-/// `gpt-5.6-*` slug is exactly as detectable, and exactly as broken, as a
-/// renamed `grok-*` one. `OpenAiCompat` routes are excluded: their aliases
-/// are registered locally in the generated child config rather than coming
-/// from a remote catalog, and `verify-providers` already checks them
-/// against the provider's own `/models`.
-///
-/// Only presence: plain `GET /v1/models` reports `id`/`object`/`created`/
-/// `owned_by` and no context windows, so window drift cannot be checked here
-/// (the richer `?client_version=` response is a separate contract). Presence
-/// still catches the failure that bites — `CLIProxyAPI` fetches its model
-/// catalog remotely, so an ID can disappear or be renamed with no binary
-/// change.
-///
-/// Split from the transport so every outcome is unit-testable.
 // The routes the plugin's shipped agents name (reviewers included), each with
 // its `-fast` twin.
 use crate::config::{SHIPPED_GPT_ROUTES as SHIPPED_AGENT_ROUTES, fast_twin_id};
@@ -969,6 +973,194 @@ fn ultrafast_check(config: &Config, dirs: &Dirs) -> Option<Check> {
         name: "ultrafast",
         ok: true,
         warn: false,
+        detail,
+    })
+}
+
+/// How long a doctor run waits on a catalog nobody has read yet.
+const UNREAD_CATALOG_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The GPT routes the `daybreak` check names, with the cyber access
+/// programs the account's catalog lists for their models. A twin selects
+/// what its base route does, so only base routes are here.
+struct CyberRoutes<'a> {
+    routes: Vec<&'a ModelRoute>,
+    listed: Option<crate::cyber_access::Programs>,
+}
+
+impl CyberRoutes<'_> {
+    /// The Daybreak program the plan lists for `route`'s model.
+    fn listed_daybreak(&self, route: &ModelRoute) -> Option<crate::cyber_access::CyberAccess> {
+        let listed = self.listed.as_ref()?.get(route.split_upstream_model().0)?;
+        crate::cyber_access::listed_daybreak(listed)
+    }
+
+    /// "`program` on `routes`" for each program `selects` gives a route;
+    /// empty when it gives none.
+    fn on(
+        &self,
+        selects: impl Fn(&ModelRoute) -> Option<crate::cyber_access::CyberAccess>,
+    ) -> String {
+        crate::cyber_access::CyberAccess::ALL
+            .into_iter()
+            .filter_map(|program| {
+                let ids: Vec<&str> = self
+                    .routes
+                    .iter()
+                    .filter(|route| selects(route) == Some(program))
+                    .map(|route| route.routing_id.as_str())
+                    .collect();
+                (!ids.is_empty()).then(|| format!("{} on {}", program.as_str(), ids.join(", ")))
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// What the `daybreak` check calls the account's catalog: a subscription's
+/// as the `ultrafast` check does, an API key's by the key.
+struct CatalogNames {
+    /// The catalog, where it lists something.
+    catalog: &'static str,
+    /// The catalog in full, where it lacks or could not give something.
+    in_full: &'static str,
+    /// Whom it is read for, after "could not be read".
+    read_for: &'static str,
+    /// What a read of it reads.
+    reading: &'static str,
+    /// Whom `OpenAI` approves.
+    approved: &'static str,
+}
+
+impl CatalogNames {
+    fn of(config: &Config) -> Self {
+        if config.gpt.auth == GptAuth::ApiKey {
+            Self {
+                catalog: "the API key's model catalog",
+                in_full: "the API key's model catalog",
+                read_for: "",
+                reading: "the catalog",
+                approved: "this key's project",
+            }
+        } else {
+            Self {
+                catalog: "the Codex plan",
+                in_full: "the Codex plan's model catalog",
+                read_for: " for the current Codex logins",
+                reading: "the plan",
+                approved: "this account",
+            }
+        }
+    }
+}
+
+/// Which GPT routes' requests select a cyber access program
+/// ([`crate::cyber_access`]), grouped by what decided it: informational,
+/// and nothing unless a route names one, `[gpt] daybreak` is set, or the
+/// account's catalog lists a Daybreak program for a route, so most people
+/// never see it. `read_error` is why reading the catalog just now failed,
+/// when it was tried and did.
+fn daybreak_check(config: &Config, dirs: &Dirs, read_error: Option<&str>) -> Option<Check> {
+    const TROUBLESHOOTING: &str = "https://help.openai.com/en/articles/20001259";
+    let CatalogNames {
+        catalog,
+        in_full: its_catalog,
+        read_for,
+        reading,
+        approved,
+    } = CatalogNames::of(config);
+    let plan = CyberRoutes {
+        routes: crate::cyber_access::base_routes(config).collect(),
+        listed: crate::ultrafast::cyber_programs(config, dirs),
+    };
+    let named = plan.on(|route| route.cyber_access);
+    let named = (!named.is_empty()).then(|| format!("{named} (set by cyber-access)"));
+    // What the plan lists for the routes that name no program of their own.
+    let by_plan = plan.on(|route| {
+        route
+            .cyber_access
+            .is_none()
+            .then(|| plan.listed_daybreak(route))?
+    });
+    let some_select_none = plan
+        .routes
+        .iter()
+        .any(|route| route.cyber_access.is_none() && plan.listed_daybreak(route).is_none());
+    let last_answer = read_error.map(|error| {
+        format!("reading {reading} just now failed ({error}), so this is its last answer")
+    });
+    // The same routes the session-start row is about.
+    let undecided = crate::cyber_access::undecided(config, plan.listed.as_ref());
+    let (warn, rest) = match config.gpt.daybreak {
+        None if undecided.is_empty() => (false, None),
+        None => (
+            false,
+            Some(format!(
+                "{catalog} lists {by_plan}; `[gpt] daybreak` is unset, so OpenAI decides \
+                 whether they apply: `true` selects them, `false` selects standard safeguards"
+            )),
+        ),
+        Some(false) => (
+            false,
+            Some(format!(
+                "standard on every {}GPT route ([gpt] daybreak = false)",
+                if named.is_some() { "other " } else { "" }
+            )),
+        ),
+        Some(true) if config.gpt.auth == GptAuth::ApiKey && config.gpt.api_key.is_none() => (
+            true,
+            Some(
+                "[gpt] daybreak = true, but secrets.toml has no API key to read its model \
+                 catalog with, so it selects no Daybreak program"
+                    .to_string(),
+            ),
+        ),
+        Some(true) if plan.listed.is_none() => (
+            true,
+            Some(format!(
+                "[gpt] daybreak = true, but {its_catalog} could not be read{read_for}{}, so \
+                 it selects no Daybreak program",
+                read_error.map_or_else(String::new, |error| format!(" ({error})"))
+            )),
+        ),
+        Some(true)
+            if !plan
+                .routes
+                .iter()
+                .any(|route| plan.listed_daybreak(route).is_some()) =>
+        {
+            let mut rest = vec![format!(
+                "[gpt] daybreak = true, but {its_catalog} lists no Daybreak program for any \
+                 routed GPT model, so that setting selects none; if OpenAI has approved \
+                 {approved}, see {TROUBLESHOOTING}"
+            )];
+            rest.extend(last_answer);
+            (true, Some(rest.join("; ")))
+        }
+        Some(true) => {
+            let mut rest = Vec::new();
+            if !by_plan.is_empty() {
+                rest.push(format!("{by_plan} ({catalog} lists them)"));
+            }
+            if some_select_none {
+                rest.push("the other GPT routes select no program (OpenAI decides)".to_string());
+            }
+            rest.extend(last_answer);
+            (
+                read_error.is_some(),
+                (!rest.is_empty()).then(|| rest.join("; ")),
+            )
+        }
+    };
+    let detail = match (named, rest) {
+        (None, None) => return None,
+        (Some(only), None) | (None, Some(only)) => only,
+        (Some(named), Some(rest)) => format!("{named}; {rest}"),
+    };
+    Some(Check {
+        name: "daybreak",
+        ok: true,
+        warn,
         detail,
     })
 }
@@ -1047,6 +1239,24 @@ fn legacy_models_block_check(config: &Config) -> Option<Check> {
     })
 }
 
+/// Compares the upstream model IDs the config routes to against the list
+/// the managed child actually serves.
+///
+/// Covers every built-in route regardless of family — a renamed
+/// `gpt-5.6-*` slug is exactly as detectable, and exactly as broken, as a
+/// renamed `grok-*` one. `OpenAiCompat` routes are excluded: their aliases
+/// are registered locally in the generated child config rather than coming
+/// from a remote catalog, and `verify-providers` already checks them
+/// against the provider's own `/models`.
+///
+/// Only presence: plain `GET /v1/models` reports `id`/`object`/`created`/
+/// `owned_by` and no context windows, so window drift cannot be checked here
+/// (the richer `?client_version=` response is a separate contract). Presence
+/// still catches the failure that bites — `CLIProxyAPI` fetches its model
+/// catalog remotely, so an ID can disappear or be renamed with no binary
+/// change.
+///
+/// Split from the transport so every outcome is unit-testable.
 fn routed_models_check(config: &Config, body: Result<&[u8], String>, log: &str) -> Check {
     // Several routes can share one upstream ID; report each ID once, grouped
     // by family.
@@ -1781,6 +1991,228 @@ mod tests {
         assert_eq!(
             ultrafast_check(&subscription, &dirs).unwrap().detail,
             "gpt-6.2-sol-ultrafast, gpt-6.2-astra-ultrafast (the Codex plan lists the tier)"
+        );
+    }
+
+    /// A state dir with one Codex login, and the `daybreak` check's detail
+    /// for a config there, which must pass and warn exactly when `warns`.
+    fn daybreak_dirs() -> (tempfile::TempDir, Dirs) {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        std::fs::create_dir_all(dirs.auth_dir()).unwrap();
+        std::fs::write(
+            dirs.auth_dir().join("codex-a.json"),
+            r#"{"type": "codex", "access_token": "t", "account_id": "acct"}"#,
+        )
+        .unwrap();
+        (dir, dirs)
+    }
+
+    fn daybreak_detail(config: &Config, dirs: &Dirs, warns: bool) -> String {
+        let check = daybreak_check(config, dirs, None).unwrap();
+        assert!(check.ok, "{check:?}");
+        assert_eq!(check.warn, warns, "{check:?}");
+        check.detail
+    }
+
+    const NAMED_STANDARD: &str = "[[model-overrides]]\nrouting-id = \"gpt-6.2-sol\"\n\
+                                  cyber-access = \"standard\"\n";
+
+    #[test]
+    fn the_daybreak_check_says_nothing_unless_a_program_was_asked_for_or_is_listed() {
+        use crate::cyber_access::CyberAccess::Standard;
+        let (_dir, dirs) = daybreak_dirs();
+        let detail = |config: &Config, warns| daybreak_detail(config, &dirs, warns);
+        let unset = config("");
+        let on = config("[gpt]\ndaybreak = true\n");
+        let on_and_named = config(&format!("[gpt]\ndaybreak = true\n{NAMED_STANDARD}"));
+
+        // Unread.
+        assert!(daybreak_check(&unset, &dirs, None).is_none());
+        assert_eq!(
+            daybreak_check(&on, &dirs, Some("401")).unwrap().detail,
+            "[gpt] daybreak = true, but the Codex plan's model catalog could not be read for \
+             the current Codex logins (401), so it selects no Daybreak program"
+        );
+        assert!(detail(&on_and_named, true).starts_with(
+            "standard on gpt-6.2-sol (set by cyber-access); [gpt] daybreak = true, but"
+        ));
+        assert_eq!(
+            detail(&config(NAMED_STANDARD), false),
+            "standard on gpt-6.2-sol (set by cyber-access)"
+        );
+        // Off needs no plan, and an API key can ask for it.
+        assert_eq!(
+            detail(&config("[gpt]\ndaybreak = false\n"), false),
+            "standard on every GPT route ([gpt] daybreak = false)"
+        );
+        let key_off = config(&format!(
+            "[gpt]\nauth = \"api-key\"\ndaybreak = false\n{}",
+            NAMED_STANDARD.replace("standard", "daybreak_blue")
+        ));
+        assert_eq!(
+            detail(&key_off, false),
+            "daybreak_blue on gpt-6.2-sol (set by cyber-access); standard on every other GPT \
+             route ([gpt] daybreak = false)"
+        );
+
+        // A plan without Daybreak.
+        let every_model: Vec<(&str, &[_])> = unset
+            .models
+            .iter()
+            .map(|route| (route.routing_id.as_str(), [Standard].as_slice()))
+            .collect();
+        crate::ultrafast::record_cyber(&dirs, &dirs.auth_dir(), &every_model);
+        assert!(daybreak_check(&unset, &dirs, None).is_none());
+        assert!(detail(&on, true).contains("lists no Daybreak program for any routed GPT model"));
+        assert!(detail(&on_and_named, true).contains("lists no Daybreak program"));
+        // A failed read behind that answer is said too.
+        assert!(
+            daybreak_check(&on, &dirs, Some("timed out"))
+                .unwrap()
+                .detail
+                .ends_with(
+                    "see https://help.openai.com/en/articles/20001259; reading the plan just \
+                     now failed (timed out), so this is its last answer"
+                )
+        );
+    }
+
+    /// A plan with Daybreak: offered while the key is unset, selected while
+    /// it is on, a route's own program first, and never named for a model no
+    /// route serves.
+    #[test]
+    fn the_daybreak_check_names_what_each_route_selects_from_the_plan() {
+        use crate::cyber_access::CyberAccess::{DaybreakBlue, DaybreakRed, Standard};
+        let (_dir, dirs) = daybreak_dirs();
+        let detail = |config: &Config, warns| daybreak_detail(config, &dirs, warns);
+        let unset = config("");
+        let on = config("[gpt]\ndaybreak = true\n");
+        let on_and_named = config(&format!("[gpt]\ndaybreak = true\n{NAMED_STANDARD}"));
+        crate::ultrafast::record_cyber(
+            &dirs,
+            &dirs.auth_dir(),
+            &[
+                ("gpt-6-sol", &[Standard, DaybreakBlue]),
+                ("gpt-6-luna", &[Standard, DaybreakBlue]),
+                ("gpt-6.2-sol", &[Standard, DaybreakRed]),
+                ("gpt-6-cyber", &[DaybreakRed]),
+            ],
+        );
+        assert_eq!(
+            detail(&unset, false),
+            "the Codex plan lists daybreak_blue on gpt-6-sol, gpt-6-luna; daybreak_red on \
+             gpt-6.2-sol; `[gpt] daybreak` is unset, so OpenAI decides whether they apply: \
+             `true` selects them, `false` selects standard safeguards"
+        );
+        assert_eq!(
+            detail(&on, false),
+            "daybreak_blue on gpt-6-sol, gpt-6-luna; daybreak_red on gpt-6.2-sol (the Codex plan \
+             lists them); the other GPT routes select no program (OpenAI decides)"
+        );
+        assert_eq!(
+            detail(&on_and_named, false),
+            "standard on gpt-6.2-sol (set by cyber-access); daybreak_blue on gpt-6-sol, \
+             gpt-6-luna (the Codex plan lists them); the other GPT routes select no program \
+             (OpenAI decides)"
+        );
+        assert!(detail(&config(NAMED_STANDARD), false).starts_with(
+            "standard on gpt-6.2-sol (set by cyber-access); the Codex plan lists daybreak_blue \
+             on gpt-6-sol, gpt-6-luna; `[gpt] daybreak` is unset"
+        ));
+        // A failed read leaves the last answer, and says so.
+        let check = daybreak_check(&on, &dirs, Some("timed out")).unwrap();
+        assert!(check.warn, "{check:?}");
+        assert!(
+            check.detail.ends_with(
+                "reading the plan just now failed (timed out), so this is its last answer"
+            ),
+            "{check:?}"
+        );
+
+        // A plan that lists it only for the one route with its own program
+        // is no reason to say the plan lists none.
+        crate::ultrafast::record_cyber(
+            &dirs,
+            &dirs.auth_dir(),
+            &[("gpt-6.2-sol", &[Standard, DaybreakRed])],
+        );
+        assert_eq!(
+            detail(&on_and_named, false),
+            "standard on gpt-6.2-sol (set by cyber-access); the other GPT routes select no \
+             program (OpenAI decides)"
+        );
+        // Every route selecting one leaves nothing to add.
+        let every_model: Vec<(&str, &[_])> = unset
+            .models
+            .iter()
+            .map(|route| (route.routing_id.as_str(), [DaybreakBlue].as_slice()))
+            .collect();
+        crate::ultrafast::record_cyber(&dirs, &dirs.auth_dir(), &every_model);
+        assert!(detail(&on, false).ends_with("(the Codex plan lists them)"));
+    }
+
+    /// An API key's catalog decides the same way, under its own name.
+    #[test]
+    fn the_daybreak_check_goes_by_an_api_key_s_own_catalog() {
+        use crate::cyber_access::CyberAccess::{DaybreakBlue, Standard};
+        let (_dir, dirs) = daybreak_dirs();
+        let detail = |config: &Config, warns| daybreak_detail(config, &dirs, warns);
+        let with_key = |source: &str| {
+            let mut config = config(&format!("[gpt]\nauth = \"api-key\"\n{source}"));
+            config.gpt.api_key = Some("sk-test".to_owned());
+            config
+        };
+        let (unset, on) = (with_key(""), with_key("daybreak = true\n"));
+        let keyless = config("[gpt]\nauth = \"api-key\"\ndaybreak = true\n");
+        assert_eq!(
+            detail(&keyless, true),
+            "[gpt] daybreak = true, but secrets.toml has no API key to read its model catalog \
+             with, so it selects no Daybreak program"
+        );
+        // The Codex logins' answer is not the key's.
+        crate::ultrafast::record_cyber(
+            &dirs,
+            &dirs.auth_dir(),
+            &[("gpt-6-sol", &[Standard, DaybreakBlue])],
+        );
+        assert!(daybreak_check(&unset, &dirs, None).is_none());
+        assert_eq!(
+            detail(&on, true),
+            "[gpt] daybreak = true, but the API key's model catalog could not be read, so it \
+             selects no Daybreak program"
+        );
+
+        crate::ultrafast::record_cyber_for_key(&dirs, &on, &[("gpt-6-sol", &[Standard])]);
+        assert!(daybreak_check(&unset, &dirs, None).is_none());
+        assert!(detail(&on, true).ends_with(
+            "the API key's model catalog lists no Daybreak program for any routed GPT model, \
+             so that setting selects none; if OpenAI has approved this key's project, see \
+             https://help.openai.com/en/articles/20001259"
+        ));
+
+        crate::ultrafast::record_cyber_for_key(
+            &dirs,
+            &on,
+            &[("gpt-6-sol", &[Standard, DaybreakBlue])],
+        );
+        assert_eq!(
+            detail(&unset, false),
+            "the API key's model catalog lists daybreak_blue on gpt-6-sol; `[gpt] daybreak` is \
+             unset, so OpenAI decides whether they apply: `true` selects them, `false` selects \
+             standard safeguards"
+        );
+        assert_eq!(
+            detail(&on, false),
+            "daybreak_blue on gpt-6-sol (the API key's model catalog lists them); the other GPT \
+             routes select no program (OpenAI decides)"
+        );
+        let check = daybreak_check(&on, &dirs, Some("timed out")).unwrap();
+        assert!(
+            check.detail.ends_with(
+                "reading the catalog just now failed (timed out), so this is its last answer"
+            ),
+            "{check:?}"
         );
     }
 

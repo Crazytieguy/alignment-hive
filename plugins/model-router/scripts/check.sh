@@ -173,6 +173,18 @@ if [ -n "$HEALTH" ]; then
         "{\"id\": \"decline-ultrafast-models\", \"label\": \"Don't add\", \"kind\": \"plugin\"}"
     fi
   fi
+  # OpenAI Daybreak, for an account whose catalog lists it (the router reads
+  # it) while nobody has chosen: OpenAI may already apply it, so the person
+  # is told until they choose or dismiss. The binary is asked only when its
+  # last reading lists a Daybreak program. The choice is the router's
+  # config, which setup writes after saying what Daybreak means for their
+  # data; Dismiss holds until the listed routes change.
+  if grep -qs '"daybreak_' "$MR_STATE/codex-service-tiers.json" && needed daybreak; then
+    ROWS=$(printf '%s{"id": "daybreak", "severity": "action", "text": "%s", "version": "%s", "actions": [%s]},' \
+      "$ROWS" "Daybreak may already apply to GPT requests: choose it or standard safeguards" \
+      "daybreak:$(json_list routes | tr -d '"')" \
+      '{"id": "setup", "label": "Run setup", "kind": "command", "command": "/model-router:setup"}')
+  fi
   # The next session's context windows are not setup's: the old setup's single
   # declaration, usage scaling or a behavesAs row (`legacy`), a route with no
   # compaction window, or one still at a Codex default that has since moved

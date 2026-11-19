@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up, configure, verify, repair, or uninstall model-router, the local gateway that routes Claude Code to non-Claude models, including any of its config options — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI), Muse (Meta) and open-weights models, Ultrafast GPT models, OS service, and Claude Code settings wiring.
+description: Set up, configure, verify, repair, or uninstall model-router, the local gateway that routes Claude Code to non-Claude models, including any of its config options — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI), Muse (Meta) and open-weights models, Ultrafast GPT models, OpenAI Daybreak (Trusted Access for Cyber), OS service, and Claude Code settings wiring.
 ---
 
 # model-router setup
@@ -76,7 +76,15 @@ here works until the binary resolves.
    ```
    Ask the user to swap in their real key and wait for them to confirm
    (`$ROUTER service restart` if the service is already installed). Verify
-   with `$ROUTER doctor` afterwards.
+   with `$ROUTER doctor` afterwards. Tell them the router also sends the
+   key to OpenAI's Codex backend (chatgpt.com), as Codex does, to read
+   the key's model catalog for Daybreak (step 9): shortly after the
+   service starts unless it has an answer from the last day, when doctor
+   runs before any answer is kept, and more often under `[gpt] daybreak =
+   true`. `daybreak = false` stops that, but it also makes GPT requests
+   select standard safeguards (on every route without a `cyber-access` of
+   its own): with a user who may have Daybreak, settle it in step 9
+   rather than here.
 4. **Service**: `$ROUTER service install` (installs and starts the
    launchd/systemd user service), then `$ROUTER doctor` until healthy.
    The defaults need no config file — every built-in GPT route, port
@@ -211,6 +219,20 @@ here works until the binary resolves.
    ```
    (`enabled = false` for no), then `$ROUTER service restart` and `$ROUTER
    doctor`, whose `auto-mode-classifier` line shows it on.
+9. **OpenAI Daybreak (ask once, approved accounts only).** Follow
+   `references/daybreak.md` in two cases: `$ROUTER doctor`'s `daybreak`
+   line says the account's catalog ("the Codex plan", or "the API key's
+   model catalog") "lists daybreak_... on ...; `[gpt] daybreak` is
+   unset", or the user brings up Daybreak, whatever doctor shows (the
+   catalog isn't proof either way). In the first case the account looks
+   approved for Daybreak (OpenAI's Trusted Access for Cyber: fewer cyber
+   refusals) and the user hasn't chosen; the reference says what to tell
+   them before asking and what to write for either answer. Do this on an
+   install that already works too. The session-start row about Daybreak
+   leads here: when the user ran setup from it, run `$ROUTER doctor` and
+   go to this step directly. Doctor reads the catalog itself when the
+   service hasn't yet, and an account without Daybreak gets no such
+   line.
 
 ## Wirings
 
@@ -255,7 +277,8 @@ step 6's restart and smoke test.
 `$ROUTER config-template` prints the annotated template of every
 `~/.config/model-router/config.toml` option. Options with a step above
 (GPT auth, Grok, Muse, open-weights providers, the auto-mode classifier)
-follow that step. After any other change, run `$ROUTER doctor` before
+follow that step, and OpenAI Daybreak (`[gpt] daybreak`, a route's
+`cyber-access`) follows `references/daybreak.md`. After any other change, run `$ROUTER doctor` before
 restarting (its `config` check catches a file the service would refuse to
 start with), then `$ROUTER service restart` and `$ROUTER doctor` again.
 
@@ -270,7 +293,9 @@ gateway doesn't serve: compare the rows with doctor's `routed-models`. A
 effect, which silently re-runs a failed routed subagent on a Claude model;
 the fix is removing that setting (then restarting Claude Code), and it is
 the user's call. For a `models-block` warning, offer to make the rename it
-describes.
+describes. For a GPT request that fails with an OpenAI error about an
+access program or Daybreak, or a `daybreak` warning in doctor, see
+`references/daybreak.md`.
 
 ## Disable / uninstall
 

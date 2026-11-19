@@ -7,21 +7,38 @@
 //! cannot tell. Codex itself offers it only for the models whose entry in
 //! the account's own catalog (`GET /backend-api/codex/models`) lists an
 //! `ultrafast` service tier (codex-rs `service_tier_resolution.rs`,
-//! `model_supports_service_tier`). The child's `/v1/models` is a copy
-//! bundled into `CLIProxyAPI`, the same for every account, so the router
+//! `model_supports_service_tier`). The child's `/v1/models` comes from
+//! `CLIProxyAPI`'s own model definitions, picked by plan type, and says
+//! nothing of the account's tiers, so the router
 //! asks the backend itself, with each Codex login's own token, read from
 //! the auth dir and never refreshed or written here (the child does that).
 //!
 //! The answer is kept in [`cache_file`] and read:
 //! - shortly after `serve` starts, when there is none for the current logins
 //!   from the last day ([`Gate::spawn_first_read`]), so a plan that has the
-//!   tier gets the band's offer at the next session start;
+//!   tier gets the band's offer at the next session start, and an account
+//!   the catalog lists Daybreak for gets the band's row about it;
 //! - when a twin's turn finds it stale or missing ([`Gate::decide`]);
 //! - by `settings ultrafast --check` ([`read_now`]), which setup runs.
 //!
 //! A model counts only when every enabled Codex login lists the tier for
 //! it, as the child sends a request through any of them in turn, and an
 //! answer counts only for the logins it was read from.
+//!
+//! The same catalog lists each model's cyber access programs, so the same
+//! read keeps them, and `[gpt] daybreak = true` picks a request's Daybreak
+//! program from the answer ([`Gate::cyber_listed`], [`crate::cyber_access`]).
+//!
+//! The backend serves the catalog to an `OpenAI` API key too, which is where
+//! Codex reads it from for one (codex-rs `models_endpoint.rs`:
+//! "Codex metadata is served by the Codex backend, not the public
+//! /v1/models API"). So under `[gpt] auth = "api-key"` the router reads it
+//! with the key, for the programs alone ([`Source::ApiKey`]): the router
+//! sends a key's twins without asking, as it did before it read a key's
+//! catalog, so no twin's turn waits on the answer, and the answer kept for
+//! a key lists the tier for no model. `[gpt] daybreak = false` asks for
+//! standard safeguards without the catalog, so a key is not sent there at
+//! all.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -32,6 +49,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{Config, GptAuth, ULTRAFAST, ULTRAFAST_MODELS};
+use crate::cyber_access::Programs;
 use crate::logins::{CODEX, Walk};
 use crate::state::Dirs;
 
@@ -80,10 +98,17 @@ const RETRY_AFTER: Duration = Duration::from_mins(5);
 pub struct Detection {
     /// When it was found, in Unix seconds.
     pub checked: u64,
-    /// Which logins it was read from ([`accounts`]).
+    /// Which logins, or which API key, it was read from ([`accounts`]).
     pub accounts: String,
-    /// The models every enabled Codex login lists the Ultrafast tier for.
+    /// The models every enabled Codex login lists the Ultrafast tier for;
+    /// none in an API key's answer, which is not asked about the tier.
     pub ultrafast: BTreeSet<String>,
+    /// The cyber access programs every enabled Codex login lists for a
+    /// model ([`crate::cyber_access::catalog_programs`]). `None` in an
+    /// answer kept by a router that did not read them: its Ultrafast part
+    /// still stands, and the programs count as unread.
+    #[serde(default)]
+    pub cyber: Option<Programs>,
 }
 
 /// Where the last [`Detection`] is kept.
@@ -92,12 +117,68 @@ pub fn cache_file(dirs: &Dirs) -> PathBuf {
     dirs.state_dir.join("codex-service-tiers.json")
 }
 
-/// The last [`Detection`], if it was read from the enabled Codex logins
-/// `auth_dir` holds now.
-fn cached(auth_dir: &Path, cache: &Path) -> Option<Detection> {
+/// Whose catalog is read.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Source {
+    /// A managed subscription's enabled Codex logins, in this auth dir.
+    Logins(PathBuf),
+    /// The key of a managed `[gpt] auth = "api-key"`.
+    ApiKey(String),
+}
+
+// Never the key.
+impl std::fmt::Debug for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Logins(auth_dir) => f.debug_tuple("Logins").field(auth_dir).finish(),
+            Self::ApiKey(_) => f.write_str("ApiKey"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<PathBuf> for Source {
+    fn from(auth_dir: PathBuf) -> Self {
+        Self::Logins(auth_dir)
+    }
+}
+
+impl Source {
+    /// The catalog `config` has to ask: none for a `CLIProxyAPI` the router
+    /// does not manage; nor for an API key while `secrets.toml` lacks it, or
+    /// under `[gpt] daybreak = false`, where nothing would go by the answer.
+    #[must_use]
+    pub fn of(config: &Config, dirs: &Dirs) -> Option<Self> {
+        let auth_dir = config.managed_auth_dir(dirs)?;
+        match config.gpt.auth {
+            GptAuth::Subscription => Some(Self::Logins(auth_dir)),
+            GptAuth::ApiKey => config
+                .gpt
+                .api_key
+                .clone()
+                .filter(|_| config.gpt.daybreak != Some(false))
+                .map(Self::ApiKey),
+        }
+    }
+
+    /// What to ask the backend with; a login source reads its auth dir.
+    fn credentials(&self) -> anyhow::Result<Vec<Credential>> {
+        match self {
+            Self::Logins(auth_dir) => credentials(&crate::logins::walk(auth_dir)),
+            Self::ApiKey(key) => Ok(vec![Credential {
+                token: key.clone(),
+                account: None,
+            }]),
+        }
+    }
+}
+
+/// The last [`Detection`], if it was read from what `source` holds now: the
+/// enabled Codex logins in its auth dir, or its API key.
+fn cached(source: &Source, cache: &Path) -> Option<Detection> {
     let found: Detection = serde_json::from_slice(&std::fs::read(cache).ok()?).ok()?;
-    let logins = credentials(&crate::logins::walk(auth_dir)).ok()?;
-    (accounts(&logins) == found.accounts).then_some(found)
+    let credentials = source.credentials().ok()?;
+    (accounts(&credentials) == found.accounts).then_some(found)
 }
 
 /// What the Codex plan says about the Ultrafast tier.
@@ -115,14 +196,19 @@ pub enum Plan {
 /// What the plan last said for the current logins, however long ago.
 #[must_use]
 pub fn plan(config: &Config, dirs: &Dirs) -> Plan {
-    match config
-        .managed_auth_dir(dirs)
-        .filter(|_| config.gpt.auth == GptAuth::Subscription)
-    {
-        None => Plan::None,
-        Some(auth_dir) => cached(&auth_dir, &cache_file(dirs))
+    match Source::of(config, dirs) {
+        Some(source @ Source::Logins(_)) => cached(&source, &cache_file(dirs))
             .map_or(Plan::Unread, |found| Plan::Read(found.ultrafast)),
+        Some(Source::ApiKey(_)) | None => Plan::None,
     }
+}
+
+/// The cyber access programs the catalog last listed for each model, for
+/// the current logins or API key and however long ago; `None` when it was
+/// not read for them, or there is none to ask ([`Source::of`]).
+#[must_use]
+pub fn cyber_programs(config: &Config, dirs: &Dirs) -> Option<Programs> {
+    cached(&Source::of(config, dirs)?, &cache_file(dirs))?.cyber
 }
 
 /// The built-in Ultrafast models whose twin `config` serves, in
@@ -154,13 +240,31 @@ pub fn offered(config: &Config, dirs: &Dirs) -> Vec<&'static str> {
     }
 }
 
-/// The enabled Codex logins' accounts as one digest: neither a token nor an
-/// account ID reaches the cache file.
-fn accounts(logins: &[(String, String)]) -> String {
+/// What one catalog request is asked with.
+#[cfg_attr(test, derive(Debug))]
+#[derive(PartialEq, Eq)]
+struct Credential {
+    /// A Codex login's access token, or the API key.
+    token: String,
+    /// A Codex login's account, which its request names; an API key has
+    /// none.
+    account: Option<String>,
+}
+
+/// Whose answer it is, as one digest: the enabled Codex logins' accounts,
+/// or the API key. Neither a token, an account ID nor a key reaches the
+/// cache file.
+fn accounts(credentials: &[Credential]) -> String {
     use sha2::{Digest, Sha256};
-    let ids: BTreeSet<&str> = logins.iter().map(|(_, account)| account.as_str()).collect();
-    let joined = ids.into_iter().collect::<Vec<_>>().join("\n");
-    crate::state::hex_encode(&Sha256::digest(joined.as_bytes()))
+    let digest = |text: &str| crate::state::hex_encode(&Sha256::digest(text.as_bytes()));
+    let ids: BTreeSet<String> = credentials
+        .iter()
+        .map(|credential| match &credential.account {
+            Some(account) => account.clone(),
+            None => format!("api-key:{}", digest(&credential.token)),
+        })
+        .collect();
+    digest(&ids.into_iter().collect::<Vec<_>>().join("\n"))
 }
 
 /// The token and account of each enabled Codex login in `logins`.
@@ -169,7 +273,7 @@ fn accounts(logins: &[(String, String)]) -> String {
 /// When the walk failed, a Codex login cannot be read or lacks its token or
 /// account (a partial answer could offer the tier to a login without it), or
 /// there is no enabled Codex login.
-fn credentials(logins: &Walk) -> anyhow::Result<Vec<(String, String)>> {
+fn credentials(logins: &Walk) -> anyhow::Result<Vec<Credential>> {
     let logins = logins
         .as_ref()
         .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -194,7 +298,10 @@ fn credentials(logins: &Walk) -> anyhow::Result<Vec<(String, String)>> {
                 .map(ToOwned::to_owned)
                 .with_context(|| format!("{} has no {name}", login.shown))
         };
-        found.push((field("access_token")?, field("account_id")?));
+        found.push(Credential {
+            token: field("access_token")?,
+            account: Some(field("account_id")?),
+        });
     }
     if found.is_empty() {
         bail!("no enabled Codex login");
@@ -202,14 +309,23 @@ fn credentials(logins: &Walk) -> anyhow::Result<Vec<(String, String)>> {
     Ok(found)
 }
 
-/// The models a catalog response body lists the Ultrafast tier for.
-fn parse_catalog(body: &[u8]) -> anyhow::Result<BTreeSet<String>> {
+/// What one login's catalog lists.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Listed {
+    /// The models it lists the Ultrafast tier for.
+    ultrafast: BTreeSet<String>,
+    /// The cyber access programs it lists for a model.
+    cyber: Programs,
+}
+
+/// What a catalog response body lists.
+fn parse_catalog(body: &[u8]) -> anyhow::Result<Listed> {
     let document: Value = serde_json::from_slice(body).context("catalog is not JSON")?;
     let models = document
         .get("models")
         .and_then(Value::as_array)
         .context("catalog has no model list")?;
-    Ok(models
+    let ultrafast = models
         .iter()
         .filter(|model| {
             model
@@ -222,48 +338,70 @@ fn parse_catalog(body: &[u8]) -> anyhow::Result<BTreeSet<String>> {
                 })
         })
         .filter_map(|model| Some(model.get("slug")?.as_str()?.to_owned()))
-        .collect())
+        .collect();
+    Ok(Listed {
+        ultrafast,
+        cyber: crate::cyber_access::catalog_programs(models),
+    })
 }
 
-/// Asks the backend for each enabled Codex login's catalog.
-async fn ask(client: &reqwest::Client, url: &str, logins: &Walk) -> anyhow::Result<Detection> {
-    let logins = credentials(logins)?;
-    let mut common: Option<BTreeSet<String>> = None;
-    for (token, account) in &logins {
-        let response = client
+/// Asks the backend for the catalog of each of `credentials`: every
+/// enabled Codex login's, or the API key's.
+async fn ask(
+    client: &reqwest::Client,
+    url: &str,
+    credentials: &[Credential],
+) -> anyhow::Result<Detection> {
+    let mut common: Option<Listed> = None;
+    for Credential { token, account } in credentials {
+        let mut request = client
             .get(format!("{url}?client_version={CODEX_CLIENT_VERSION}"))
             .bearer_auth(token)
-            .header("chatgpt-account-id", account)
             .header("originator", "codex_cli_rs")
             .header(
                 reqwest::header::USER_AGENT,
                 format!("codex_cli_rs/{CODEX_CLIENT_VERSION}"),
-            )
-            .send()
-            .await
-            .context("catalog request failed")?;
+            );
+        if let Some(account) = account {
+            request = request.header("chatgpt-account-id", account);
+        }
+        let response = request.send().await.context("catalog request failed")?;
         let status = response.status();
         if !status.is_success() {
+            // The message reaches the log and doctor: never with the
+            // credential, should the backend echo it.
             let body = response.text().await.unwrap_or_default();
+            let body = body.replace(token.as_str(), "[redacted]");
             let head: String = body.chars().take(200).collect();
             bail!("catalog request answered {status}: {head}");
         }
         let listed = parse_catalog(&response.bytes().await.context("catalog body")?)?;
         common = Some(match common {
             None => listed,
-            Some(common) => common.intersection(&listed).cloned().collect(),
+            Some(common) => Listed {
+                ultrafast: common
+                    .ultrafast
+                    .intersection(&listed.ultrafast)
+                    .cloned()
+                    .collect(),
+                cyber: crate::cyber_access::common_programs(common.cyber, &listed.cyber),
+            },
         });
     }
+    let Listed { ultrafast, cyber } = common.unwrap_or_default();
     Ok(Detection {
         checked: unix_now(),
-        accounts: accounts(&logins),
-        ultrafast: common.unwrap_or_default(),
+        accounts: accounts(credentials),
+        ultrafast,
+        cyber: Some(cyber),
     })
 }
 
-/// Whether `found` was read within `keeps`.
+/// Whether `found` was read within `keeps`. An answer kept by a router
+/// that did not read the cyber access programs never is, so the next read
+/// due fills them in, and what it says of Ultrafast stands until then.
 fn fresh(found: &Detection, keeps: Duration) -> bool {
-    unix_now().saturating_sub(found.checked) < keeps.as_secs()
+    found.cyber.is_some() && unix_now().saturating_sub(found.checked) < keeps.as_secs()
 }
 
 /// What happens to an `-ultrafast` twin's turn ([`Gate::decide`]).
@@ -284,13 +422,14 @@ fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// Reads the plan for a managed subscription's `serve` and decides each
-/// `-ultrafast` twin turn by it.
+/// Reads the catalog for a managed `serve`: a subscription's decides each
+/// `-ultrafast` twin turn, and either source's lists the cyber access
+/// programs.
 #[derive(Debug)]
 pub struct Gate {
     client: reqwest::Client,
     url: String,
-    auth_dir: PathBuf,
+    source: Source,
     cache: PathBuf,
     /// Held while reading the plan, so concurrent turns wait for one read;
     /// it keeps when the last read failed ([`RETRY_AFTER`]).
@@ -298,30 +437,34 @@ pub struct Gate {
 }
 
 impl Gate {
-    /// A gate for the logins in `auth_dir`, keeping its answer in
-    /// [`cache_file`].
+    /// A gate for `source`, keeping its answer in [`cache_file`].
     ///
     /// # Errors
     /// When the HTTP client cannot be built.
-    pub fn new(auth_dir: PathBuf, dirs: &Dirs) -> anyhow::Result<Self> {
-        Self::with_url(auth_dir, dirs, CATALOG_URL)
+    pub fn new(source: Source, dirs: &Dirs) -> anyhow::Result<Self> {
+        Self::with_url(source, dirs, CATALOG_URL)
     }
 
-    pub(crate) fn with_url(auth_dir: PathBuf, dirs: &Dirs, url: &str) -> anyhow::Result<Self> {
+    pub(crate) fn with_url(
+        source: impl Into<Source>,
+        dirs: &Dirs,
+        url: &str,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             // No redirects (the request carries a token) and a connect timeout.
             client: crate::discovery::provider_client(READ_TIMEOUT)?,
             url: url.to_owned(),
-            auth_dir,
+            source: source.into(),
             cache: cache_file(dirs),
             reading: tokio::sync::Mutex::new(None),
         })
     }
 
-    /// The last answer for the current logins, read off the async workers.
+    /// The last answer for the current logins or key, read off the async
+    /// workers.
     async fn cached(&self) -> Option<Detection> {
-        let (auth_dir, cache) = (self.auth_dir.clone(), self.cache.clone());
-        tokio::task::spawn_blocking(move || cached(&auth_dir, &cache))
+        let (source, cache) = (self.source.clone(), self.cache.clone());
+        tokio::task::spawn_blocking(move || cached(&source, &cache))
             .await
             .ok()
             .flatten()
@@ -329,18 +472,24 @@ impl Gate {
 
     /// Asks the backend now, within [`READ_TIMEOUT`], and keeps the answer.
     async fn read(&self) -> anyhow::Result<Detection> {
-        let auth_dir = self.auth_dir.clone();
-        let logins = tokio::task::spawn_blocking(move || crate::logins::walk(&auth_dir)).await?;
-        let found = tokio::time::timeout(READ_TIMEOUT, ask(&self.client, &self.url, &logins))
-            .await
-            .context("the catalog took too long")??;
+        let source = self.source.clone();
+        let credentials = tokio::task::spawn_blocking(move || source.credentials()).await??;
+        let mut found =
+            tokio::time::timeout(READ_TIMEOUT, ask(&self.client, &self.url, &credentials))
+                .await
+                .context("the catalog took too long")??;
+        if matches!(self.source, Source::ApiKey(_)) {
+            found.ultrafast.clear();
+        }
         let json = serde_json::to_vec_pretty(&found)?;
         crate::state::write_private_atomic(&self.cache, &json)
-            .context("failed to keep the Codex service tiers")?;
+            .context("failed to keep what the Codex catalog lists")?;
         // For a person checking why the twins are offered or refused.
         tracing::info!(
             ultrafast = ?found.ultrafast,
-            "read which models the Codex plan has Ultrafast for"
+            cyber = ?found.cyber,
+            "read which models the Codex catalog lists Ultrafast for, and their cyber access \
+             programs"
         );
         Ok(found)
     }
@@ -354,7 +503,12 @@ impl Gate {
     ///   [`RETRY_AFTER`] of a failed one), then [`Verdict::Forward`] or
     ///   [`Verdict::Refuse`] by it; with no answer at all,
     ///   [`Verdict::Priority`].
+    ///
+    /// An API key's twin goes out whatever its catalog lists.
     pub async fn decide(self: &std::sync::Arc<Self>, model: &str) -> Verdict {
+        if matches!(self.source, Source::ApiKey(_)) {
+            return Verdict::Forward;
+        }
         let verdict = |found: &Detection| {
             if found.ultrafast.contains(model) {
                 Verdict::Forward
@@ -375,6 +529,29 @@ impl Gate {
                 (None, None) => Verdict::Priority,
             },
         }
+    }
+
+    /// The cyber access programs the catalog lists for `model`, by the last
+    /// answer for the current logins or key; `None` when it lists none or cannot
+    /// be read. An answer older than [`UNLISTED_FOR`] still decides the
+    /// request and is read again in the background, so only a request with
+    /// no programs read at all waits for a read. It is read again that soon
+    /// whatever it lists: a Daybreak program the account has lost fails
+    /// every request that selects it until the answer drops it.
+    pub async fn cyber_listed(
+        self: &std::sync::Arc<Self>,
+        model: &str,
+    ) -> Option<BTreeSet<String>> {
+        let found = match self.cached().await.filter(|found| found.cyber.is_some()) {
+            Some(found) => {
+                if !fresh(&found, UNLISTED_FOR) {
+                    self.read_in_background();
+                }
+                found
+            }
+            None => self.read_unless_failed().await?,
+        };
+        found.cyber?.remove(model)
     }
 
     /// A fresh answer for the current logins: the cached one when another
@@ -399,7 +576,10 @@ impl Gate {
             }
             Err(error) => {
                 *failed = Some(Instant::now());
-                tracing::warn!("could not read the Codex plan's service tiers: {error:#}");
+                tracing::warn!(
+                    "could not read the Codex catalog's service tiers and cyber access \
+                     programs: {error:#}"
+                );
                 None
             }
         }
@@ -437,16 +617,14 @@ impl Gate {
     }
 }
 
-/// Reads the plan now, for a managed subscription; nothing otherwise.
+/// Reads the catalog now, where `config` has one to ask ([`Source::of`]);
+/// nothing otherwise.
 ///
 /// # Errors
 /// When the read fails.
 pub async fn read_now(config: &Config, dirs: &Dirs) -> anyhow::Result<()> {
-    if let Some(auth_dir) = config
-        .managed_auth_dir(dirs)
-        .filter(|_| config.gpt.auth == GptAuth::Subscription)
-    {
-        Gate::new(auth_dir, dirs)?.read().await?;
+    if let Some(source) = Source::of(config, dirs) {
+        Gate::new(source, dirs)?.read().await?;
     }
     Ok(())
 }
@@ -460,11 +638,63 @@ pub(crate) fn record(dirs: &Dirs, auth_dir: &Path, models: &[&str]) {
 
 #[cfg(test)]
 fn record_at(dirs: &Dirs, auth_dir: &Path, models: &[&str], checked: u64) {
-    let logins = credentials(&crate::logins::walk(auth_dir)).unwrap();
+    record_all(dirs, auth_dir, models, &[], checked);
+}
+
+/// Records a fresh answer for the logins in `auth_dir` that lists these
+/// cyber access programs, and the Ultrafast tier for no model.
+#[cfg(test)]
+pub(crate) fn record_cyber(
+    dirs: &Dirs,
+    auth_dir: &Path,
+    programs: &[(&str, &[crate::cyber_access::CyberAccess])],
+) {
+    record_all(dirs, auth_dir, &[], programs, unix_now());
+}
+
+#[cfg(test)]
+fn record_all(
+    dirs: &Dirs,
+    auth_dir: &Path,
+    models: &[&str],
+    programs: &[(&str, &[crate::cyber_access::CyberAccess])],
+    checked: u64,
+) {
+    record_from(
+        dirs,
+        &Source::Logins(auth_dir.to_owned()),
+        models,
+        programs,
+        checked,
+    );
+}
+
+/// Records a fresh answer for the API key `config` holds that lists these
+/// cyber access programs.
+#[cfg(test)]
+pub(crate) fn record_cyber_for_key(
+    dirs: &Dirs,
+    config: &Config,
+    programs: &[(&str, &[crate::cyber_access::CyberAccess])],
+) {
+    let source = Source::of(config, dirs).unwrap();
+    assert!(matches!(source, Source::ApiKey(_)));
+    record_from(dirs, &source, &[], programs, unix_now());
+}
+
+#[cfg(test)]
+fn record_from(
+    dirs: &Dirs,
+    source: &Source,
+    models: &[&str],
+    programs: &[(&str, &[crate::cyber_access::CyberAccess])],
+    checked: u64,
+) {
     let detection = Detection {
         checked,
-        accounts: accounts(&logins),
+        accounts: accounts(&source.credentials().unwrap()),
         ultrafast: models.iter().map(|model| (*model).to_owned()).collect(),
+        cyber: Some(crate::cyber_access::programs(programs)),
     };
     std::fs::create_dir_all(&dirs.state_dir).unwrap();
     std::fs::write(cache_file(dirs), serde_json::to_vec(&detection).unwrap()).unwrap();
@@ -505,9 +735,293 @@ mod tests {
             ("gpt-6-chat-thinking", &[]),
         ]))
         .unwrap();
-        assert_eq!(parsed, set(&["gpt-6.2-sol"]));
+        assert_eq!(parsed.ultrafast, set(&["gpt-6.2-sol"]));
+        assert!(parsed.cyber.is_empty());
         assert!(parse_catalog(b"{\"data\": []}").is_err());
         assert!(parse_catalog(b"<html>").is_err());
+    }
+
+    #[test]
+    fn an_answer_kept_without_the_programs_keeps_its_ultrafast_part() {
+        let (_root, dirs, config) = setup(&[("codex-a.json", codex("t1", "acct"))]);
+        record(&dirs, &dirs.auth_dir(), &["gpt-6.2-sol"]);
+        let mut kept: Value =
+            serde_json::from_slice(&std::fs::read(cache_file(&dirs)).unwrap()).unwrap();
+        kept.as_object_mut().unwrap().remove("cyber").unwrap();
+        std::fs::write(cache_file(&dirs), kept.to_string()).unwrap();
+        assert_eq!(plan(&config, &dirs), Plan::Read(set(&["gpt-6.2-sol"])));
+        assert_eq!(offered(&config, &dirs), ["gpt-6.2-sol"]);
+        assert_eq!(cyber_programs(&config, &dirs), None);
+
+        // Nor does a program this router does not know cost the answer.
+        kept["cyber"] = json!({"gpt-6-sol": ["standard", "daybreak_green"]});
+        std::fs::write(cache_file(&dirs), kept.to_string()).unwrap();
+        assert_eq!(plan(&config, &dirs), Plan::Read(set(&["gpt-6.2-sol"])));
+        assert!(cyber_programs(&config, &dirs).unwrap()["gpt-6-sol"].contains("daybreak_green"));
+    }
+
+    /// An answer kept without the programs still decides a twin's turn, and
+    /// is read again at the first chance so the programs get read: behind a
+    /// turn it lets through, before one it would refuse, and when `serve`
+    /// starts.
+    #[tokio::test]
+    async fn an_answer_kept_without_the_programs_is_read_again_at_once() {
+        let (url, hits) = catalog_server(
+            vec![(
+                "t1",
+                cyber_catalog(&[("gpt-6-sol", &["standard", "daybreak_blue"])]),
+            )],
+            Duration::ZERO,
+        )
+        .await;
+        let (_root, dirs, config) = setup(&[("codex-a.json", codex("t1", "acct"))]);
+        let gate = Arc::new(Gate::with_url(dirs.auth_dir(), &dirs, &url).unwrap());
+        let keep_without_programs = || {
+            record(&dirs, &dirs.auth_dir(), &["gpt-6.2-sol"]);
+            let mut kept: Value =
+                serde_json::from_slice(&std::fs::read(cache_file(&dirs)).unwrap()).unwrap();
+            kept.as_object_mut().unwrap().remove("cyber").unwrap();
+            std::fs::write(cache_file(&dirs), kept.to_string()).unwrap();
+        };
+
+        keep_without_programs();
+        assert_eq!(gate.decide("gpt-6.2-sol").await, Verdict::Forward);
+        hit(&hits, 1).await;
+        assert!(
+            cyber_programs(&config, &dirs)
+                .unwrap()
+                .contains_key("gpt-6-sol")
+        );
+
+        keep_without_programs();
+        assert_eq!(
+            gate.decide("gpt-6.2-astra").await,
+            Verdict::Refuse,
+            "the catalog read now lists the tier for neither"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        // A read that fails leaves the kept answer deciding.
+        relogin(&dirs, &[("codex-a.json", codex("stale", "acct"))]);
+        keep_without_programs();
+        *gate.reading.lock().await = None;
+        assert_eq!(gate.decide("gpt-6.2-astra").await, Verdict::Refuse);
+        assert_eq!(gate.decide("gpt-6.2-sol").await, Verdict::Forward);
+    }
+
+    /// A catalog whose entries list these `available_access_programs.cyber`.
+    fn cyber_catalog(entries: &[(&str, &[&str])]) -> Vec<u8> {
+        let models: Vec<Value> = entries
+            .iter()
+            .map(|(slug, cyber)| {
+                json!({"slug": slug, "available_access_programs": {"cyber": cyber}})
+            })
+            .collect();
+        serde_json::to_vec(&json!({ "models": models })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_plan_lists_the_cyber_programs_every_login_lists() {
+        use crate::cyber_access::CyberAccess::{DaybreakBlue, DaybreakRed, Standard};
+        use crate::cyber_access::programs;
+        let (url, _) = catalog_server(
+            vec![
+                (
+                    "t1",
+                    cyber_catalog(&[
+                        ("gpt-6-sol", &["standard", "daybreak_blue"]),
+                        ("gpt-6-luna", &["standard", "daybreak_blue"]),
+                        ("gpt-6.2-sol", &["standard", "daybreak_red"]),
+                        ("gpt-6.1-terra", &["standard"]),
+                    ]),
+                ),
+                (
+                    "t2",
+                    cyber_catalog(&[
+                        ("gpt-6-sol", &["standard", "daybreak_blue"]),
+                        ("gpt-6-luna", &["standard"]),
+                        ("gpt-6.2-sol", &["standard", "daybreak_blue"]),
+                    ]),
+                ),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        let one = [("codex-a.json", codex("t1", "acct"))];
+        let (_root, dirs, config) = setup(&one);
+        assert_eq!(cyber_programs(&config, &dirs), None, "unread");
+
+        let gate = Gate::with_url(dirs.auth_dir(), &dirs, &url).unwrap();
+        gate.read().await.unwrap();
+        assert_eq!(
+            cyber_programs(&config, &dirs),
+            Some(programs(&[
+                ("gpt-6-sol", &[Standard, DaybreakBlue]),
+                ("gpt-6-luna", &[Standard, DaybreakBlue]),
+                ("gpt-6.2-sol", &[Standard, DaybreakRed]),
+                ("gpt-6.1-terra", &[Standard]),
+            ]))
+        );
+
+        relogin(
+            &dirs,
+            &[
+                ("codex-a.json", codex("t1", "acct")),
+                ("codex-b.json", codex("t2", "acct-2")),
+            ],
+        );
+        assert_eq!(cyber_programs(&config, &dirs), None, "other logins");
+        gate.read().await.unwrap();
+        assert_eq!(
+            cyber_programs(&config, &dirs),
+            Some(programs(&[
+                ("gpt-6-sol", &[Standard, DaybreakBlue]),
+                ("gpt-6-luna", &[Standard]),
+                ("gpt-6.2-sol", &[Standard]),
+            ]))
+        );
+
+        let api_key = crate::config::parse_and_prepare("[gpt]\nauth = \"api-key\"\n");
+        assert_eq!(cyber_programs(&api_key, &dirs), None);
+    }
+
+    /// An API key's catalog is read for the programs alone: the key has the
+    /// Ultrafast tier whatever the catalog lists.
+    #[tokio::test]
+    async fn an_api_key_reads_its_own_catalog_for_the_programs_alone() {
+        use crate::cyber_access::CyberAccess::{DaybreakBlue, Standard};
+        use crate::cyber_access::programs;
+        // The key's catalog lists the tier too, as a real one does.
+        let models = json!({"models": [
+            {"slug": "gpt-6-sol", "available_access_programs": {"cyber": ["standard", "daybreak_blue"]}},
+            {"slug": "gpt-6.2-sol", "service_tiers": [{"id": "ultrafast"}],
+             "available_access_programs": {"cyber": ["standard"]}},
+        ]});
+        let (url, hits) = catalog_server(
+            vec![("sk-one", serde_json::to_vec(&models).unwrap())],
+            Duration::ZERO,
+        )
+        .await;
+        let (_root, dirs, _) = setup(&[("codex-a.json", codex("t1", "acct"))]);
+        let mut config = crate::config::parse_and_prepare("[gpt]\nauth = \"api-key\"\n");
+        assert_eq!(Source::of(&config, &dirs), None, "no key yet");
+        config.gpt.api_key = Some("sk-one".to_owned());
+        let source = Source::of(&config, &dirs).unwrap();
+        assert_eq!(format!("{source:?}"), "ApiKey");
+        // Standard safeguards need no catalog, so the key is sent nowhere.
+        let mut off =
+            crate::config::parse_and_prepare("[gpt]\nauth = \"api-key\"\ndaybreak = false\n");
+        off.gpt.api_key = Some("sk-one".to_owned());
+        assert_eq!(Source::of(&off, &dirs), None);
+
+        let gate = Arc::new(Gate::with_url(source, &dirs, &url).unwrap());
+        assert!(!format!("{gate:?}").contains("sk-one"));
+        assert_eq!(cyber_programs(&config, &dirs), None, "unread");
+        assert_eq!(
+            gate.cyber_listed("gpt-6-sol").await,
+            Some(set(&["standard", "daybreak_blue"]))
+        );
+        assert_eq!(
+            cyber_programs(&config, &dirs),
+            Some(programs(&[
+                ("gpt-6-sol", &[Standard, DaybreakBlue]),
+                ("gpt-6.2-sol", &[Standard]),
+            ]))
+        );
+        let text = std::fs::read_to_string(cache_file(&dirs)).unwrap();
+        assert!(!text.contains("sk-one"), "{text}");
+        let kept: Detection = serde_json::from_str(&text).unwrap();
+        assert!(
+            kept.ultrafast.is_empty(),
+            "the tier is not the catalog's to say"
+        );
+
+        // The tier: every twin, with no plan and no read.
+        assert_eq!(plan(&config, &dirs), Plan::None);
+        assert_eq!(offered(&config, &dirs), ULTRAFAST_MODELS);
+        assert_eq!(gate.decide("gpt-6.2-astra").await, Verdict::Forward);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // The answer speaks for no other key, nor for the Codex logins.
+        config.gpt.api_key = Some("sk-two".to_owned());
+        assert_eq!(cyber_programs(&config, &dirs), None);
+        let subscription = crate::config::parse_and_prepare("");
+        assert_eq!(cyber_programs(&subscription, &dirs), None);
+    }
+
+    #[tokio::test]
+    async fn the_programs_wait_for_a_read_only_when_none_were_read() {
+        use crate::cyber_access::CyberAccess::{DaybreakBlue, Standard};
+        let listed = |programs: &[&str]| Some(set(programs));
+        let (url, hits) = catalog_server(
+            vec![(
+                "t1",
+                cyber_catalog(&[
+                    ("gpt-6-sol", &["standard", "daybreak_blue"]),
+                    ("gpt-6.2-sol", &["standard"]),
+                ]),
+            )],
+            Duration::ZERO,
+        )
+        .await;
+        let (_root, dirs, _) = setup(&[("codex-a.json", codex("t1", "acct"))]);
+        let gate = Arc::new(Gate::with_url(dirs.auth_dir(), &dirs, &url).unwrap());
+
+        // No answer yet: read first.
+        assert_eq!(
+            gate.cyber_listed("gpt-6-sol").await,
+            listed(&["standard", "daybreak_blue"])
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            gate.cyber_listed("gpt-6.2-sol").await,
+            listed(&["standard"])
+        );
+        assert_eq!(gate.cyber_listed("gpt-9").await, None);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "a fresh answer stands");
+
+        // An answer kept before the programs were read has none, however
+        // fresh it is.
+        record(&dirs, &dirs.auth_dir(), &[]);
+        let mut kept: Value =
+            serde_json::from_slice(&std::fs::read(cache_file(&dirs)).unwrap()).unwrap();
+        kept.as_object_mut().unwrap().remove("cyber").unwrap();
+        std::fs::write(cache_file(&dirs), kept.to_string()).unwrap();
+        assert_eq!(
+            gate.cyber_listed("gpt-6-sol").await,
+            listed(&["standard", "daybreak_blue"])
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        // A stale answer decides the request at once and is read again
+        // behind it, as soon for a program it lists as for one it lacks.
+        record_all(
+            &dirs,
+            &dirs.auth_dir(),
+            &[],
+            &[("gpt-6.2-sol", &[Standard, DaybreakBlue])],
+            unix_now() - UNLISTED_FOR.as_secs(),
+        );
+        assert_eq!(
+            gate.cyber_listed("gpt-6.2-sol").await,
+            listed(&["standard", "daybreak_blue"])
+        );
+        hit(&hits, 3).await;
+        assert_eq!(
+            gate.cyber_listed("gpt-6.2-sol").await,
+            listed(&["standard"])
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn no_programs_are_listed_while_the_plan_cannot_be_read() {
+        let (url, hits) = catalog_server(Vec::new(), Duration::ZERO).await;
+        let (_root, dirs, _) = setup(&[("codex-a.json", codex("t1", "acct"))]);
+        let gate = Arc::new(Gate::with_url(dirs.auth_dir(), &dirs, &url).unwrap());
+        assert_eq!(gate.cyber_listed("gpt-6-sol").await, None);
+        assert_eq!(gate.cyber_listed("gpt-6-sol").await, None);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "within RETRY_AFTER");
     }
 
     fn login_dir(files: &[(&str, Value)]) -> tempfile::TempDir {
@@ -533,7 +1047,13 @@ mod tests {
             ("xai-a.json", json!({"type": "xai", "access_token": "x"})),
         ]);
         let found = credentials(&crate::logins::walk(dir.path())).unwrap();
-        assert_eq!(found, [("t1".to_owned(), "acct".to_owned())]);
+        assert_eq!(
+            found,
+            [Credential {
+                token: "t1".to_owned(),
+                account: Some("acct".to_owned()),
+            }]
+        );
 
         let dir = login_dir(&[
             ("codex-a.json", codex("t1", "acct")),
@@ -542,7 +1062,9 @@ mod tests {
                 json!({"type": "codex", "account_id": "acct"}),
             ),
         ]);
-        let error = credentials(&crate::logins::walk(dir.path())).unwrap_err();
+        let Err(error) = credentials(&crate::logins::walk(dir.path())) else {
+            panic!("a login without its token passed");
+        };
         assert!(error.to_string().contains("no access_token"), "{error}");
 
         let dir = login_dir(&[("xai-a.json", json!({"type": "xai"}))]);
@@ -578,8 +1100,12 @@ mod tests {
                     };
                     assert_eq!(uri.query(), Some("client_version=0.166.0"));
                     assert_eq!(header("originator"), "codex_cli_rs");
-                    assert!(header("chatgpt-account-id").starts_with("acct"));
                     let authorization = header("authorization");
+                    // A login's request names its account; an API key's has none.
+                    assert_eq!(
+                        header("chatgpt-account-id").starts_with("acct"),
+                        !authorization.starts_with("Bearer sk-")
+                    );
                     match routes
                         .iter()
                         .find(|(token, _)| authorization == format!("Bearer {token}"))
@@ -611,6 +1137,52 @@ mod tests {
         for (name, body) in logins {
             std::fs::write(dirs.auth_dir().join(name), body.to_string()).unwrap();
         }
+    }
+
+    /// A released router's answers stay the current logins': the digest of
+    /// their accounts is the one it wrote.
+    #[test]
+    fn the_logins_digest_is_the_one_released_routers_wrote() {
+        let login = |account: &str| Credential {
+            token: "t".to_owned(),
+            account: Some(account.to_owned()),
+        };
+        // sha256("acct"), and sha256("acct\nacct-2") whatever the order.
+        assert_eq!(
+            accounts(&[login("acct")]),
+            "def0b17f603285ef4336f6e3e3dcd43cd18fd789277ab9d6e086b7e567539e25"
+        );
+        assert_eq!(
+            accounts(&[login("acct-2"), login("acct"), login("acct")]),
+            "dbde76d33f46697adef1111fb8b22207ff9561b995d0ac32ba82529d4a904fb7"
+        );
+    }
+
+    /// A refused read's message never carries the credential it was asked
+    /// with, whatever the backend echoes.
+    #[tokio::test]
+    async fn a_refused_read_s_message_leaves_out_the_credential() {
+        let app =
+            axum::Router::new().fallback(axum::routing::get(|headers: HeaderMap| async move {
+                let sent = headers["authorization"].to_str().unwrap().to_owned();
+                (StatusCode::UNAUTHORIZED, format!("bad credential: {sent}"))
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, dirs, _) = setup(&[]);
+        let gate = Gate::with_url(
+            Source::ApiKey("sk-secret".to_owned()),
+            &dirs,
+            &format!("http://{address}/models"),
+        )
+        .unwrap();
+        let error = format!("{:#}", gate.read().await.unwrap_err());
+        assert!(
+            error.contains("401") && error.contains("[redacted]"),
+            "{error}"
+        );
+        assert!(!error.contains("sk-secret"), "{error}");
     }
 
     #[tokio::test]
