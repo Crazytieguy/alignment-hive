@@ -111,6 +111,22 @@ test('gpt-edit fails when the file is unchanged', () => {
   expect(v.detail).toContain('does not return 4817');
 });
 
+test('an edit cell fails on an empty result, and any text goes on to the later checks', () => {
+  const served = (text: string | undefined, usage: Record<string, unknown> = {}) =>
+    result({ result: text, modelUsage: { 'gemini-4-argon': { outputTokens: 40 }, ...usage } });
+  for (const text of ['', '  \n', undefined]) {
+    const out = judgeEdit(ok(served(text)), parseResult(served(text)), EDITED, 'gemini-4-argon', 2);
+    expect(out.status).toBe('fail');
+    expect(out.detail).toContain('result text is empty');
+  }
+  const text = 'calc.py now returns 4817.';
+  expect(judgeEdit(ok(served(text)), parseResult(served(text)), EDITED, 'gemini-4-argon', 2).status).toBe('pass');
+  const takeover = served(text, { 'claude-opus-5-5': { outputTokens: 900 } });
+  const out = judgeEdit(ok(takeover), parseResult(takeover), EDITED, 'gemini-4-argon', 2);
+  expect(out.status).toBe('warn');
+  expect(out.detail).toContain('modelUsage also lists claude-opus-5-5');
+});
+
 test('gpt-edit names the tools Claude Code denied', () => {
   const out = result({ permission_denials: [{ tool_name: 'Edit', tool_use_id: 'x', tool_input: {} }], result: 'permission was denied' });
   expect(judgeEdit(ok(out), parseResult(out), 'def magic():\n    return 0\n', 'gpt-6-luna', 1).detail).toContain('permission denied for Edit');

@@ -36,6 +36,8 @@ use crate::websearch;
 
 mod connect;
 #[cfg(test)]
+mod gemini_tests;
+#[cfg(test)]
 mod keepalive_tests;
 mod search;
 
@@ -62,6 +64,8 @@ struct AppState {
     /// Contributor header, since startup ([`login_refusal`]).
     seen_overrides: Arc<crate::exclusions::Seen>,
     seen_headers: Arc<crate::muse::SeenHeaders>,
+    /// The billing check Hydrogen requests wait on ([`send_to_child`]).
+    gemini_billing: Arc<crate::gemini_billing::Gate>,
     /// The router-side auto-mode classifier, when `[auto-mode-classifier]`
     /// is enabled.
     auto_mode: Option<Arc<crate::auto_mode::Runtime>>,
@@ -188,6 +192,7 @@ impl AppState {
         }
         let auto_mode = crate::auto_mode::Runtime::new(&config, &client, capture.as_ref());
         Ok(Self {
+            gemini_billing: crate::gemini_billing::Gate::new(&config.gemini),
             config: Arc::new(config),
             client,
             capture,
@@ -217,13 +222,14 @@ impl AppState {
 
     /// Whether `WebSearch` calls from `origin` are intercepted: whenever
     /// `[web-search] mode` is not `off`, and always for a routed model whose
-    /// searches go to its own vendor's search (Grok, Muse). Those never
-    /// leave the vendor: `off` governs only the other families.
+    /// family keeps its searches to itself: Grok, Muse and Gemini, whose
+    /// searches go to their own vendor's. Those never
+    /// reach another vendor: `off` governs only the other families.
     fn intercepts(&self, origin: &websearch::Origin) -> bool {
         self.config.web_search.mode != WebSearchMode::Off
             || matches!(origin, websearch::Origin::Gpt { routing_id }
                 if self.config.route(routing_id)
-                    .is_some_and(|route| websearch::native_search(route.family).is_some()))
+                    .is_some_and(|route| websearch::own_search(route.family).is_some()))
     }
 
     /// The recorded origin of a `WebSearch` sub-call, if its session's
@@ -485,7 +491,7 @@ async fn handle(state: AppState, request: Request) -> Response {
 
     let route = match plan_route(&state, decision.route).await {
         Ok(route) => route,
-        Err(message) => return refusal_response(&state, &message, capture).await,
+        Err(refusal) => return refusal_response(&state, &refusal, capture).await,
     };
     match route {
         None => claude_response(&state, &parts, body, &decision, capture).await,
@@ -493,24 +499,81 @@ async fn handle(state: AppState, request: Request) -> Response {
     }
 }
 
-/// The client-facing answer to a request refused for `message`.
-async fn refusal_response(
-    state: &AppState,
-    message: &str,
-    capture: Option<RequestCapture>,
-) -> Response {
-    local_error_response(
-        state,
-        StatusCode::BAD_REQUEST,
-        "invalid_request_error",
-        message,
-        capture,
-    )
-    .await
+/// Why a request is not forwarded, as the client is told.
+struct Refusal {
+    /// Whether the same request may pass later with nothing changed.
+    retryable: bool,
+    message: String,
 }
 
-/// The route to send a turn for `route` (none: Claude's) on, or the text
-/// of its refusal:
+/// The client-facing answer to a refused request: a 400, or for a
+/// retryable one a 502, which Claude Code retries.
+async fn refusal_response(
+    state: &AppState,
+    refusal: &Refusal,
+    capture: Option<RequestCapture>,
+) -> Response {
+    let (status, kind) = if refusal.retryable {
+        (StatusCode::BAD_GATEWAY, "api_error")
+    } else {
+        (StatusCode::BAD_REQUEST, "invalid_request_error")
+    };
+    local_error_response(state, status, kind, &refusal.message, capture).await
+}
+
+/// A request for the child that got no response.
+enum NotSent {
+    /// Refused here: nothing went out.
+    Refused(Refusal),
+    Failed(reqwest::Error),
+}
+
+/// Sends `request` to the child at `target` with `body`, which asks for a
+/// route's model. Every such request leaves through here, a turn's and a
+/// search sub-call's alike, so that one for Gemini 4 Hydrogen passes the
+/// billing gate ([`crate::gemini_billing::Gate`]) as it leaves, not when it
+/// arrived: a sub-call may first wait minutes on another backend's search.
+///
+/// The other sends to the child ask for no route's model: Codex's search
+/// and a vendor's own name theirs, the auto-mode classifier takes no Gemini
+/// route, and Gemini's own search names its model in its path and asks the
+/// gate itself (`search::grounding_search`).
+async fn send_to_child(
+    state: &AppState,
+    target: &ForwardTarget,
+    request: reqwest::RequestBuilder,
+    body: Bytes,
+) -> Result<reqwest::Response, NotSent> {
+    if state.gemini_billing.gates(&body)
+        && let Some(refusal) = free_tier_refusal(state, target).await
+    {
+        return Err(NotSent::Refused(refusal));
+    }
+    request.body(body).send().await.map_err(NotSent::Failed)
+}
+
+/// The refusal for a request to Gemini 4 Hydrogen, which Google would serve
+/// on its free tier if the key's project has no billing, unless the user
+/// consented to that: none once a probe found billing, which one asked here
+/// through the same child does on the first such request.
+async fn free_tier_refusal(state: &AppState, target: &ForwardTarget) -> Option<Refusal> {
+    let gate = &state.gemini_billing;
+    let probe =
+        crate::gemini_billing::probe(&state.client, &target.base_url, target.credential.as_ref());
+    let found = gate.admit(probe).await.err()?;
+    let message = found.refusal();
+    tracing::warn!(
+        %message,
+        "refused a Gemini request that Google might serve on its free tier"
+    );
+    Some(Refusal {
+        retryable: found.may_pass_on_retry(),
+        message,
+    })
+}
+
+/// The route to send a turn for `route` (none: Claude's) on, or its
+/// refusal:
 /// the logins may refuse it ([`login_refusal`]); an `-ultrafast` twin's
 /// goes by the Codex plan ([`crate::ultrafast::decide`]), at priority
 /// while the plan is unread, refused where it lacks the tier. The route
@@ -519,13 +582,16 @@ async fn refusal_response(
 async fn plan_route<'a>(
     state: &AppState,
     route: Option<&'a crate::config::ModelRoute>,
-) -> Result<Option<std::borrow::Cow<'a, crate::config::ModelRoute>>, String> {
+) -> Result<Option<std::borrow::Cow<'a, crate::config::ModelRoute>>, Refusal> {
     use std::borrow::Cow;
     let Some(route) = route else {
         return Ok(None);
     };
     if let Some(message) = login_refusal(state, Some(route)).await {
-        return Err(message);
+        return Err(Refusal {
+            retryable: false,
+            message,
+        });
     }
     let Some(catalog) = state
         .config
@@ -540,7 +606,10 @@ async fn plan_route<'a>(
         Verdict::Refuse => {
             let message = ultrafast_refusal(route);
             tracing::warn!(route = %route.routing_id, %message, "refused an Ultrafast turn");
-            return Err(message);
+            return Err(Refusal {
+                retryable: false,
+                message,
+            });
         }
         Verdict::Priority => {
             tracing::warn!(
@@ -693,14 +762,11 @@ async fn forward_to_anthropic(
 ) -> Response {
     forward(
         state,
-        &state.config.anthropic_upstream_base,
+        Upstream::Anthropic,
         &parts.method,
         &parts.uri,
         &parts.headers,
         body,
-        false,
-        false,
-        None,
         None,
         capture,
         tap,
@@ -759,6 +825,11 @@ fn rewrite_gpt_body(
         &route.display_name,
         route.family.maker(),
     )?;
+    // After the identity block, which reads the attribution block's
+    // subagent flag.
+    if route.family == ModelFamily::Gemini {
+        crate::identity::remove_attribution_blocks(&mut document);
+    }
     crate::service_tier::apply(&mut document, route.tier);
     if route.family.tool_choice_auto_only() {
         let forced = document.get("tool_choice").is_some_and(|choice| {
@@ -963,6 +1034,7 @@ fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPoli
         estimate,
         scale: route.usage_scale,
         overflow,
+        join_text: route.family.streams_text_in_pieces(),
         auto_mode: None,
     }
 }
@@ -1001,14 +1073,11 @@ async fn forward_gpt(
                 .map(|credential| credential.for_tier(tier).for_cyber_access(cyber_access));
             forward(
                 state,
-                &target.base_url,
+                Upstream::Child(&target),
                 &parts.method,
                 &parts.uri,
                 inbound_headers,
                 rewritten,
-                true,
-                true,
-                target.credential.as_ref(),
                 Some(policies),
                 capture,
                 tap,
@@ -1217,27 +1286,37 @@ fn health_response(state: &AppState) -> Response {
     build_response(StatusCode::OK, json_headers(), Body::from(bytes))
 }
 
+/// Where [`forward`] sends a request.
+enum Upstream<'a> {
+    /// The body and the client's credentials as they came.
+    Anthropic,
+    /// A body rewritten for a route, on the child's credential in place of
+    /// the client's.
+    Child(&'a ForwardTarget),
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn forward(
     state: &AppState,
-    upstream_base: &str,
+    upstream: Upstream<'_>,
     method: &Method,
     uri: &Uri,
     inbound_headers: &HeaderMap,
     body: Bytes,
-    strip_credentials: bool,
-    body_changed: bool,
-    gpt_credential: Option<&headers::GptUpstreamCredential>,
     policies: Option<GptPolicies>,
     mut capture: Option<RequestCapture>,
     tap: Option<SniffTap>,
 ) -> Response {
+    let (upstream_base, child) = match upstream {
+        Upstream::Anthropic => (state.config.anthropic_upstream_base.as_str(), None),
+        Upstream::Child(target) => (target.base_url.as_str(), Some(target)),
+    };
     let url = upstream_url(upstream_base, uri);
     let mut outgoing_headers = headers::request_headers(
         inbound_headers,
-        strip_credentials,
-        body_changed,
-        gpt_credential,
+        child.is_some(),
+        child.is_some(),
+        child.and_then(|target| target.credential.as_ref()),
     );
     if tap.is_some() || policies.is_some() {
         require_identity_encoding(&mut outgoing_headers);
@@ -1247,16 +1326,18 @@ async fn forward(
         request_capture.headers = redact_headers(&outgoing_headers);
     }
     let started = std::time::Instant::now();
-    match state
+    let request = state
         .client
         .request(method.clone(), url)
-        .headers(outgoing_headers)
-        .body(body)
-        .send()
-        .await
-    {
+        .headers(outgoing_headers);
+    let sent = match child {
+        Some(target) => send_to_child(state, target, request, body).await,
+        None => request.body(body).send().await.map_err(NotSent::Failed),
+    };
+    match sent {
         Ok(response) => upstream_response(state, response, capture, policies, tap).await,
-        Err(error) => {
+        Err(NotSent::Refused(refusal)) => refusal_response(state, &refusal, capture).await,
+        Err(NotSent::Failed(error)) => {
             // reqwest's own message names only the URL; whether the
             // connection was refused, reset or timed out is in its sources.
             tracing::warn!(
@@ -1339,6 +1420,13 @@ async fn upstream_response(
             Box::pin(stream)
         };
 
+    let join_text = policies.as_ref().is_some_and(|policies| policies.join_text);
+    let stream = if join_text && is_sse && status == StatusCode::OK {
+        crate::text_blocks::stage(stream)
+    } else {
+        stream
+    };
+
     let stream: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>> =
         if let Some(policies) = policies.filter(|_| transform_usage) {
             Box::pin(async_stream::stream! {
@@ -1377,14 +1465,15 @@ async fn upstream_response(
     build_response(status, response_headers, body)
 }
 
-/// Upper bound on a buffered GPT error body. The captured overflow error is
+/// Upper bound on a buffered error body. The captured overflow errors are
 /// ~160 bytes; anything past this bound is not the error we are looking for
 /// and streams through untouched.
 const OVERFLOW_BUFFER_LIMIT: usize = 64 * 1024;
 
 /// A non-streaming 400 on a route with overflow translation armed: buffer
-/// the (small) body, rewrite it when it is the Codex context-overflow error
-/// (see [`crate::overflow`]), and pass everything else through unchanged.
+/// the (small) body, rewrite it when it is the backend's context-overflow
+/// error (see [`crate::overflow`]), and pass everything else through
+/// unchanged.
 async fn overflow_translated_response(
     state: &AppState,
     status: StatusCode,
@@ -1407,7 +1496,7 @@ async fn overflow_translated_response(
     };
     let rewritten = overflow.rewrite_body(&body);
     if rewritten.is_some() {
-        tracing::info!("translated a GPT context-overflow error to the canonical Anthropic form");
+        tracing::info!("translated a context-overflow error to the canonical Anthropic form");
     }
     buffered_reply(state, status, &upstream_headers, body, rewritten, capture).await
 }

@@ -345,6 +345,34 @@ mod tests {
     }
 
     #[test]
+    fn a_gemini_route_takes_the_effort_as_a_suffix_like_grok() {
+        // The child clamps the level to the model's own, so `xhigh` goes
+        // through as asked.
+        let gemini = route(ModelFamily::Gemini, "gemini-4-argon");
+        for effort in ["low", "high", "xhigh", "max"] {
+            let body = format!(
+                r#"{{"model":"r","thinking":{{"type":"adaptive"}},"output_config":{{"effort":"{effort}"}},"messages":[]}}"#
+            );
+            assert_eq!(
+                effort_qualified_model(&gemini, body.as_bytes()),
+                format!("gemini-4-argon({effort})")
+            );
+        }
+        assert_eq!(
+            effort_qualified_model(&gemini, br#"{"model":"r","messages":[]}"#),
+            "gemini-4-argon"
+        );
+        let pinned = route(ModelFamily::Gemini, "gemini-4-carbon(low)");
+        assert_eq!(
+            effort_qualified_model(
+                &pinned,
+                br#"{"model":"r","output_config":{"effort":"high"}}"#
+            ),
+            "gemini-4-carbon(low)"
+        );
+    }
+
+    #[test]
     fn a_grok_request_without_effort_is_unsuffixed() {
         let grok = route(ModelFamily::Grok, "grok-4.5");
         for body in [

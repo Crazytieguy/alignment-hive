@@ -1,5 +1,6 @@
 //! One-shot diagnosis used by humans, the setup skill, and the `SessionStart`
-//! hook. Read-only: it creates no state.
+//! hook. Read-only: it creates no state. With `[gemini]` on and a key set,
+//! it sends Google one small billed request ([`gemini_billing_check`]).
 
 use serde::Serialize;
 
@@ -9,6 +10,7 @@ use crate::config::{Config, GptAuth, ModelRoute, MuseMode, UpstreamMode};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::ModelFamily;
+use crate::gemini_billing::{BILLING_URL, Billing, NotPaid};
 use crate::logins::Walk;
 use crate::state::{
     CODEX_AUTH_PREFIX, Dirs, GROK_AUTH_PREFIX, MUSE_AUTH_PREFIX, find_auth, harden_auth_files,
@@ -83,6 +85,7 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
     let mut router_address = None;
     let mut base_url = None;
     let mut catalog_request = None;
+    let mut billing_request = None;
     if let Some(config) = &config {
         // SocketAddr's Display brackets IPv6 correctly (http://[::1]:8787).
         let address = std::net::SocketAddr::new(config.bind_address, config.port);
@@ -101,6 +104,7 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         checks.extend(login_exclusions_check(config, logins.as_ref()));
         checks.extend(muse_checks(config, logins.as_ref()));
         catalog_request = models_catalog_request(dirs, config);
+        billing_request = gemini_billing_request(dirs, config);
         if !config.openai_providers.is_empty() {
             let keyless = config
                 .openai_providers
@@ -145,9 +149,10 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         }
     }
 
-    // The catalog fetch and the health probe are independent; running them
-    // concurrently keeps an unreachable child from serialising two timeouts.
-    let (health, catalog) = tokio::join!(
+    // The catalog fetch, the health probe and the Gemini billing probe are
+    // independent; running them concurrently keeps an unreachable child from
+    // serialising their timeouts.
+    let (health, catalog, billing) = tokio::join!(
         async {
             match router_address {
                 Some(address) => probe_health(address).await,
@@ -157,6 +162,12 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
         async {
             match &catalog_request {
                 Some((base_url, api_key)) => Some(fetch_models(base_url, api_key.as_deref()).await),
+                None => None,
+            }
+        },
+        async {
+            match &billing_request {
+                Some((base_url, secret)) => Some(probe_gemini_billing(base_url, secret).await),
                 None => None,
             }
         },
@@ -249,6 +260,10 @@ async fn run_with(dirs: &Dirs, config_path: &std::path::Path, env: &WindowEnv) -
             catalog.as_ref().map(Vec::as_slice).map_err(Clone::clone),
             &cliproxy_log(dirs, config),
         ));
+    }
+
+    if let (Some(config), Some(billing)) = (&config, &billing) {
+        checks.push(gemini_billing_check(config.gemini.allow_free_tier, billing));
     }
 
     if let Some(config) = config {
@@ -788,6 +803,26 @@ fn upstream_checks(
                     MUSE_AUTH_PREFIX,
                     "no Meta (Muse Code) login found; run `model-router login muse`",
                 ));
+            }
+            if config.gemini.enabled {
+                // Presence only: `gemini-billing` is the check that calls
+                // Google.
+                let (ok, detail) = match config.gemini.api_key {
+                    Some(_) => (
+                        true,
+                        "Google AI Studio API key set in secrets.toml (billed per token)",
+                    ),
+                    None => (
+                        false,
+                        "[gemini] enabled = true but secrets.toml has no [gemini] api-key",
+                    ),
+                };
+                checks.push(Check {
+                    warn: false,
+                    name: "gemini-api-key",
+                    ok,
+                    detail: detail.to_string(),
+                });
             }
         }
         UpstreamMode::External => checks.push(Check {
@@ -1347,6 +1382,104 @@ fn routed_models_check(config: &Config, body: Result<&[u8], String>, log: &str) 
         } else {
             problems.join(". ")
         },
+    }
+}
+
+/// Where to reach the managed child for the Gemini billing probe, and its
+/// gateway secret: only with `[gemini]` on and a key set, the key the probe
+/// goes out on. `None` too while the service has never run (no secret),
+/// which the router check says.
+fn gemini_billing_request(dirs: &Dirs, config: &Config) -> Option<(String, String)> {
+    if !config.gemini.enabled || config.gemini.api_key.is_none() || !config.is_managed() {
+        return None;
+    }
+    let upstream = config.upstreams.get(crate::config::CLIPROXY_UPSTREAM)?;
+    Some((
+        crate::supervisor::managed_base_url(upstream.port),
+        crate::state::load_secret(dirs)?,
+    ))
+}
+
+/// Runs the router's own billing probe ([`crate::gemini_billing::probe`])
+/// against the managed child.
+async fn probe_gemini_billing(base_url: &str, secret: &str) -> Billing {
+    let credential = match crate::headers::GptUpstreamCredential::new(secret) {
+        Ok(credential) => credential,
+        Err(error) => {
+            return Err(NotPaid::Unknown {
+                why: format!("the gateway secret is unusable: {error}"),
+                retry: false,
+            });
+        }
+    };
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .build();
+    match client {
+        Ok(client) => crate::gemini_billing::probe(&client, base_url, Some(&credential)).await,
+        Err(error) => Err(NotPaid::Unknown {
+            why: format!("HTTP client unavailable: {error}"),
+            retry: false,
+        }),
+    }
+}
+
+/// `gemini-billing`: whether the Gemini API key's project has billing, from
+/// one request to the paid-only Gemini 4 Neon through the managed child
+/// (and one to Argon where Google rate-limits that), and whether Hydrogen
+/// may run on Google's free tier (`[gemini] allow-free-tier`). Google bills
+/// the key for the request when it answers it, about $0.0005 a run. Setup
+/// reads this to decide whether to ask about the free tier at all.
+///
+/// The detail opens with the finding as one word: `paid`, `free`,
+/// `billed-but-empty`, `blocked` or `unknown`. It fails where the family's
+/// routes cannot work as configured, and warns on a probe with no answer
+/// either way and on Hydrogen running on the free tier.
+fn gemini_billing_check(allow_free_tier: bool, found: &Billing) -> Check {
+    let consent = if allow_free_tier {
+        "Google's free tier is allowed for Gemini 4 Hydrogen ([gemini] allow-free-tier = true)"
+    } else {
+        "Google's free tier is not allowed for Gemini 4 Hydrogen ([gemini] allow-free-tier is off)"
+    };
+    let summary = crate::gemini_billing::summary(found);
+    let (ok, warn, detail) = match found {
+        Ok(()) => (true, false, format!("paid: {summary}. {consent}")),
+        Err(NotPaid::Free) if allow_free_tier => (
+            true,
+            true,
+            format!(
+                "free: {summary}, so Gemini 4 Argon, Carbon and Neon fail, and Hydrogen runs on \
+                 Google's free tier, where Google may use your prompts to improve its products. \
+                 {consent}"
+            ),
+        ),
+        Err(NotPaid::Free) => (
+            false,
+            false,
+            format!(
+                "free: {summary}, so Gemini 4 Argon, Carbon and Neon fail, and Hydrogen is \
+                 refused. Turn billing on for the project at {BILLING_URL}. {consent}"
+            ),
+        ),
+        Err(NotPaid::Empty) => (
+            false,
+            false,
+            format!("billed-but-empty: {summary}; add credit at {BILLING_URL}. {consent}"),
+        ),
+        Err(NotPaid::Blocked) => (
+            false,
+            false,
+            format!("blocked: {summary}; check the project at {BILLING_URL}. {consent}"),
+        ),
+        Err(NotPaid::RateLimited(_) | NotPaid::Unknown { .. }) => {
+            (true, true, format!("unknown: {summary}. {consent}"))
+        }
+    };
+    Check {
+        name: "gemini-billing",
+        ok,
+        warn,
+        detail,
     }
 }
 
@@ -2389,6 +2522,146 @@ mod tests {
         let muse = names(&muse_enabled());
         assert!(muse.contains(&"muse-auth"), "{muse:?}");
         assert!(!muse.contains(&"grok-auth"), "{muse:?}");
+    }
+
+    #[test]
+    fn the_gemini_key_is_checked_for_presence_only_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        let gemini_key = |config: &Config| {
+            upstream_check_list(&dirs, config)
+                .into_iter()
+                .find(|check| check.name == "gemini-api-key")
+        };
+        assert!(gemini_key(&config("")).is_none());
+        let mut enabled = config("[gemini]\nenabled = true\n");
+        let check = gemini_key(&enabled).unwrap();
+        assert!(!check.ok, "{}", check.detail);
+        assert!(
+            check
+                .detail
+                .contains("secrets.toml has no [gemini] api-key"),
+            "{}",
+            check.detail
+        );
+        enabled.gemini.api_key = Some("AIza-test".to_string());
+        let check = gemini_key(&enabled).unwrap();
+        assert!(check.ok && !check.warn, "{}", check.detail);
+        assert!(!check.detail.contains("AIza-test"), "{}", check.detail);
+        // No Google login is looked for: there is none to have.
+        let names: Vec<_> = upstream_check_list(&dirs, &enabled)
+            .into_iter()
+            .map(|check| check.name)
+            .collect();
+        assert_eq!(names, ["upstream-binary", "codex-auth", "gemini-api-key"]);
+    }
+
+    #[test]
+    fn the_gemini_billing_probe_needs_the_family_on_a_key_and_a_service_that_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs::under(dir.path());
+        let with_key = |source: &str| {
+            let mut config = config(source);
+            config.gemini.api_key = Some("AIza-test".to_string());
+            config
+        };
+        let enabled = with_key("[gemini]\nenabled = true\n");
+        // The service never ran: no gateway secret to ask the child with.
+        assert!(gemini_billing_request(&dirs, &enabled).is_none());
+        let secret = crate::state::load_or_create_secret(&dirs).unwrap();
+        let port = enabled.cliproxy_upstream().port;
+        assert_eq!(
+            gemini_billing_request(&dirs, &enabled),
+            Some((crate::supervisor::managed_base_url(port), secret))
+        );
+        // No key to bill, or the family off with a key left behind.
+        assert!(gemini_billing_request(&dirs, &config("[gemini]\nenabled = true\n")).is_none());
+        assert!(gemini_billing_request(&dirs, &with_key("")).is_none());
+    }
+
+    #[test]
+    fn gemini_billing_reports_the_finding_and_whether_the_free_tier_is_allowed() {
+        let allowed = "is allowed for Gemini 4 Hydrogen ([gemini] allow-free-tier = true)";
+        let not_allowed = "is not allowed for Gemini 4 Hydrogen ([gemini] allow-free-tier is off)";
+        let unknown = Err(NotPaid::Unknown {
+            why: "Google answered 503".to_string(),
+            retry: true,
+        });
+        let limited = Err(NotPaid::RateLimited("Resource exhausted".to_string()));
+        for (found, allow, ok, warn, parts) in [
+            (&Ok(()), false, true, false, &["paid: ", not_allowed][..]),
+            (&Ok(()), true, true, false, &["paid: ", allowed]),
+            // No billing: the family cannot work without consent, and with
+            // it runs only Hydrogen, on the tier the user should know of.
+            (
+                &Err(NotPaid::Free),
+                false,
+                false,
+                false,
+                &[
+                    "free: the key's project has no billing",
+                    "Hydrogen is refused",
+                    "https://aistudio.google.com/billing",
+                    not_allowed,
+                ],
+            ),
+            (
+                &Err(NotPaid::Free),
+                true,
+                true,
+                true,
+                &[
+                    "free: ",
+                    "Google may use your prompts to improve its products",
+                    allowed,
+                ],
+            ),
+            (
+                &Err(NotPaid::Empty),
+                false,
+                false,
+                false,
+                &["billed-but-empty: ", "402"],
+            ),
+            (
+                &Err(NotPaid::Empty),
+                true,
+                false,
+                false,
+                &["billed-but-empty: ", allowed],
+            ),
+            (
+                &Err(NotPaid::Blocked),
+                false,
+                false,
+                false,
+                &["blocked: ", "403"],
+            ),
+            (
+                &unknown,
+                false,
+                true,
+                true,
+                &["unknown: ", "Google answered 503", not_allowed],
+            ),
+            (
+                &limited,
+                false,
+                true,
+                true,
+                &[
+                    "unknown: the key's billing could not be confirmed",
+                    "429: Resource exhausted",
+                ],
+            ),
+        ] {
+            let check = gemini_billing_check(allow, found);
+            assert_eq!(check.name, "gemini-billing");
+            assert_eq!((check.ok, check.warn), (ok, warn), "{check:?}");
+            for part in parts {
+                assert!(check.detail.contains(part), "{part}: {check:?}");
+            }
+        }
     }
 
     /// What `/health` reports for a service running with `config`.

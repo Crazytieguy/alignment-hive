@@ -20,8 +20,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 
 use crate::config::{
-    Config, GptAuth, GptConfig, MuseMode, OpenAiProvider, ProviderModel, UpstreamConfig,
-    derived_alias,
+    Config, GeminiConfig, GptAuth, GptConfig, MuseMode, OpenAiProvider, ProviderModel,
+    UpstreamConfig, derived_alias,
 };
 use crate::headers::GptUpstreamCredential;
 use crate::state::{Dirs, create_private_dir, load_or_create_secret, write_private_atomic};
@@ -167,6 +167,23 @@ pub struct ChildCredentials {
     /// Which Meta models the child serves, and which relay its Meta logins
     /// carry ([`crate::muse::sync_relay`]).
     pub muse: MuseMode,
+    /// The Gemini family's switch and its AI Studio key.
+    pub gemini: GeminiConfig,
+    #[cfg(test)]
+    pub(crate) test: TestOverrides,
+}
+
+/// What only a test changes about the child it runs.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct TestOverrides {
+    /// A proxy for everything the child sends out (its config's `proxy-url`
+    /// and its environment's), so the test sees where the child tries to
+    /// connect and nothing gets there.
+    pub(crate) proxy_url: Option<String>,
+    /// Where the child sends its Gemini requests instead of Google, past
+    /// the proxy above.
+    pub(crate) gemini_base_url: Option<String>,
 }
 
 impl ChildCredentials {
@@ -176,6 +193,9 @@ impl ChildCredentials {
             providers: config.openai_providers.clone(),
             gpt: config.gpt.clone(),
             muse: config.muse.mode(),
+            gemini: config.gemini.clone(),
+            #[cfg(test)]
+            test: TestOverrides::default(),
         }
     }
 }
@@ -294,6 +314,10 @@ routing:
         empty = yaml_quote(""),
         strategy = yaml_quote("round-robin"),
     );
+    #[cfg(test)]
+    if let Some(proxy_url) = &credentials.test.proxy_url {
+        let _ = writeln!(yaml, "\nproxy-url: {}", yaml_quote(proxy_url));
+    }
     // One `oauth-excluded-models` mapping holds every exclusion: a second
     // key would replace the first. Why each is there, and the logins that
     // can undo one: model-router's exclusions module.
@@ -323,6 +347,7 @@ routing:
             yaml.push_str("    alpha-search: true\n");
         }
     }
+    yaml.push_str(&gemini_key_section(credentials));
     // A model that asked for sub-provider pinning and has none is left out
     // (fail closed: model-not-found beats running unpinned), and a provider
     // with nothing left is left out whole — an empty `models:` list is a
@@ -367,6 +392,37 @@ routing:
     yaml
 }
 
+/// The `gemini-api-key:` section: the AI Studio key with exactly the
+/// built-in Gemini models declared under it
+/// ([`crate::config::GEMINI_MODELS`] says why), each with the levels the
+/// child clamps an effort to. Nothing while `[gemini]` is off or has no key:
+/// the routes then fail, and doctor says why. No `base-url`: the child's
+/// default is Google's API.
+fn gemini_key_section(credentials: &ChildCredentials) -> String {
+    use std::fmt::Write as _;
+    let gemini = &credentials.gemini;
+    let Some(api_key) = gemini.api_key.as_deref().filter(|_| gemini.enabled) else {
+        return String::new();
+    };
+    let mut yaml = String::from("\ngemini-api-key:\n");
+    let _ = writeln!(yaml, "  - api-key: {}", yaml_quote(api_key));
+    #[cfg(test)]
+    if let Some(base_url) = &credentials.test.gemini_base_url {
+        let _ = writeln!(yaml, "    base-url: {}", yaml_quote(base_url));
+        let _ = writeln!(yaml, "    proxy-url: {}", yaml_quote("direct"));
+    }
+    yaml.push_str("    models:\n");
+    for (model, _) in crate::config::GEMINI_MODELS {
+        let _ = writeln!(yaml, "      - name: {}", yaml_quote(model));
+        let _ = writeln!(yaml, "        alias: {}", yaml_quote(model));
+        yaml.push_str("        thinking:\n          levels:\n");
+        for level in crate::config::gemini_thinking_levels(model) {
+            let _ = writeln!(yaml, "            - {}", yaml_quote(level));
+        }
+    }
+    yaml
+}
+
 /// The `payload:` section: the `-ultrafast` twins' rule and the cyber
 /// access rules, which match only a request the router marked, and one rule
 /// per pinned model.
@@ -380,7 +436,8 @@ fn payload_section(pinned: &[(&ProviderModel, &Vec<String>)]) -> String {
     // against it: Claude Code's 32000 would cut long high-effort GPT turns
     // short. Up to 8.0.52 no cap reached them; this keeps it that way.
     // `codex` is the target format of the Codex and xAI executors, `meta`
-    // Meta's.
+    // Meta's. The Gemini translator forwards no cap, which the real-child
+    // test holds each pin to.
     yaml.push_str("  filter:\n    - models:\n");
     for protocol in ["codex", "meta"] {
         let _ = writeln!(yaml, "        - name: {}", yaml_quote("*"));
@@ -441,6 +498,8 @@ pub fn prepare_managed_state(
         upstream_config: dirs.upstream_config_file(),
         auth_dir: dirs.auth_dir(),
         log_file: child_log_path(dirs),
+        #[cfg(test)]
+        test_proxy_url: credentials.test.proxy_url.clone(),
     })
 }
 
@@ -472,6 +531,8 @@ pub struct ManagedPaths {
     pub upstream_config: PathBuf,
     pub auth_dir: PathBuf,
     pub log_file: PathBuf,
+    #[cfg(test)]
+    pub(crate) test_proxy_url: Option<String>,
 }
 
 impl Supervisor {
@@ -1148,6 +1209,16 @@ async fn spawn_child(
         .stdin(Stdio::null())
         .stdout(log_std)
         .stderr(stderr_log);
+    #[cfg(test)]
+    if let Some(proxy_url) = &paths.test_proxy_url {
+        for name in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"] {
+            command.env(name, proxy_url);
+        }
+    }
+    // A test that panics drops its supervisor without shutting it down; the
+    // real child would otherwise outlive the test and its temp dir.
+    #[cfg(test)]
+    command.kill_on_drop(true);
     // New process group so shutdown can kill the child and anything it
     // spawns without touching the router's own group.
     command.process_group(0);
@@ -1202,6 +1273,9 @@ async fn port_in_use(port: u16) -> bool {
         .await
         .is_ok()
 }
+
+#[cfg(test)]
+mod real_child_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1555,6 +1629,65 @@ mod tests {
         );
     }
 
+    fn with_gemini(enabled: bool, api_key: Option<&str>) -> ChildCredentials {
+        ChildCredentials {
+            gemini: GeminiConfig {
+                enabled,
+                api_key: api_key.map(str::to_string),
+                allow_free_tier: false,
+            },
+            ..ChildCredentials::default()
+        }
+    }
+
+    #[test]
+    fn the_gemini_key_is_declared_only_when_enabled_with_a_key_and_only_for_built_in_models() {
+        let mut pointed_elsewhere = with_gemini(true, None);
+        pointed_elsewhere.test.gemini_base_url = Some("http://127.0.0.1:1".to_string());
+        for credentials in [
+            ChildCredentials::default(),
+            with_gemini(true, None),
+            // A key left in secrets.toml after the family was turned off.
+            with_gemini(false, Some("AIza-test")),
+            // A test's stand-in for Google adds to the entry, never makes one.
+            pointed_elsewhere,
+        ] {
+            let yaml = upstream_config_yaml(1, Path::new("/a"), "s", &credentials);
+            let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+            assert!(parsed["gemini-api-key"].is_null(), "{yaml}");
+            assert!(!yaml.contains("AIza-test"), "{yaml}");
+        }
+
+        let yaml = upstream_config_yaml(
+            1,
+            Path::new("/a"),
+            "s",
+            &with_gemini(true, Some("AIza-test")),
+        );
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let entries: serde_json::Value =
+            serde_yaml::from_value(parsed["gemini-api-key"].clone()).unwrap();
+        let levels = serde_json::json!({"levels": ["low", "medium", "high"]});
+        let with_xhigh = serde_json::json!({"levels": ["low", "medium", "high", "xhigh"]});
+        assert_eq!(
+            entries,
+            serde_json::json!([{
+                "api-key": "AIza-test",
+                // No base-url: the child's default is Google's API. The
+                // explicit list is all the key serves.
+                "models": [
+                    {"name": "gemini-4-neon", "alias": "gemini-4-neon", "thinking": with_xhigh},
+                    {"name": "gemini-4-argon", "alias": "gemini-4-argon", "thinking": levels},
+                    {"name": "gemini-4-carbon", "alias": "gemini-4-carbon", "thinking": levels},
+                    {"name": "gemini-4-hydrogen", "alias": "gemini-4-hydrogen",
+                     "thinking": with_xhigh},
+                ],
+            }]),
+            "{yaml}"
+        );
+        assert!(parsed["oauth-excluded-models"]["gemini"].is_null());
+    }
+
     #[test]
     fn pinned_models_get_one_payload_rule_each_and_unpinned_askers_are_left_out() {
         let mut provider = test_provider("openrouter", "glm-5.2");
@@ -1650,6 +1783,7 @@ mod tests {
             provider.models[0].name = value.to_string();
             let mut credentials = with_gpt(GptAuth::ApiKey, Some(value));
             credentials.providers = vec![provider.clone()];
+            credentials.gemini = with_gemini(true, Some(value)).gemini;
             let yaml = upstream_config_yaml(1, std::path::Path::new(value), value, &credentials);
             let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
             assert_eq!(
@@ -1674,6 +1808,11 @@ mod tests {
             );
             assert_eq!(
                 parsed["codex-api-key"][0]["api-key"],
+                serde_yaml::Value::from(value),
+                "{value}"
+            );
+            assert_eq!(
+                parsed["gemini-api-key"][0]["api-key"],
                 serde_yaml::Value::from(value),
                 "{value}"
             );

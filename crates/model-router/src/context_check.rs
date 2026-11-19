@@ -560,6 +560,37 @@ context-window = {window}
     }
 
     #[test]
+    fn gemini_routes_are_clipped_to_the_1m_cap_and_recommended_at_it() {
+        // 1,048,576 real, past Claude Code's largest compaction window:
+        // 1M is what `settings windows` writes for them, as for Muse.
+        let gemini = "[gemini]\nenabled = true\n";
+        let routes: Vec<_> = config(gemini)
+            .effective_models()
+            .filter(|route| route.family == crate::config::ModelFamily::Gemini)
+            .cloned()
+            .collect();
+        assert_eq!(routes.len(), 4);
+        for route in &routes {
+            assert_eq!(recommended_entry(route), Some(MAX_COMPACT_WINDOW));
+        }
+        let check = checked(
+            gemini,
+            EnvSetting::Settings(1_000_000),
+            &setup_settings(None),
+        );
+        assert!(check.ok, "{check:?}");
+        for route in &routes {
+            let model = &route.routing_id;
+            assert!(
+                check
+                    .detail
+                    .contains(&format!("{model} clipped to 1000000 (real 1048576)")),
+                "{check:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_built_in_gpt_routes_overrun_a_1m_declaration_without_per_model_entries() {
         let check = checked("", EnvSetting::Settings(1_000_000), "{}");
         assert!(!check.ok, "{check:?}");

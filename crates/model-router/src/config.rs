@@ -1,10 +1,11 @@
 //! The TOML config and its sibling `secrets.toml`: schema, loading,
 //! validation, and the commented template. Every construction path must end
-//! in [`Config::prepare`], which rebuilds the generated routes (built-in Grok
-//! and Muse, one per `[[openai-providers]]` model, the `-fast` twins) and
-//! enforces the safety invariants, such as loopback-only binding, a loopback
-//! external upstream (the GPT credential boundary) and Muse's Standard mode.
-//! The built-in routes live in [`catalog`].
+//! in [`Config::prepare`], which rebuilds the generated routes (built-in
+//! Grok, Muse and Gemini, one per `[[openai-providers]]` model, the `-fast`
+//! twins) and enforces the safety invariants, such as loopback-only binding,
+//! a loopback external upstream (the GPT credential boundary) and Muse's
+//! Standard mode. The built-in routes live
+//! in [`catalog`].
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
@@ -22,16 +23,19 @@ mod catalog;
 #[cfg(test)]
 pub(crate) use catalog::GPT_CONTEXT_WINDOW;
 pub(crate) use catalog::{
-    CODEX_DEFAULT_CONTEXT_WINDOW, FAST, MUSE_WONDER_FULL, RETIRED_FAST, RETIRED_TWIN_MODELS,
+    CODEX_DEFAULT_CONTEXT_WINDOW, FAST, GEMINI_MODELS, GEMINI_PROBE_FALLBACK_MODEL,
+    GEMINI_PROBE_MODEL, GEMINI_SEARCH_MODEL, MUSE_WONDER_FULL, RETIRED_FAST, RETIRED_TWIN_MODELS,
     RETIRED_ULTRAFAST, SHIPPED_GPT_ROUTES, ULTRAFAST, ULTRAFAST_MODELS, codex_default_window,
-    codex_display_name, fast_twin_id, forces_text_on_compaction, has_fast_tier, is_built_in_route,
-    is_codex_native_model, is_muse_contributor_model, is_retired_gpt_route, names_auto_model,
+    codex_display_name, fast_twin_id, forces_text_on_compaction, gemini_thinking_levels,
+    has_fast_tier, has_gemini_free_tier, is_built_in_route, is_codex_native_model,
+    is_muse_contributor_model, is_retired_gpt_route, names_auto_model, names_gemini_model,
     names_muse_model, names_muse_wonder_full, overflow_dialect, retired_successor,
     shipped_picker_rows, superseded_codex_windows, twin_of,
 };
 use catalog::{
-    GROK_CONTEXT_WINDOW, GROK_MODELS, MUSE_CONTEXT_WINDOW, MUSE_CONTRIBUTOR_SUFFIX, MUSE_MODELS,
-    built_in_routes, default_models, names_claude_model, names_grok_model,
+    GEMINI_CONTEXT_WINDOW, GROK_CONTEXT_WINDOW, GROK_MODELS, MUSE_CONTEXT_WINDOW,
+    MUSE_CONTRIBUTOR_SUFFIX, MUSE_MODELS, built_in_routes, default_models,
+    is_built_in_gemini_model, names_claude_model, names_grok_model,
 };
 
 /// The single supported upstream name: the managed/external `CLIProxyAPI`
@@ -102,6 +106,9 @@ pub enum ModelFamily {
     Grok,
     /// Meta models reached through the child's Meta (Muse Code) OAuth.
     Muse,
+    /// Google models reached with an AI Studio API key in the child's
+    /// config.
+    Gemini,
     /// Routes derived from `[[openai-providers]]`.
     OpenAiCompat,
 }
@@ -113,34 +120,37 @@ impl ModelFamily {
             Self::Gpt => "gpt",
             Self::Grok => "grok",
             Self::Muse => "muse",
+            Self::Gemini => "gemini",
             Self::OpenAiCompat => "openai-compat",
         }
     }
 
     /// Whether requested effort must ride the model ID as `CLIProxyAPI`'s
     /// `model(effort)` suffix (see [`crate::routing::effort_qualified_model`]).
-    /// Only the xAI path drops `output_config.effort`; the Meta path maps it
+    /// The xAI path drops `output_config.effort`; the Meta path maps it
     /// to `reasoning.effort` one to one, `max` included (measured against
-    /// `CLIProxyAPI` 8.0.30).
+    /// `CLIProxyAPI` 8.0.30). The Gemini translator reads the field only
+    /// under adaptive thinking, where the suffix always becomes a
+    /// `thinkingLevel` (the supervisor's real-child test holds it to that).
     ///
     /// Matched exhaustively on purpose: a new family must decide.
     #[must_use]
     pub const fn effort_via_model_suffix(self) -> bool {
         match self {
-            Self::Grok => true,
+            Self::Grok | Self::Gemini => true,
             Self::Gpt | Self::Muse | Self::OpenAiCompat => false,
         }
     }
 
     /// The maker the identity block names ([`crate::identity::identity_text`]),
     /// only where the models misattribute it without one: Muse Wonder said it
-    /// was "created by Muse" in both live identity runs, while GPT and Grok
-    /// name their makers unprompted.
+    /// was "created by Muse" in both live identity runs, while GPT, Grok and
+    /// Gemini name their makers unprompted.
     #[must_use]
     pub const fn maker(self) -> Option<&'static str> {
         match self {
             Self::Muse => Some("Meta"),
-            Self::Gpt | Self::Grok | Self::OpenAiCompat => None,
+            Self::Gpt | Self::Grok | Self::Gemini | Self::OpenAiCompat => None,
         }
     }
 
@@ -153,7 +163,7 @@ impl ModelFamily {
     pub const fn tool_choice_auto_only(self) -> bool {
         match self {
             Self::Muse => true,
-            Self::Gpt | Self::Grok | Self::OpenAiCompat => false,
+            Self::Gpt | Self::Grok | Self::Gemini | Self::OpenAiCompat => false,
         }
     }
 
@@ -162,14 +172,30 @@ impl ModelFamily {
     /// so thinking left unanswered in the history is dropped
     /// ([`crate::reasoning_order`]). Meta documents it as a 400 (not enforced
     /// live on 2026-10-19); the child replays no foreign reasoning to the
-    /// others.
+    /// others. Never Gemini: the child carries a Gemini tool call's thought
+    /// signature in an empty thinking block, and the call's carriers must
+    /// reach it untouched.
     ///
     /// Matched exhaustively on purpose: a new family must decide.
     #[must_use]
     pub const fn rejects_unanswered_reasoning(self) -> bool {
         match self {
             Self::Muse => true,
-            Self::Gpt | Self::Grok | Self::OpenAiCompat => false,
+            Self::Gpt | Self::Grok | Self::Gemini | Self::OpenAiCompat => false,
+        }
+    }
+
+    /// Whether the child streams a reply's text as a content block per
+    /// upstream chunk, which the router joins ([`crate::text_blocks`]). Its
+    /// Gemini translator does (`CLIProxyAPI` 8.0.69); a GPT reply's text
+    /// arrives as one block.
+    ///
+    /// Matched exhaustively on purpose: a new family must decide.
+    #[must_use]
+    pub const fn streams_text_in_pieces(self) -> bool {
+        match self {
+            Self::Gemini => true,
+            Self::Gpt | Self::Grok | Self::Muse | Self::OpenAiCompat => false,
         }
     }
 
@@ -183,7 +209,7 @@ impl ModelFamily {
     pub const fn splits_messages_at_cache_marks(self) -> bool {
         match self {
             Self::Gpt => true,
-            Self::Grok | Self::Muse | Self::OpenAiCompat => false,
+            Self::Grok | Self::Muse | Self::Gemini | Self::OpenAiCompat => false,
         }
     }
 
@@ -194,16 +220,16 @@ impl ModelFamily {
     /// takes the item (the child's Codex translator writes it since 8.0.48),
     /// and from GPT-6.2 drops the reasoning items that precede a change to
     /// `tools`. xAI accepts no such item (the child folds one back into
-    /// `tools`), Meta is unmeasured, and Chat Completions has none. Every
-    /// family has `tool_removal` folded by the router: no translator of the
-    /// child reads it.
+    /// `tools`), Meta is unmeasured, and Chat Completions and Gemini's
+    /// `generateContent` have none. Every family has `tool_removal` folded
+    /// by the router: no translator of the child reads it.
     ///
     /// Matched exhaustively on purpose: a new family must decide.
     #[must_use]
     pub const fn appends_tool_additions(self) -> bool {
         match self {
             Self::Gpt => true,
-            Self::Grok | Self::Muse | Self::OpenAiCompat => false,
+            Self::Grok | Self::Muse | Self::Gemini | Self::OpenAiCompat => false,
         }
     }
 }
@@ -287,6 +313,11 @@ pub struct Config {
     #[serde(default)]
     pub muse: MuseConfig,
 
+    /// Optional Gemini (Google) family, on an AI Studio API key. Disabled
+    /// by default, like `[grok]`.
+    #[serde(default)]
+    pub gemini: GeminiConfig,
+
     /// Optional request/response capture settings.
     #[serde(default)]
     pub capture: CaptureConfig,
@@ -323,9 +354,9 @@ pub struct Config {
     #[serde(skip)]
     pub undeclared_window: Undeclared,
 
-    /// Routes the router generates rather than reads: the built-in Grok and
-    /// Muse families when enabled, one per `[[openai-providers]]` model
-    /// entry, and the `-fast` twins of `models`. Rebuilt by
+    /// Routes the router generates rather than reads: the built-in Grok,
+    /// Muse and Gemini families when enabled, one per `[[openai-providers]]`
+    /// model entry, and the `-fast` twins of `models`. Rebuilt by
     /// [`Config::prepare`], never read from TOML.
     ///
     /// Kept apart from `models` so a deprecated `[[models]]` block, which
@@ -466,6 +497,42 @@ impl MuseMode {
     }
 }
 
+/// The optional Gemini family, on an AI Studio API key. `enabled` gates the
+/// built-in routes, the key entry in the managed child's config and the
+/// doctor check.
+#[derive(Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct GeminiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// The user's consent to Hydrogen running on Google's free tier, where
+    /// Google may use their prompts to improve its products. Off, a
+    /// Hydrogen request goes out only once the key's project is shown to
+    /// have billing ([`crate::gemini_billing`]).
+    #[serde(default)]
+    pub allow_free_tier: bool,
+
+    /// Loaded from `[gemini] api-key` in the sibling `secrets.toml`, never
+    /// from the config file, and only while `enabled`. `None` there means
+    /// the key is missing: the Gemini routes have no credential, and doctor
+    /// says so.
+    #[serde(skip)]
+    pub api_key: Option<String>,
+}
+
+// By hand, so the key never reaches a log or a test failure through `{:?}`.
+impl std::fmt::Debug for GeminiConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GeminiConfig")
+            .field("enabled", &self.enabled)
+            .field("allow_free_tier", &self.allow_free_tier)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct WebSearchConfig {
@@ -474,8 +541,8 @@ pub struct WebSearchConfig {
 }
 
 /// How the router answers Claude Code's `WebSearch` sub-call for GPT and
-/// open-weights agents. A Grok or Muse agent's search always goes to its own
-/// vendor's search, whatever the mode.
+/// open-weights agents. A Grok, Muse or Gemini agent's search always goes to
+/// its own vendor's search, whatever the mode.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum WebSearchMode {
@@ -610,19 +677,23 @@ pub struct OpenAiProvider {
 
 /// `secrets.toml`, sibling of the config file: keeps API keys out of the
 /// freely-editable config. `[openai-providers]` maps provider name to key;
-/// `[gpt] api-key` is the `OpenAI` key for `[gpt] auth = "api-key"`.
+/// `[gpt] api-key` is the `OpenAI` key for `[gpt] auth = "api-key"`, and
+/// `[gemini] api-key` the AI Studio key for `[gemini] enabled = true`.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct SecretsFile {
     #[serde(default)]
     openai_providers: BTreeMap<String, String>,
     #[serde(default)]
-    gpt: GptSecrets,
+    gpt: KeySecret,
+    #[serde(default)]
+    gemini: KeySecret,
 }
 
+/// A secrets section holding one API key.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-struct GptSecrets {
+struct KeySecret {
     api_key: Option<String>,
 }
 
@@ -947,8 +1018,8 @@ fn template_models_section(models: &[ModelRoute]) -> String {
          built-in routes by routing-id:\n# one naming a built-in route changes only the fields \
          it sets, and one with a\n# new routing-id adds a route (upstream-model and \
          display-name required).\n# Fields: upstream-model, display-name, family (\"gpt\", \
-         \"grok\", \"muse\"),\n# context-window, cyber-access (described under [gpt] \
-         below).\n#[[model-overrides]]\n#routing-id = \
+         \"grok\", \"muse\", \"gemini\"),\n# context-window, cyber-access (described under \
+         [gpt] below).\n#[[model-overrides]]\n#routing-id = \
          \"{example}\"\n#display-name = \"{example_name} (custom)\"\n#\n#[[model-overrides]]\n\
          #routing-id = \"my-route\"\n#upstream-model = \"some-model\"\n#display-name = \"My \
          Route\"\n"
@@ -989,6 +1060,23 @@ fn template_muse_section() -> String {
          to Contributor mode, which Meta trains on in\n# exchange for more usage: Muse routes \
          then use the -contributor model IDs\n# and carry Muse Code's Contributor header. \
          Default: false\n#contributor = true\n"
+    )
+}
+
+/// Renders the commented `[gemini]` template section from [`GEMINI_MODELS`],
+/// as [`template_grok_section`] does for Grok.
+fn template_gemini_section() -> String {
+    let routes = template_route_lines(&GEMINI_MODELS, GEMINI_CONTEXT_WINDOW);
+    format!(
+        "# Optional Gemini (Google) family: bills a Google AI Studio API key per token.\n# Off \
+         by default. `model-router set-key gemini` puts the key in secrets.toml.\n# Built-in \
+         routes when enabled:\n{routes}\n#[gemini]\n# Default: false\n#enabled = true\n# \
+         Google also serves gemini-4-hydrogen to a project without billing, on a\n# free tier \
+         where, outside the EEA, Switzerland and the UK, it may use your\n# prompts to improve \
+         its products. Unless allow-free-tier is\n# \
+         set, the router first checks once per run that the\n# key's project has billing (a \
+         short request to a paid-only model, about\n# $0.0005) and refuses Hydrogen \
+         otherwise.\n# Default: false\n#allow-free-tier = true\n"
     )
 }
 
@@ -1042,8 +1130,9 @@ impl Config {
         Ok(config)
     }
 
-    /// Attaches API keys from `secrets.toml` to matching providers, and the
-    /// GPT key under `[gpt] auth = "api-key"`. A missing file or missing entry
+    /// Attaches API keys from `secrets.toml` to matching providers, the GPT
+    /// key under `[gpt] auth = "api-key"`, and the Gemini key under
+    /// `[gemini] enabled = true`. A missing file or missing entry
     /// is not an error (the route runs degraded and doctor/verify-providers
     /// point at it); an unreadable or invalid file is.
     ///
@@ -1052,7 +1141,8 @@ impl Config {
     /// parsed.
     pub fn load_secrets(&mut self, path: &Path) -> anyhow::Result<()> {
         let gpt_key = self.gpt.auth == GptAuth::ApiKey;
-        if (self.openai_providers.is_empty() && !gpt_key) || !path.exists() {
+        let wanted = !self.openai_providers.is_empty() || gpt_key || self.gemini.enabled;
+        if !wanted || !path.exists() {
             return Ok(());
         }
         let contents = std::fs::read_to_string(path)
@@ -1070,6 +1160,9 @@ impl Config {
         }
         if gpt_key {
             self.gpt.api_key = secrets.gpt.api_key;
+        }
+        if self.gemini.enabled {
+            self.gemini.api_key = secrets.gemini.api_key;
         }
         Ok(())
     }
@@ -1196,8 +1289,8 @@ impl Config {
     }
 
     /// Every route the router serves: [`Self::models`] plus the
-    /// generated ones (built-in Grok and Muse, `[[openai-providers]]`, the
-    /// `-fast` twins).
+    /// generated ones (built-in Grok, Muse and Gemini, `[[openai-providers]]`,
+    /// the `-fast` twins).
     pub fn effective_models(&self) -> impl Iterator<Item = &ModelRoute> {
         self.models.iter().chain(self.generated_models.iter())
     }
@@ -1272,8 +1365,9 @@ impl Config {
         Ok(())
     }
 
-    /// Rebuilds every generated route. The Grok and Muse families contribute
-    /// nothing when disabled, so a config that never opts in is unchanged.
+    /// Rebuilds every generated route. The Grok, Muse and Gemini families
+    /// contribute nothing when disabled, so a config that never opts in is
+    /// unchanged.
     /// The `-fast` twins come last, so any other route can claim their IDs.
     fn rebuild_generated_models(&mut self) {
         let derived = self.openai_providers.iter().flat_map(|provider| {
@@ -1315,7 +1409,22 @@ impl Config {
                 routes
             }
         };
-        let mut generated: Vec<ModelRoute> = grok.into_iter().chain(muse).chain(derived).collect();
+        let gemini = if self.gemini.enabled {
+            built_in_routes(
+                &GEMINI_MODELS,
+                ModelFamily::Gemini,
+                GEMINI_CONTEXT_WINDOW,
+                false,
+            )
+        } else {
+            Vec::new()
+        };
+        let mut generated: Vec<ModelRoute> = grok
+            .into_iter()
+            .chain(muse)
+            .chain(gemini)
+            .chain(derived)
+            .collect();
         // A route the user wrote or another generated route under a twin's ID wins.
         let taken = |generated: &[ModelRoute], twin: &ModelRoute| {
             self.models
@@ -1425,16 +1534,19 @@ impl Config {
                 );
             }
             self.validate_muse_guards(route, cliproxy.mode)?;
+            self.validate_gemini_route(route)?;
         }
 
         self.validate_gpt_auth(cliproxy)?;
         self.validate_cyber_access(cliproxy)?;
+        self.validate_gemini(cliproxy)?;
         self.validate_openai_providers(cliproxy)?;
         self.validate_auto_mode_classifier()
     }
 
-    /// An enabled classifier's models must each be a served route or a
-    /// model sent as Codex models are, and each effort and service tier one
+    /// An enabled classifier's models must each be a served route of a
+    /// family other than Gemini or a model sent as Codex models are, and
+    /// each effort and service tier one
     /// `CLIProxyAPI` knows, since a value it rejects fails every call.
     /// Nothing is checked while it is off, and the screen's settings only
     /// with a screen.
@@ -1457,13 +1569,23 @@ impl Config {
         Ok(())
     }
 
-    /// A classifier model that is not a route is sent to the `cliproxy`
-    /// upstream as Codex models are, without any family's guards: so it
-    /// must be one plain model ID, and never `auto` or a Grok or Muse model,
-    /// which only their routes may reach, nor a Claude one (which would
-    /// fail, or spend Claude quota through `CLIProxyAPI`).
+    /// A classifier model may be any route but a Gemini one, which nobody
+    /// has measured as a classifier. (A Gemini session's calls are judged
+    /// like any other, by the configured judge.)
+    ///
+    /// One that is not a route is sent to the `cliproxy` upstream as Codex
+    /// models are, without any family's guards: so it must be one plain
+    /// model ID, and never `auto` or a Grok, Muse or Gemini model, nor a
+    /// Claude one (which would fail, or spend Claude quota through
+    /// `CLIProxyAPI`).
     fn validate_classifier_model(&self, key: &str, model: &str) -> anyhow::Result<()> {
-        if self.route(model).is_some() {
+        if let Some(route) = self.route(model) {
+            ensure!(
+                route.family != ModelFamily::Gemini,
+                "[auto-mode-classifier] {key} {model:?} is a Gemini route, and Gemini has not \
+                 been evaluated as a classifier; name a route of another family, for example \
+                 \"{AUTO_MODE_DEFAULT_MODEL}\""
+            );
             return Ok(());
         }
         ensure!(
@@ -1477,6 +1599,7 @@ impl Config {
                 && !names_muse_model(model)
                 && !is_muse_contributor_model(model)
                 && !names_grok_model(model)
+                && !names_gemini_model(model)
                 && !names_claude_model(model),
             "[auto-mode-classifier] {key} {model:?} is not a configured route, and only GPT \
              models may be named directly; name the route that serves it (for example \
@@ -1531,6 +1654,68 @@ impl Config {
                 route.routing_id
             );
         }
+        Ok(())
+    }
+
+    /// `[gemini]` needs the upstream the router manages, which it gives the
+    /// key.
+    fn validate_gemini(&self, cliproxy: &UpstreamConfig) -> anyhow::Result<()> {
+        if !self.gemini.enabled {
+            return Ok(());
+        }
+        ensure!(
+            cliproxy.mode != UpstreamMode::External,
+            "[gemini] enabled = true requires [upstreams.{CLIPROXY_UPSTREAM}] mode = \"managed\": \
+             the managed CLIProxyAPI is given the key"
+        );
+        if let Some(api_key) = &self.gemini.api_key {
+            ensure!(
+                !api_key.trim().is_empty(),
+                "[gemini] api-key in secrets.toml is empty"
+            );
+        }
+        Ok(())
+    }
+
+    /// A Gemini model only on a Gemini-family route, so the family's stream
+    /// handling, search and Hydrogen billing gate apply, and that route
+    /// only with `[gemini]` on and to one of the built-in models, the only
+    /// ones the child's key entry declares. Never `auto` while it is on:
+    /// the child resolves `auto` to whichever model is newest, so a Hydrogen
+    /// request could leave named `auto` and pass the gate unchecked.
+    fn validate_gemini_route(&self, route: &ModelRoute) -> anyhow::Result<()> {
+        ensure!(
+            !self.gemini.enabled || !names_auto_model(&route.upstream_model),
+            "model {} routes to {:?}, which CLIProxyAPI resolves to whichever model is newest, \
+             a Gemini one included; name the upstream model",
+            route.routing_id,
+            route.upstream_model
+        );
+        if route.family != ModelFamily::Gemini {
+            ensure!(
+                !names_gemini_model(&route.upstream_model),
+                "model {} routes to Google's {:?} but declares family = {:?}; set family = \
+                 \"gemini\" so the Gemini family's handling applies",
+                route.routing_id,
+                route.upstream_model,
+                route.family.as_str()
+            );
+            return Ok(());
+        }
+        ensure!(
+            self.gemini.enabled,
+            "model {} declares family = \"gemini\" but [gemini] is not enabled; set [gemini] \
+             enabled = true",
+            route.routing_id
+        );
+        ensure!(
+            is_built_in_gemini_model(&route.upstream_model),
+            "model {} routes to {:?}, which is not a built-in Gemini model; the Gemini API key \
+             serves only {}",
+            route.routing_id,
+            route.upstream_model,
+            GEMINI_MODELS.map(|(model, _)| model).join(", ")
+        );
         Ok(())
     }
 
@@ -1753,7 +1938,8 @@ impl Config {
 # fallback when the alpha call fails). "off" disables all of it (GPT-session
 # searches become slow and Claude Code shows "No links found."). Grok and
 # Muse searches stay with their vendor even under "off"; only disabling
-# the family stops them.
+# the family stops them. A Gemini agent's searches go to Google Search
+# grounding on the Gemini key, under any mode.
 #[web-search]
 # Default: "alpha"
 #mode = "alpha"
@@ -1798,6 +1984,7 @@ impl Config {
 
 {grok}
 {muse}
+{gemini}
 # Experimental, off by default. In auto mode, once a session has a routed
 # reply with tool calls, Claude Code checks those calls and every later one
 # with Sonnet on your Claude plan. With this on, the router checks routed
@@ -1808,7 +1995,8 @@ impl Config {
 #[auto-mode-classifier]
 # Default: false
 #enabled = true
-# The judge: a routing ID, or a GPT model CLIProxyAPI serves without one.
+# The judge: a routing ID (not a Gemini one), or a GPT model CLIProxyAPI
+# serves without one.
 # Default: "{auto_mode_model}"
 #model = "{auto_mode_model}"
 # Default: "{auto_mode_effort}"
@@ -1848,6 +2036,7 @@ impl Config {
             providers = TEMPLATE_PROVIDERS_SECTION,
             grok = template_grok_section(),
             muse = template_muse_section(),
+            gemini = template_gemini_section(),
             auto_mode_model = AUTO_MODE_DEFAULT_MODEL,
             auto_mode_screen = AUTO_MODE_DEFAULT_SCREEN_MODEL,
             auto_mode_effort = AUTO_MODE_DEFAULT_EFFORT,
@@ -2234,7 +2423,10 @@ mod tests {
             "[muse]\nenabled = true\nnope = 1",
             // The deprecated Grok scaling key never existed for Muse.
             "[muse]\nenabled = true\ncontext-window-scaling = true",
-            "[[models]]\nrouting-id = \"a\"\nupstream-model = \"m\"\ndisplay-name = \"A\"\nfamily = \"gemini\"",
+            "[[models]]\nrouting-id = \"a\"\nupstream-model = \"m\"\ndisplay-name = \"A\"\nfamily = \"claude\"",
+            // The key lives in secrets.toml only.
+            "[gemini]\nenabled = true\napi-key = \"k\"",
+            "[gemini]\nenabled = true\nnope = 1",
         ] {
             assert!(
                 toml::from_str::<Config>(source).is_err(),
@@ -2750,7 +2942,7 @@ mod tests {
     fn overflow_translation_is_armed_for_built_in_models_only() {
         use crate::overflow::OverflowDialect;
         let config = parse_and_prepare(&format!(
-            "{}[grok]\nenabled = true\n[muse]\nenabled = true\n",
+            "{}[grok]\nenabled = true\n[muse]\nenabled = true\n[gemini]\nenabled = true\n",
             kimi_toml("")
         ));
         let dialect = |routing_id: &str| overflow_dialect(route(&config, routing_id));
@@ -2758,6 +2950,8 @@ mod tests {
         assert_eq!(dialect("grok-4.5"), Some(OverflowDialect::Xai));
         assert_eq!(dialect("muse-wonder-1.0"), Some(OverflowDialect::Meta));
         assert_eq!(dialect("muse-wonder-full-1.0"), Some(OverflowDialect::Meta));
+        assert_eq!(dialect("gemini-4-argon"), Some(OverflowDialect::Gemini));
+        assert_eq!(dialect("gemini-4-carbon"), Some(OverflowDialect::Gemini));
         assert_eq!(dialect("kimi-k3"), None);
         // A hand-written route inherits the family but not the verified backend.
         let hand_written = parse_and_prepare(
@@ -2901,11 +3095,12 @@ mod tests {
     }
 
     #[test]
-    fn only_grok_takes_effort_in_the_model_id() {
+    fn only_grok_and_gemini_take_effort_in_the_model_id() {
         for (family, suffix) in [
             (ModelFamily::Gpt, false),
             (ModelFamily::Grok, true),
             (ModelFamily::Muse, false),
+            (ModelFamily::Gemini, true),
             (ModelFamily::OpenAiCompat, false),
         ] {
             assert_eq!(family.effort_via_model_suffix(), suffix, "{family:?}");
@@ -3185,12 +3380,228 @@ mod tests {
             "muse-wonder-1.0",
             "muse-wonder-full-1.0",
             "muse-wonder-1.0(high)",
+            "gemini-4-argon",
+            "gemini-4-carbon(low)",
+            "gemini-4-neon",
+            "gemini-4-hydrogen(xhigh)",
         ] {
             assert!(is_built_in_route(model), "{model}");
         }
-        for model in ["opus", "kimi-k3", "muse-wonder-1.0-contributor", ""] {
+        for model in [
+            "opus",
+            "kimi-k3",
+            "muse-wonder-1.0-contributor",
+            "gemini-3.8-flash",
+            "",
+        ] {
             assert!(!is_built_in_route(model), "{model}");
         }
+    }
+
+    const GEMINI_ON: &str = "[gemini]\nenabled = true\n";
+    const EXTERNAL: &str =
+        "[upstreams.cliproxy]\nmode = \"external\"\nbase-url = \"http://127.0.0.1:8317\"\n";
+
+    /// A `[[model-overrides]]` entry adding the route `r` to `model`.
+    fn override_route(model: &str, family: Option<&str>) -> String {
+        let family = family.map_or_default(|family| format!("family = {family:?}\n"));
+        format!(
+            "[[model-overrides]]\nrouting-id = \"r\"\nupstream-model = {model:?}\n\
+             display-name = \"R\"\n{family}\n"
+        )
+    }
+
+    #[test]
+    fn gemini_routes_exist_only_when_enabled_and_survive_a_hand_written_models_block() {
+        for source in ["", "[gemini]\nenabled = false\n"] {
+            let config = parse_and_prepare(source);
+            assert!(!config.gemini.enabled);
+            assert!(
+                !config
+                    .effective_models()
+                    .any(|r| r.family == ModelFamily::Gemini),
+                "{source:?}"
+            );
+        }
+        let config = parse_and_prepare(&format!(
+            "[[models]]\nrouting-id = \"mine\"\nupstream-model = \"m\"\ndisplay-name = \"M\"\n\n\
+             {GEMINI_ON}"
+        ));
+        assert_eq!(config.models.len(), 1);
+        for (model, display_name) in GEMINI_MODELS {
+            let route = route(&config, model);
+            assert_eq!(route.family, ModelFamily::Gemini);
+            assert_eq!(route.upstream_model, model);
+            assert_eq!(route.display_name, display_name);
+            assert_eq!(route.context_window, Some(1_048_576));
+            assert_eq!(route.usage_scale, None);
+            // No twin, no forced text on compaction, no maker in the
+            // identity block.
+            assert!(!has_fast_tier(route));
+            assert!(!forces_text_on_compaction(route));
+            assert_eq!(route.family.maker(), None);
+        }
+        // Neon leads; Hydrogen is the one route with a free tier, and no
+        // other free-tier model has a route.
+        assert_eq!(
+            GEMINI_MODELS.map(|(model, _)| model),
+            [
+                "gemini-4-neon",
+                "gemini-4-argon",
+                "gemini-4-carbon",
+                "gemini-4-hydrogen"
+            ]
+        );
+        for (model, free_tier, levels) in [
+            ("gemini-4-argon", false, 3),
+            ("gemini-4-carbon(low)", false, 3),
+            ("gemini-4-neon", false, 4),
+            ("gemini-4-hydrogen", true, 4),
+            ("gemini-4-hydrogen(high)", true, 4),
+        ] {
+            assert_eq!(has_gemini_free_tier(model), free_tier, "{model}");
+            let model = split_effort_suffix(model).0;
+            assert_eq!(gemini_thinking_levels(model).len(), levels, "{model}");
+        }
+        for model in ["gemini-4-neon", "gemini-4-hydrogen"] {
+            assert_eq!(gemini_thinking_levels(model).last(), Some(&"xhigh"));
+        }
+        for probed in [GEMINI_PROBE_MODEL, GEMINI_PROBE_FALLBACK_MODEL] {
+            assert!(!has_gemini_free_tier(probed));
+            assert!(config.route(probed).is_some());
+        }
+        assert_ne!(GEMINI_PROBE_MODEL, GEMINI_PROBE_FALLBACK_MODEL);
+        assert!(config.route("gemini-3.8-flash").is_none());
+        assert_eq!(ModelFamily::Gemini.as_str(), "gemini");
+    }
+
+    #[test]
+    fn the_free_tier_is_allowed_only_by_its_own_setting() {
+        assert!(!parse_and_prepare(GEMINI_ON).gemini.allow_free_tier);
+        let allowed = parse_and_prepare(&format!("{GEMINI_ON}allow-free-tier = true\n"));
+        assert!(allowed.gemini.allow_free_tier);
+        assert!(format!("{:?}", allowed.gemini).contains("allow_free_tier: true"));
+        // The template explains the setting and leaves it off.
+        let template = Config::template();
+        assert!(template.contains("# Default: false\n#allow-free-tier = true\n"));
+        assert!(!parse_and_prepare(&template).gemini.allow_free_tier);
+        let uncommented = template
+            .replace("#[gemini]\n", "[gemini]\n")
+            .replace("#allow-free-tier = true\n", "allow-free-tier = true\n");
+        assert!(
+            toml::from_str::<Config>(&uncommented)
+                .unwrap()
+                .gemini
+                .allow_free_tier
+        );
+    }
+
+    #[test]
+    fn the_gemini_key_loads_only_while_enabled_and_never_shows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let secrets = path.with_file_name("secrets.toml");
+        std::fs::write(&secrets, "[gemini]\napi-key = \"AIza-live\"\n").unwrap();
+
+        // Off (the default) never reads the key.
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(Config::load(&path).unwrap().gemini.api_key, None);
+
+        std::fs::write(&path, GEMINI_ON).unwrap();
+        let config = Config::load(&path).unwrap();
+        assert!(config.gemini.enabled);
+        assert_eq!(config.gemini.api_key.as_deref(), Some("AIza-live"));
+        let shown = format!("{config:?} {:?}", config.gemini);
+        assert!(!shown.contains("AIza-live"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+
+        // A missing key loads (doctor reports it); an empty one is an error.
+        std::fs::remove_file(&secrets).unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.gemini.api_key, None);
+        assert!(config.route("gemini-4-argon").is_some());
+        for empty in ["", "  "] {
+            std::fs::write(&secrets, format!("[gemini]\napi-key = {empty:?}\n")).unwrap();
+            let error = Config::load(&path).unwrap_err().to_string();
+            assert!(error.contains("[gemini] api-key"), "{error}");
+        }
+        // The key belongs in secrets.toml, and the template says so without
+        // holding one.
+        assert!(toml::from_str::<Config>("[gemini]\napi-key = \"AIza-inline\"\n").is_err());
+        let template = Config::template();
+        assert!(template.contains("#[gemini]\n# Default: false\n#enabled = true\n"));
+        assert!(template.contains("#   gemini-4-argon (1048576 tokens)"));
+        assert!(template.contains("secrets.toml"));
+        assert!(!template.contains("AIza"));
+        assert!(!parse_and_prepare(&template).gemini.enabled);
+    }
+
+    #[test]
+    fn gemini_requires_the_managed_upstream() {
+        let error = prepare_error(&format!("{GEMINI_ON}{EXTERNAL}"));
+        assert!(
+            error.contains("[gemini] enabled = true requires"),
+            "{error}"
+        );
+        assert!(error.contains("managed"), "{error}");
+        parse_and_prepare(GEMINI_ON);
+    }
+
+    #[test]
+    fn a_gemini_model_needs_a_gemini_route_and_auto_waits_for_gemini_off() {
+        for model in ["gemini-4-argon", "google/GEMINI-4-hydrogen(low)"] {
+            for family in [None, Some("gpt")] {
+                let error = prepare_error(&format!("{}{GEMINI_ON}", override_route(model, family)));
+                assert!(error.contains("set family = \"gemini\""), "{error}");
+            }
+        }
+        let error = prepare_error(&format!("{}{GEMINI_ON}", override_route("auto", None)));
+        assert!(error.contains("a Gemini one included"), "{error}");
+        parse_and_prepare(&override_route("auto", None));
+    }
+
+    #[test]
+    fn a_gemini_family_route_needs_gemini_enabled() {
+        for settings in ["", EXTERNAL] {
+            let error = prepare_error(&format!(
+                "{}{settings}",
+                override_route("gemini-4-argon", Some("gemini"))
+            ));
+            assert!(error.contains("[gemini] is not enabled"), "{error}");
+        }
+        let config = parse_and_prepare(&format!(
+            "{}{GEMINI_ON}",
+            override_route("gemini-4-carbon(low)", Some("gemini"))
+        ));
+        assert_eq!(route(&config, "r").family, ModelFamily::Gemini);
+    }
+
+    #[test]
+    fn a_gemini_route_names_a_built_in_model() {
+        for model in [
+            "gemini-3.8-flash",
+            "google/gemini-4-argon",
+            "Gemini-4-Argon",
+            "gpt-6-luna",
+        ] {
+            let error = prepare_error(&format!(
+                "{}{GEMINI_ON}",
+                override_route(model, Some("gemini"))
+            ));
+            assert!(
+                error.contains("not a built-in Gemini model")
+                    && error.contains(
+                        "gemini-4-neon, gemini-4-argon, gemini-4-carbon, gemini-4-hydrogen"
+                    ),
+                "{model}: {error}"
+            );
+        }
+        // A hand-written route to Hydrogen is as gated as the built-in one.
+        let config = parse_and_prepare(&format!(
+            "{}{GEMINI_ON}",
+            override_route("gemini-4-hydrogen(low)", Some("gemini"))
+        ));
+        assert!(has_gemini_free_tier(&route(&config, "r").upstream_model));
     }
 
     #[test]
@@ -3471,6 +3882,82 @@ mod tests {
             .join("\n");
         let config = parse_and_prepare(&section);
         assert!(config.auto_mode_classifier.enabled, "{section}");
+    }
+
+    /// The classifier never runs on Gemini, which nobody has evaluated as a
+    /// classifier: a Gemini route is refused by name. And a model that is
+    /// no route goes to the child as a GPT model would, past every route
+    /// guard, so a Gemini model can't be named that way either.
+    #[test]
+    fn the_auto_mode_classifier_never_reaches_a_gemini_model() {
+        let classifier = |settings: &str, key: &str, model: &str| {
+            format!("{settings}[auto-mode-classifier]\nenabled = true\n{key} = {model:?}\n")
+        };
+        for key in ["model", "screen-model"] {
+            // With `[gemini]` off, and on an external upstream, where no
+            // Gemini route can exist.
+            for settings in ["", EXTERNAL] {
+                for model in [
+                    "gemini-4-argon",
+                    "gemini-4-carbon",
+                    "gemini-4-hydrogen",
+                    "google/gemini-4-argon",
+                    "models/gemini-3.8-flash",
+                    "Gemini-4-Argon",
+                    "GEMINI-4-ARGON",
+                ] {
+                    let error = prepare_error(&classifier(settings, key, model));
+                    assert!(
+                        error.contains(key) && error.contains("only GPT models may be named"),
+                        "{settings:?} {key} {model}: {error}"
+                    );
+                }
+                // Padded, it is no model ID at all.
+                for model in [" gemini-4-argon", "gemini-4-argon ", "gemini-4-argon(high)"] {
+                    let error = prepare_error(&classifier(settings, key, model));
+                    assert!(error.contains(key), "{settings:?} {key} {model}: {error}");
+                }
+            }
+            // Enabled, the built-in routes are refused as Gemini routes,
+            // as is a route of the user's own to one of their models.
+            let own_route = format!(
+                "{GEMINI_ON}[[model-overrides]]\nrouting-id = \"writer\"\nupstream-model = \
+                 \"gemini-4-carbon\"\ndisplay-name = \"Writer\"\nfamily = \"gemini\"\n"
+            );
+            for (settings, model) in GEMINI_MODELS
+                .map(|(model, _)| (GEMINI_ON, model))
+                .into_iter()
+                .chain([(own_route.as_str(), "writer")])
+            {
+                let error = prepare_error(&classifier(settings, key, model));
+                assert_eq!(
+                    error,
+                    format!(
+                        "[auto-mode-classifier] {key} {model:?} is a Gemini route, and Gemini \
+                         has not been evaluated as a classifier; name a route of another \
+                         family, for example \"gpt-6.1-sol\""
+                    )
+                );
+            }
+            // Off, the section is not validated; a route of another family
+            // passes beside `[gemini]`.
+            parse_and_prepare(&format!(
+                "{GEMINI_ON}[auto-mode-classifier]\n{key} = \"gemini-4-hydrogen\"\n"
+            ));
+            parse_and_prepare(&classifier(GEMINI_ON, key, "gpt-6-luna"));
+            // Every other spelling is still refused.
+            for model in [
+                "gemini-3.8-flash",
+                "google/gemini-4-argon",
+                "Gemini-4-Argon",
+            ] {
+                let error = prepare_error(&classifier(GEMINI_ON, key, model));
+                assert!(
+                    error.contains("only GPT models may be named"),
+                    "{key} {model}: {error}"
+                );
+            }
+        }
     }
 
     /// `CLIProxyAPI` answers an effort it does not know with a 400 and drops

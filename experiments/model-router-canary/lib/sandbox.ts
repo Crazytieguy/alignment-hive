@@ -17,9 +17,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { childEnv, http, LIVE_AUTH_DIR, LIVE_ROUTER_PORT, portFree, routerBinary, run, SANDBOXES, sleep, stamp } from './env';
+import { childEnv, http, LIVE, LIVE_AUTH_DIR, LIVE_ROUTER_PORT, portFree, routerBinary, run, SANDBOXES, sleep, stamp } from './env';
 import type { Check, Recorder, RouterTarget, Status } from './report';
-import { liveTarget } from './probes';
+import { liveTarget, parseMiniToml } from './probes';
 import { pinnedVersion } from './upstream';
 
 export type SandboxSpec = {
@@ -34,7 +34,15 @@ export type SandboxSpec = {
   files?: Array<string>;
   /** The Grok and Muse logins to copy, without what renews them, and the families to turn on with them. */
   family?: FamilyLogins;
+  /** The live install's Gemini use (`geminiKeyPrecheck()`): the key goes in the sandbox's secrets.toml, with `[gemini]` turned on. */
+  gemini?: GeminiUse;
 };
+
+/**
+ * The live install's Gemini API key and its `[gemini] allow-free-tier`. A sandbox copies the setting so that it
+ * serves or refuses Hydrogen as the live router does, to a key whose project has no billing.
+ */
+export type GeminiUse = { key: string; allowFreeTier: boolean };
 
 export type FamilyLogins = { files: Array<string>; grok: boolean; muse: boolean; detail: string };
 
@@ -209,10 +217,42 @@ export function copyFamilyLogins(files: Array<string>, destDir: string): void {
   }
 }
 
-/** The sandbox's config.toml: its two ports, and grok and muse only when it has their logins (off in config.rs defaults). */
-export function renderConfigToml(routerPort: number, childPort: number, family: { grok?: boolean; muse?: boolean } = {}): string {
+/**
+ * The sandbox's config.toml: its two ports, and grok, muse and gemini only when it has their logins or key (off in
+ * config.rs defaults).
+ */
+export function renderConfigToml(
+  routerPort: number,
+  childPort: number,
+  family: { grok?: boolean; muse?: boolean; gemini?: boolean; geminiFreeTier?: boolean } = {},
+): string {
   const on = (name: string, enabled?: boolean): string => (enabled ? `\n[${name}]\nenabled = true\n` : '');
-  return `# model-router canary sandbox; deleted when the sandbox stops.\nport = ${routerPort}\n\n[upstreams.cliproxy]\nport = ${childPort}\n${on('grok', family.grok)}${on('muse', family.muse)}`;
+  const freeTier = family.gemini && family.geminiFreeTier ? 'allow-free-tier = true\n' : '';
+  return `# model-router canary sandbox; deleted when the sandbox stops.\nport = ${routerPort}\n\n[upstreams.cliproxy]\nport = ${childPort}\n${on('grok', family.grok)}${on('muse', family.muse)}${on('gemini', family.gemini)}${freeTier}`;
+}
+
+/**
+ * The live install's Gemini use, when its config turns `[gemini]` on and its secrets.toml holds a key. A router
+ * that loads `[gemini]` is one that knows the family, and the sandboxes run that same router version. Unlike a
+ * login, an API key renews nothing, so the sandbox gets it whole; what it sends is billed to the key.
+ */
+export function geminiKeyPrecheck(configDir = LIVE.config): GeminiUse | undefined {
+  const section = (name: string): Record<string, unknown> | undefined => {
+    const file = join(configDir, name);
+    return existsSync(file) ? parseMiniToml(readFileSync(file, 'utf8')).sections.gemini : undefined;
+  };
+  const config = section('config.toml');
+  if (config?.enabled !== true) return undefined;
+  const key = section('secrets.toml')?.['api-key'];
+  if (typeof key !== 'string') return undefined;
+  // parseMiniToml reads basic strings; a literal one comes back with its quotes.
+  const bare = key.replace(/^'(.*)'$/, '$1').trim();
+  return bare ? { key: bare, allowFreeTier: config['allow-free-tier'] === true } : undefined;
+}
+
+/** The sandbox's secrets.toml, holding the Gemini API key alone. */
+export function renderSecretsToml(geminiKey: string): string {
+  return `[gemini]\napi-key = ${JSON.stringify(geminiKey)}\n`;
 }
 
 /** Ports a sandbox must never take, even while free: the live router's and its child's, so a live restart can't collide. */
@@ -394,7 +434,13 @@ export async function startSandbox(spec: SandboxSpec, rec: Recorder): Promise<Sa
   const cache = join(xdg.XDG_CACHE_HOME, 'model-router');
   for (const d of [config, state, cache]) mkdirSync(d, { recursive: true, mode: 0o700 });
   const configFile = join(config, 'config.toml');
-  writeFileSync(configFile, renderConfigToml(spec.routerPort, spec.childPort, spec.family));
+  writeFileSync(configFile, renderConfigToml(spec.routerPort, spec.childPort, { ...spec.family, gemini: Boolean(spec.gemini), geminiFreeTier: spec.gemini?.allowFreeTier }));
+  if (spec.gemini) {
+    // Beside the config, where the router reads it; deleted with the sandbox root.
+    const secretsFile = join(config, 'secrets.toml');
+    writeFileSync(secretsFile, renderSecretsToml(spec.gemini.key), { mode: 0o600 });
+    chmodSync(secretsFile, 0o600);
+  }
   const logFile = join(root, 'router.log');
   const cpaLogFile = join(state, 'logs/cliproxyapi.log');
   const childRecordFile = join(state, 'cliproxyapi-child.json');

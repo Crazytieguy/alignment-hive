@@ -20,10 +20,13 @@
 //!   ([`NativeSearch`]). That path is strict — a search that cannot be
 //!   performed is reported as a failed search rather than quietly answered by
 //!   another vendor.
+//! - Gemini origins: Google Search grounding on the user's own key, through
+//!   the child ([`grounding`]), as strictly.
 
 use bytes::Bytes;
 use serde_json::{Value, json};
 
+pub mod grounding;
 mod native;
 mod origin;
 
@@ -191,37 +194,49 @@ impl NativeSearch {
     }
 }
 
-/// The family's own search, or `None` for the families searched through
-/// Codex's `/v1/alpha/search` (with the LLM scrape path as fallback).
+/// How a family's searches are answered when it keeps them to itself: no
+/// Codex search, no scrape, no Anthropic, whatever `[web-search] mode` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnSearch {
+    /// By the vendor's hosted search.
+    Native(NativeSearch),
+    /// By Google Search grounding on the Gemini key ([`grounding`]).
+    GoogleGrounding,
+}
+
+/// The family's own handling of its searches, or `None` for the families
+/// searched through Codex's `/v1/alpha/search` (with the LLM scrape path as
+/// fallback).
 ///
 /// Matched exhaustively on purpose: a new family must decide which backend it
 /// belongs to rather than silently inheriting the Codex one.
 #[must_use]
-pub const fn native_search(family: crate::config::ModelFamily) -> Option<NativeSearch> {
+pub const fn own_search(family: crate::config::ModelFamily) -> Option<OwnSearch> {
     use crate::config::ModelFamily;
     match family {
         ModelFamily::Gpt | ModelFamily::OpenAiCompat => None,
-        ModelFamily::Grok => Some(NativeSearch::Xai),
-        ModelFamily::Muse => Some(NativeSearch::Meta),
+        ModelFamily::Grok => Some(OwnSearch::Native(NativeSearch::Xai)),
+        ModelFamily::Muse => Some(OwnSearch::Native(NativeSearch::Meta)),
+        ModelFamily::Gemini => Some(OwnSearch::GoogleGrounding),
     }
 }
 
-/// The route whose family sends this sub-call to its own vendor's search,
-/// with that search, if any. Keyed off the origin, never the carrier: the
+/// The route whose family keeps this sub-call to itself, with how it is
+/// answered, if any. Keyed off the origin, never the carrier: the
 /// carrying request's model is the harness's small-fast pick, not the
 /// requesting agent's choice. Only with no correlation at all does the
 /// carrier decide.
-pub fn native_search_route<'a>(
+pub fn own_search_route<'a>(
     origin: Option<&Origin>,
     carrier: &'a crate::config::ModelRoute,
     lookup: impl FnOnce(&str) -> Option<&'a crate::config::ModelRoute>,
-) -> Option<(&'a crate::config::ModelRoute, NativeSearch)> {
+) -> Option<(&'a crate::config::ModelRoute, OwnSearch)> {
     let route = match origin {
         Some(Origin::Gpt { routing_id }) => lookup(routing_id)?,
         Some(Origin::Claude { .. }) => return None,
         None => carrier,
     };
-    native_search(route.family).map(|native| (route, native))
+    own_search(route.family).map(|own| (route, own))
 }
 
 /// The Codex slug the alpha-search backend is addressed with when the
@@ -1757,14 +1772,14 @@ mod tests {
     }
 
     #[test]
-    fn native_search_route_is_decided_by_the_origin_never_the_carrier() {
+    fn own_search_route_is_decided_by_the_origin_never_the_carrier() {
         use crate::config::{ModelFamily, ModelRoute};
         fn resolve<'a>(
             known: &'a [ModelRoute],
             origin: Option<&Origin>,
             carrier: &'a ModelRoute,
         ) -> Option<String> {
-            native_search_route(origin, carrier, |routing_id| {
+            own_search_route(origin, carrier, |routing_id| {
                 known.iter().find(|route| route.routing_id == routing_id)
             })
             .map(|(route, _)| route.routing_id.clone())
@@ -1778,8 +1793,9 @@ mod tests {
             route("grok-4.5", ModelFamily::Grok),
             route("gpt-5.6-sol", ModelFamily::Gpt),
             route("muse-wonder-1.0", ModelFamily::Muse),
+            route("gemini-4-argon", ModelFamily::Gemini),
         ];
-        let (grok, gpt, muse) = (&known[0], &known[1], &known[2]);
+        let (grok, gpt, muse, gemini) = (&known[0], &known[1], &known[2], &known[3]);
         let resolve = |origin: Option<Origin>, carrier| resolve(&known, origin.as_ref(), carrier);
         let gpt_origin = |routing_id: &str| {
             Some(Origin::Gpt {
@@ -1798,10 +1814,20 @@ mod tests {
             resolve(gpt_origin("muse-wonder-1.0"), grok),
             is("muse-wonder-1.0")
         );
+        // A Gemini origin's search is Google's, and as much its own.
+        assert_eq!(
+            resolve(gpt_origin("gemini-4-argon"), gpt),
+            is("gemini-4-argon")
+        );
+        assert_eq!(
+            resolve(gpt_origin("gemini-4-argon"), grok),
+            is("gemini-4-argon")
+        );
         // A GPT origin never does — not even on a Grok carrier, and the
         // carrier's own arguments are left to the existing arms.
         assert_eq!(resolve(gpt_origin("gpt-5.6-sol"), grok), None);
         assert_eq!(resolve(gpt_origin("gpt-5.6-sol"), muse), None);
+        assert_eq!(resolve(gpt_origin("gpt-5.6-sol"), gemini), None);
         // An origin whose route has left the config inherits nothing.
         assert_eq!(resolve(gpt_origin("vanished"), grok), None);
         // A Claude origin never reaches xAI, even carried by a Grok route
@@ -1827,19 +1853,30 @@ mod tests {
         // With no correlation, the carrier is the only signal there is.
         assert_eq!(resolve(None, grok), is("grok-4.5"));
         assert_eq!(resolve(None, muse), is("muse-wonder-1.0"));
+        assert_eq!(resolve(None, gemini), is("gemini-4-argon"));
         assert_eq!(resolve(None, gpt), None);
     }
 
     #[test]
-    fn grok_and_muse_searches_stay_with_their_own_vendor() {
+    fn grok_muse_and_gemini_searches_stay_with_their_own_vendor() {
         use crate::config::ModelFamily;
         for (family, native) in [
             (ModelFamily::Gpt, None),
             (ModelFamily::OpenAiCompat, None),
-            (ModelFamily::Grok, Some(NativeSearch::Xai)),
-            (ModelFamily::Muse, Some(NativeSearch::Meta)),
+            (
+                ModelFamily::Grok,
+                Some(OwnSearch::Native(NativeSearch::Xai)),
+            ),
+            (
+                ModelFamily::Muse,
+                Some(OwnSearch::Native(NativeSearch::Meta)),
+            ),
         ] {
-            assert_eq!(native_search(family), native, "{family:?}");
+            assert_eq!(own_search(family), native, "{family:?}");
         }
+        assert_eq!(
+            own_search(ModelFamily::Gemini),
+            Some(OwnSearch::GoogleGrounding)
+        );
     }
 }

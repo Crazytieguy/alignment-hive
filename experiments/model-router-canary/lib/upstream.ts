@@ -239,6 +239,7 @@ export function routerYamlKeys(supervisorRs: string): Array<string> {
   // The function and the helpers that render its sections.
   const fns = [
     'pub fn upstream_config_yaml(',
+    'fn gemini_key_section(',
     'fn payload_section(',
     'fn ultrafast_payload_rule(',
     'fn cyber_access_payload_rules(',

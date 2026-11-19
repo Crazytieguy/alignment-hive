@@ -33,7 +33,7 @@ pub struct DomainPolicy {
 /// human-typed rule against a parsed host is only sound if both are in the
 /// same form. Parsing through a URL is what applies IDNA, so `рф.example` and
 /// its punycode spelling canonicalize alike.
-fn canonical_domain(domain: &str) -> Option<String> {
+pub(super) fn canonical_domain(domain: &str) -> Option<String> {
     let domain = domain.trim().trim_start_matches('.');
     // A rule is a bare hostname: no scheme, path, userinfo, port, or query.
     // Backslash matters as much as slash — for special schemes the URL parser
@@ -107,6 +107,12 @@ impl DomainPolicy {
     pub fn request_filter(&self) -> Option<&[String]> {
         (!self.allowed.is_empty() && self.allowed.len() <= MAX_REQUEST_ALLOWED_DOMAINS)
             .then_some(self.allowed.as_slice())
+    }
+
+    /// Whether the sub-call asked for any domain filter.
+    #[must_use]
+    pub fn has_rules(&self) -> bool {
+        !self.allowed.is_empty() || !self.blocked.is_empty()
     }
 
     /// Whether a harvested URL may be shown.

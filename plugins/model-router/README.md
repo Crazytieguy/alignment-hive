@@ -41,10 +41,11 @@ present themselves as Claude.
 - On plans with OpenAI's Ultrafast tier, `-ultrafast` twins of GPT-6.2 Sol
   and Astra: up to 4.5x faster for 6x the usage. The session-start notice
   offers them when your plan has them.
-- Optional Grok, Muse and open-weights models (Kimi, GLM, ...), added
-  during `/model-router:setup`. Grok and Muse use your own xAI or Muse Code
-  subscription login. Muse is not a supported path under Meta's terms
-  (see Compliance), and setup shows you the terms first.
+- Optional Grok, Muse, Gemini and open-weights models (Kimi, GLM, ...),
+  added during `/model-router:setup`. Grok and Muse use your own xAI or
+  Muse Code subscription login; Gemini uses a Google AI Studio API key.
+  Muse is not a supported path under Meta's terms (see Compliance), and
+  setup shows you the terms first.
 - OpenAI Daybreak (Trusted Access for Cyber), for accounts OpenAI has
   approved: `/model-router:setup` lets you choose Daybreak (fewer cyber
   refusals on the models your approval covers) or standard safeguards for

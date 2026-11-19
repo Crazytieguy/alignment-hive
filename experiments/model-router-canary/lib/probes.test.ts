@@ -172,7 +172,20 @@ describe('catalog and config', () => {
     expect(cat.grok[0]).toBe('grok-4.7');
     expect(cat.muse).toContain('muse-wonder-full-1.0');
     expect(cat.muse).toContain('muse-wonder-1.0');
-    for (const id of [...cat.gpt, ...cat.grok, ...cat.muse]) expect(id).toMatch(/^[a-z0-9.-]+$/);
+    expect(cat.gemini).toEqual(['gemini-4-neon', 'gemini-4-argon', 'gemini-4-carbon', 'gemini-4-hydrogen']);
+    for (const id of [...cat.gpt, ...cat.grok, ...cat.muse, ...cat.gemini]) expect(id).toMatch(/^[a-z0-9.-]+$/);
+  });
+
+  test('a catalog from before the Gemini family has no Gemini routes', () => {
+    expect(parseCatalog(src.replace('GEMINI_MODELS: [', 'GEMINI_LIST: [')).gemini).toEqual([]);
+  });
+
+  test('Gemini routes are the catalog table, only while enabled', () => {
+    const none = configuredRoutes(cat, parseMiniToml('[gemini]\nenabled = false\n'));
+    expect(none.gemini.size).toBe(0);
+    const on = configuredRoutes(cat, parseMiniToml('[gemini]\nenabled = true\n'));
+    expect([...on.gemini]).toEqual([['gemini-z', 'gemini-z']]);
+    expect(on.grok.size + on.muse.size).toBe(0);
   });
 
   test('a missing table throws instead of probing nothing', () => {
@@ -187,12 +200,12 @@ describe('catalog and config', () => {
     expect(parseCatalog('const FAST_SUFFIX: &str = "-fast";\n' + src.replace(/const FAST: Twin\b/, 'const QUICK: Twin')).fast).toContain('gpt-6.2-sol');
   });
 
-  const cat = { gpt: ['gpt-a', 'gpt-b'], grok: ['grok-x'], muse: ['muse-y'], fast: ['gpt-a'] };
+  const cat = { gpt: ['gpt-a', 'gpt-b'], grok: ['grok-x'], muse: ['muse-y'], gemini: ['gemini-z'], fast: ['gpt-a'] };
 
   test('defaults: the Codex list, no Grok or Muse', () => {
     const r = configuredRoutes(cat, parseMiniToml('# nothing\n[grok]\n#enabled = true\n'));
     expect([...r.gpt]).toEqual([['gpt-a', 'gpt-a'], ['gpt-b', 'gpt-b']]);
-    expect(r.grok.size + r.muse.size).toBe(0);
+    expect(r.grok.size + r.muse.size + r.gemini.size).toBe(0);
   });
 
   test('Grok enabled, Muse Contributor mode maps to -contributor upstream IDs', () => {
@@ -393,8 +406,9 @@ describe('validators', () => {
   });
 });
 
-test('only Grok and Muse checks count as family checks', () => {
-  for (const name of ['reach/grok-4.7', 'reach/muse-wonder-1.0', 'tool-replay/grok-4.7', 'edit/muse-wonder-1.0']) expect(isFamilyCheck(name)).toBe(true);
+test('only Grok, Muse and Gemini checks count as family checks', () => {
+  for (const name of ['reach/grok-4.7', 'reach/muse-wonder-1.0', 'reach/gemini-4-argon', 'tool-replay/grok-4.7', 'tool-replay/gemini-4-argon', 'edit/muse-wonder-1.0'])
+    expect(isFamilyCheck(name)).toBe(true);
   for (const name of ['reach/gpt-6-luna', 'tool-replay', 'gpt-edit', 'models']) expect(isFamilyCheck(name)).toBe(false);
 });
 

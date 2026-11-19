@@ -50,6 +50,13 @@ pub(crate) enum OverflowDialect {
     /// text Meta uses for other invalid parameters. Matched only together
     /// with [`META_MIN_ESTIMATE_PERCENT`].
     Meta,
+    /// Google's Gemini API, captured against `CLIProxyAPI` 8.0.69
+    /// (2026-11-18, `gemini-4-argon`, ~1.2M tokens): `The input token count
+    /// exceeds the maximum number of tokens allowed 1048576.`, a 400
+    /// `INVALID_ARGUMENT` whether or not the request streams, which the
+    /// child passes on as a 400 `invalid_request_error` with the same
+    /// message.
+    Gemini,
 }
 
 /// How near the window a Muse request's own estimate must be before Meta's
@@ -93,6 +100,7 @@ impl OverflowDialect {
                 "prompt is too long for this model's context window",
             ],
             Self::Meta => &["the request contains invalid parameters"],
+            Self::Gemini => &["input token count exceeds the maximum number of tokens allowed"],
         }
     }
 
@@ -102,7 +110,7 @@ impl OverflowDialect {
     /// alone is proof.
     const fn min_estimate_percent(self) -> Option<u64> {
         match self {
-            Self::Codex | Self::Xai => None,
+            Self::Codex | Self::Xai | Self::Gemini => None,
             Self::Meta => Some(META_MIN_ESTIMATE_PERCENT),
         }
     }
@@ -395,12 +403,18 @@ pub(crate) mod tests {
             Estimate::Computed(2_000_000),
             OverflowDialect::Meta,
         );
+        let gemini = OverflowRewrite::new(
+            1_048_576,
+            Estimate::Computed(2_000_000),
+            OverflowDialect::Gemini,
+        );
         let bodies = [
             (OverflowDialect::Codex, CAPTURED_BODY),
             (OverflowDialect::Xai, CAPTURED_XAI_BODY),
             (OverflowDialect::Meta, CAPTURED_META_BODY),
+            (OverflowDialect::Gemini, CAPTURED_GEMINI_BODY),
         ];
-        for rewrite in [codex, xai, meta] {
+        for rewrite in [codex, xai, meta, gemini] {
             for (dialect, body) in bodies {
                 // Each accepts its own captured body and rejects the others'.
                 assert_eq!(
@@ -410,6 +424,55 @@ pub(crate) mod tests {
                     rewrite.dialect
                 );
             }
+        }
+    }
+
+    /// The body `CLIProxyAPI` 8.0.69 delivered for ~1.2M Google tokens sent
+    /// to `gemini-4-argon` (2026-11-18), streaming or not. Google's own body
+    /// was `{"error":{"code":400,"message":"<same>",
+    /// "status":"INVALID_ARGUMENT"}}`.
+    pub(crate) const CAPTURED_GEMINI_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"The input token count exceeds the maximum number of tokens allowed 1048576."}}"#;
+
+    #[test]
+    fn the_gemini_message_is_translated_and_an_output_limit_is_not() {
+        let gemini = |estimate| {
+            OverflowRewrite::new(
+                1_048_576,
+                Estimate::Computed(estimate),
+                OverflowDialect::Gemini,
+            )
+        };
+        let rewritten = gemini(1_200_000)
+            .rewrite_body(CAPTURED_GEMINI_BODY.as_bytes())
+            .unwrap();
+        assert_eq!(
+            message_of(&rewritten),
+            "prompt is too long: 1200000 tokens > 1048576 maximum"
+        );
+        // Google's tokenizer is not the router's: an estimate under the
+        // window is clamped above it.
+        let rewritten = gemini(990_000)
+            .rewrite_body(CAPTURED_GEMINI_BODY.as_bytes())
+            .unwrap();
+        assert_eq!(
+            message_of(&rewritten),
+            "prompt is too long: 1048577 tokens > 1048576 maximum"
+        );
+        for other in [
+            "max_output_tokens must be at most 65536",
+            "The output token count exceeds the maximum number of tokens allowed",
+            "The request contains invalid parameters.",
+            "Request payload size exceeds the limit: 20971520 bytes.",
+        ] {
+            let body = serde_json::json!({
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": other},
+            })
+            .to_string();
+            assert!(
+                gemini(1_200_000).rewrite_body(body.as_bytes()).is_none(),
+                "{other}"
+            );
         }
     }
 

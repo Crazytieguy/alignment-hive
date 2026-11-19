@@ -8,7 +8,7 @@ import { LIVE, LIVE_ROUTER_LOG, LIVE_ROUTER_PORT, REPO, http, logMark, logSince,
 import { historicalMedian, type Recorder, type RouterTarget, type Status, type Tier } from './report';
 
 /** Routing IDs (what Claude Code sends) per family, each served by the target's child. */
-export type ModelSet = { gpt: Array<string>; grok: Array<string>; muse: Array<string>; primary: string };
+export type ModelSet = { gpt: Array<string>; grok: Array<string>; muse: Array<string>; gemini: Array<string>; primary: string };
 
 type Result = { status: Status; detail: string; metrics?: Record<string, number> };
 
@@ -38,7 +38,7 @@ export function parseModelList(body: string): Set<string> {
 }
 
 /** `fast`: the models whose routes get a `-fast` twin (empty for a router from before the twins). */
-export type Catalog = { gpt: Array<string>; grok: Array<string>; muse: Array<string>; fast: Array<string> };
+export type Catalog = { gpt: Array<string>; grok: Array<string>; muse: Array<string>; gemini: Array<string>; fast: Array<string> };
 
 /** The built-in routing IDs from catalog.rs; throws when a table moved or emptied, so catalog drift is loud. */
 export function parseCatalog(src: string): Catalog {
@@ -62,7 +62,9 @@ export function parseCatalog(src: string): Catalog {
   // Each shipped route gets a twin, but routers from before the twins (FAST_SUFFIX, later the FAST twin kind) ship
   // routes too.
   const fast = /const\s+FAST_SUFFIX\b|const\s+FAST\s*:\s*Twin\b/.test(src) ? list('SHIPPED_GPT_ROUTES') : [];
-  return { gpt: table('CODEX_NATIVE_MODELS'), grok: table('GROK_MODELS'), muse: table('MUSE_MODELS'), fast };
+  // Routers from before the Gemini family have no such table, and no Gemini routes.
+  const gemini = body('GEMINI_MODELS') === undefined ? [] : table('GEMINI_MODELS');
+  return { gpt: table('CODEX_NATIVE_MODELS'), grok: table('GROK_MODELS'), muse: table('MUSE_MODELS'), gemini, fast };
 }
 
 /** The Codex version the catalog check presents, current when the `-fast` routes shipped (the child shapes entries by it). */
@@ -170,10 +172,13 @@ export function configFileFor(t: RouterTarget): string {
 /**
  * Routing ID -> upstream ID for every route the target's config enables, the way config.rs builds them: the
  * Codex-native list (or the deprecated `[[models]]` block in its place) with `[[model-overrides]]` merged on by
- * routing ID, Grok and Muse only when enabled, and Muse Contributor mode mapping the same routing IDs to
+ * routing ID, Grok, Muse and Gemini only when enabled, and Muse Contributor mode mapping the same routing IDs to
  * `-contributor` upstream IDs.
  */
-export function configuredRoutes(cat: Catalog, cfg: MiniToml): { gpt: Map<string, string>; grok: Map<string, string>; muse: Map<string, string> } {
+export function configuredRoutes(
+  cat: Catalog,
+  cfg: MiniToml,
+): { gpt: Map<string, string>; grok: Map<string, string>; muse: Map<string, string>; gemini: Map<string, string> } {
   const base = new Map<string, { up: string; family: TomlValue }>();
   if (cfg.models.length) {
     for (const m of cfg.models) {
@@ -199,7 +204,9 @@ export function configuredRoutes(cat: Catalog, cfg: MiniToml): { gpt: Map<string
     const suffix = cfg.sections.muse.contributor === true ? '-contributor' : '';
     for (const id of cat.muse) muse.set(id, id + suffix);
   }
-  return { gpt, grok, muse };
+  const gemini = new Map<string, string>();
+  if (cfg.sections.gemini?.enabled === true) for (const id of cat.gemini) gemini.set(id, id);
+  return { gpt, grok, muse, gemini };
 }
 
 type Discovery = { set: ModelSet; missing: Array<string>; catalogFrom: string; fast: Array<string> };
@@ -246,7 +253,7 @@ async function discover(t: RouterTarget, repo: string): Promise<Discovery> {
     return ids;
   };
   const gpt = keep(routes.gpt);
-  const set = { gpt, grok: keep(routes.grok), muse: keep(routes.muse), primary: pickPrimary(gpt) };
+  const set = { gpt, grok: keep(routes.grok), muse: keep(routes.muse), gemini: keep(routes.gemini), primary: pickPrimary(gpt) };
   return { set, missing, catalogFrom: from, fast: cat.fast };
 }
 
@@ -779,10 +786,11 @@ async function probeOverflow(t: RouterTarget, model: string): Promise<Result> {
 }
 
 /**
- * A candidate tier check of the Grok or Muse family. One failing on both routers is about that family's account or
- * provider, so unlike a GPT check it doesn't hold a candidate up; one failing on the candidate alone is a regression.
+ * A candidate tier check of the Grok, Muse or Gemini family. One failing on both routers is about that family's
+ * account or provider, so unlike a GPT check it doesn't hold a candidate up; one failing on the candidate alone is a
+ * regression.
  */
-export const isFamilyCheck = (name: string): boolean => /^(reach\/(grok|muse)-|tool-replay\/|edit\/)/.test(name);
+export const isFamilyCheck = (name: string): boolean => /^(reach\/(grok|muse|gemini)-|tool-replay\/|edit\/)/.test(name);
 
 /** The target's `[web-search] mode` (config.rs: "alpha" by default). */
 export function webSearchMode(t: RouterTarget): string {
@@ -802,7 +810,7 @@ export async function runProbes(targets: Array<RouterTarget>, models: ModelSet, 
   for (const t of targets) {
     await rec.time({ tier, target: t.label, name: 'models' }, async () => {
       const d = await discover(t, REPO);
-      const ids = [...d.set.gpt, ...d.set.grok, ...d.set.muse];
+      const ids = [...d.set.gpt, ...d.set.grok, ...d.set.muse, ...d.set.gemini];
       served.set(t, new Set(ids));
       fast.set(t, d.fast);
       const untagged = d.catalogFrom.startsWith('working tree');
@@ -837,9 +845,11 @@ export async function runProbes(targets: Array<RouterTarget>, models: ModelSet, 
     const ids = fast.get(t);
     if (ids) await rec.time({ tier, target: t.label, name: 'fast-tier-catalog' }, () => probeFastTiers(t, ids));
   }
-  for (const model of [...models.gpt, ...models.grok, ...models.muse]) await each(`reach/${model}`, model, (t) => probeReach(t, model));
+  for (const model of [...models.gpt, ...models.grok, ...models.muse, ...models.gemini]) await each(`reach/${model}`, model, (t) => probeReach(t, model));
   if (tier === 'candidate') {
-    for (const model of [models.grok[0], models.muse[0]]) if (model) await each(`tool-replay/${model}`, model, (t) => probeToolReplay(t, model));
+    // Gemini's replay hands back the thought signature the child carries in an empty thinking block, which is what a
+    // new release is most likely to break for it.
+    for (const model of [models.grok[0], models.muse[0], models.gemini[0]]) if (model) await each(`tool-replay/${model}`, model, (t) => probeToolReplay(t, model));
   }
   const p = models.primary;
   await each('tool-replay', p, (t) => probeToolReplay(t, p));

@@ -3,7 +3,8 @@
 //! steered to the backend of the agent that asked for the search, whichever
 //! branch carried it. Grok and Muse origins are answered strictly by their
 //! vendor's hosted search (a failure is a failed-search result, never another
-//! vendor), even with `[web-search] mode = "off"`. A
+//! vendor), even with `[web-search] mode = "off"`, and a Gemini origin by
+//! Google Search grounding on the Gemini key, as strictly. A
 //! Claude origin on the GPT branch is tried at Anthropic first and, on a
 //! transport error, 429 or 5xx, continues to the GPT path. Other routed
 //! origins go to the Codex alpha search in `alpha` mode, then the scrape
@@ -18,9 +19,9 @@ use axum::response::Response;
 use futures_util::StreamExt;
 
 use super::{
-    AppState, ForwardTarget, cache_identity_headers, forward_gpt, forward_to_anthropic,
+    AppState, ForwardTarget, NotSent, cache_identity_headers, forward_gpt, forward_to_anthropic,
     frame_message, gpt_forward_target, local_response, login_refusal, require_identity_encoding,
-    upstream_url,
+    send_to_child, upstream_url,
 };
 use crate::capture::RequestCapture;
 use crate::config::WebSearchMode;
@@ -55,12 +56,13 @@ pub(super) async fn gpt_origin_on_claude_branch(
     let route = state.config.route(routing_id);
     // A Grok or Muse origin is served by its own vendor's search, strictly:
     // no alpha, no scrape, no Anthropic — not even when the gateway is
-    // unavailable. An origin whose route has since left the config has no
+    // unavailable. A Gemini origin is answered by Google Search grounding,
+    // as strictly. An origin whose route has since left the config has no
     // known family, so it keeps the existing behaviour below.
-    if let Some((route, native)) =
-        route.and_then(|route| Some((route, websearch::native_search(route.family)?)))
+    if let Some((route, own)) =
+        route.and_then(|route| Some((route, websearch::own_search(route.family)?)))
     {
-        return native_websearch_response(state, &body, route, native, subcall, capture).await;
+        return own_websearch_response(state, &body, route, own, subcall, capture).await;
     }
     // The ingress gate saw only this Claude carrier, so the origin's route
     // passes it here, as the native arm's search does: a refusal is a
@@ -143,12 +145,11 @@ pub(super) async fn gpt_branch_subcall(
     mut capture: Option<RequestCapture>,
 ) -> Response {
     let origin = state.origin_of(&rewritten, subcall);
-    // Policy lives in `websearch::native_search_route` (unit-tested there);
+    // Policy lives in `websearch::own_search_route` (unit-tested there);
     // this only supplies the config lookup.
-    let native_search_route =
-        websearch::native_search_route(origin.as_ref(), route, |routing_id| {
-            state.config.route(routing_id)
-        });
+    let own_search_route = websearch::own_search_route(origin.as_ref(), route, |routing_id| {
+        state.config.route(routing_id)
+    });
     // The Anthropic-native path needs no GPT upstream — attempt it even when
     // the GPT target is unavailable.
     if let Some(origin) = &origin
@@ -160,8 +161,8 @@ pub(super) async fn gpt_branch_subcall(
             Err(returned) => capture = returned,
         }
     }
-    if let Some((route, native)) = native_search_route {
-        return native_websearch_response(state, &rewritten, route, native, subcall, capture).await;
+    if let Some((route, own)) = own_search_route {
+        return own_websearch_response(state, &rewritten, route, own, subcall, capture).await;
     }
     // Dropping the tier is always safe; asking for it only on a carrier that
     // has one (never Grok, Muse or an openai-compat host).
@@ -422,15 +423,14 @@ enum SearchFailure {
     ShuttingDown,
     /// The sub-call's domain filter cannot be honored.
     InvalidFilter(websearch::InvalidDomainRule),
-    /// The login gate refuses the route's requests right now; the reason names
-    /// the fix ([`login_refusal`]).
+    /// The login gate ([`login_refusal`]) or the Hydrogen billing gate
+    /// refuses the route's requests right now; the reason names the fix.
     Refused(String),
 }
 
 impl SearchFailure {
     /// `(error_code, detail)` for [`websearch::synthesize_error_message`].
-    fn rendered(&self, native: websearch::NativeSearch) -> (&'static str, String) {
-        let vendor = native.vendor();
+    fn rendered(&self, vendor: &str) -> (&'static str, String) {
         match self {
             Self::Status(429) => (
                 websearch::search_error::TOO_MANY_REQUESTS,
@@ -538,20 +538,31 @@ impl SearchStreams {
     }
 }
 
-/// Answers a Grok- or Muse-origin sub-call from the origin family's own
-/// hosted `web_search`, or returns the failure to render. Strict by
-/// construction: this function never reaches another vendor's backend.
-async fn native_websearch_response(
+/// Answers a sub-call whose origin's family keeps its searches to itself,
+/// from that vendor's own search, or returns the failure to render. Strict
+/// by construction: this never reaches another vendor's backend.
+async fn own_websearch_response(
     state: &AppState,
     body: &Bytes,
     route: &crate::config::ModelRoute,
-    native: websearch::NativeSearch,
+    own: websearch::OwnSearch,
     subcall: &websearch::Subcall,
     capture: Option<RequestCapture>,
 ) -> Response {
     let started = std::time::Instant::now();
+    let (vendor, backend) = match own {
+        websearch::OwnSearch::Native(native) => (native.vendor(), native.backend()),
+        websearch::OwnSearch::GoogleGrounding => ("Google", "google-search-grounding"),
+    };
     let outcome = match gpt_forward_target(&state.cliproxy_upstream) {
-        Some(target) => native_search(state, &target, route, native, subcall).await,
+        Some(target) => match own {
+            websearch::OwnSearch::Native(native) => {
+                native_search(state, &target, route, native, subcall).await
+            }
+            websearch::OwnSearch::GoogleGrounding => {
+                grounding_search(state, &target, subcall).await
+            }
+        },
         None => Err(SearchFailure::GatewayUnavailable),
     };
     let input_tokens = estimate_input_tokens(body);
@@ -561,22 +572,22 @@ async fn native_websearch_response(
                 target: LOG_TARGET,
                 links = links.len(),
                 origin = %route.routing_id,
-                backend = native.backend(),
+                backend,
                 elapsed_ms = started.elapsed().as_millis(),
-                "answered routed-origin web search from the vendor's native search"
+                "answered routed-origin web search from the vendor's own search"
             );
             // No commentary text: the synthesized prose is never read, so it
             // can never leak into the result.
             websearch::synthesize_message(&route.routing_id, subcall, &links, "", input_tokens)
         }
         Err(failure) => {
-            let (error_code, detail) = failure.rendered(native);
+            let (error_code, detail) = failure.rendered(vendor);
             tracing::warn!(
                 target: LOG_TARGET,
                 origin = %route.routing_id,
-                backend = native.backend(),
+                backend,
                 %detail,
-                "native search failed; returning a failed-search result"
+                "own search failed; returning a failed-search result"
             );
             websearch::synthesize_error_message(
                 &route.routing_id,
@@ -588,6 +599,106 @@ async fn native_websearch_response(
         }
     };
     message_response(state, &message, subcall.stream, capture).await
+}
+
+/// How long resolving one grounding redirect may take.
+const GROUNDING_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// One Google Search grounding call through the child on the Gemini key,
+/// whichever Gemini model asked ([`crate::config::GEMINI_SEARCH_MODEL`]),
+/// with its redirects resolved. It is a Hydrogen request, so it passes the
+/// billing gate first.
+async fn grounding_search(
+    state: &AppState,
+    target: &ForwardTarget,
+    subcall: &websearch::Subcall,
+) -> Result<Vec<websearch::Link>, SearchFailure> {
+    use websearch::grounding;
+    let policy =
+        websearch::DomainPolicy::from_subcall(subcall).map_err(SearchFailure::InvalidFilter)?;
+    let model = crate::config::GEMINI_SEARCH_MODEL;
+    if state.gemini_billing.gates_model(model)
+        && let Some(refusal) = super::free_tier_refusal(state, target).await
+    {
+        return Err(SearchFailure::Refused(refusal.message));
+    }
+    let mut request = state
+        .client
+        .post(grounding::generate_content_url(&target.base_url, model))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT_ENCODING, "identity")
+        .timeout(state.config.native_search.harvest_timeout)
+        .body(grounding::request_body(&subcall.query, &policy).to_string());
+    if let Some(credential) = &target.credential {
+        request = credential.apply(request);
+    }
+    let response = request.send().await.map_err(|error| {
+        if error.is_timeout() {
+            SearchFailure::TimedOut
+        } else {
+            SearchFailure::Transport(error.into())
+        }
+    })?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(SearchFailure::Status(response.status().as_u16()));
+    }
+    let document = response
+        .bytes()
+        .await
+        .map_err(|error| SearchFailure::Transport(error.into()))
+        .and_then(|bytes| {
+            serde_json::from_slice::<serde_json::Value>(&bytes)
+                .map_err(|error| SearchFailure::Transport(error.into()))
+        })?;
+    let sources = grounding::sources(&document);
+    if sources.is_empty() {
+        // Nothing forces the model to search: an answer with no grounding
+        // is a failed search, not an empty one.
+        return Err(SearchFailure::NoSources(
+            "the model answered without searching",
+        ));
+    }
+    let resolved = resolve_redirects(&state.client, &grounding::redirects(&sources)).await;
+    let links = grounding::links_from_grounding(&policy, &sources, &resolved);
+    if links.is_empty() {
+        return Err(SearchFailure::NoSources(
+            "none of the sources Google found were on the allowed domains",
+        ));
+    }
+    Ok(links)
+}
+
+/// Resolves grounding redirects one hop each, in parallel, reading the
+/// `Location` of a 3xx (the shared client follows no redirects). Requests
+/// every URI it is given: the caller passes only what
+/// [`websearch::grounding::redirects`] approved. A redirect that doesn't
+/// resolve in time is left out of the map.
+async fn resolve_redirects(
+    client: &reqwest::Client,
+    uris: &[&str],
+) -> std::collections::HashMap<String, String> {
+    let resolutions = uris.iter().map(|uri| async move {
+        let response = client
+            .get(*uri)
+            .timeout(GROUNDING_RESOLVE_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_redirection() {
+            return None;
+        }
+        let location = response.headers().get(header::LOCATION)?.to_str().ok()?;
+        let parsed = reqwest::Url::parse(location).ok()?;
+        matches!(parsed.scheme(), "http" | "https").then(|| ((*uri).to_string(), parsed.into()))
+    });
+    // Each request is bounded on its own and they run together, so the
+    // batch takes at most about one timeout, and a slow one loses only its
+    // own link.
+    futures_util::future::join_all(resolutions)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// One search against the vendor's hosted `web_search` tool through the same
@@ -788,17 +899,20 @@ async fn legacy_websearch(
         target.credential.as_ref(),
     );
     require_identity_encoding(&mut outgoing_headers);
-    let response = state
+    let request = state
         .client
         .request(
             parts.method.clone(),
             upstream_url(&target.base_url, &parts.uri),
         )
         .headers(outgoing_headers)
-        .body(serde_json::to_vec(&document)?)
-        .timeout(SUBCALL_TIMEOUT)
-        .send()
-        .await?;
+        .timeout(SUBCALL_TIMEOUT);
+    let body = Bytes::from(serde_json::to_vec(&document)?);
+    let response = match send_to_child(state, &target, request, body).await {
+        Ok(response) => response,
+        Err(NotSent::Refused(refusal)) => anyhow::bail!(refusal.message),
+        Err(NotSent::Failed(error)) => return Err(error.into()),
+    };
     anyhow::ensure!(
         response.status() == reqwest::StatusCode::OK,
         "web search upstream returned HTTP {}",
@@ -829,6 +943,45 @@ mod tests {
     use super::*;
     use axum::response::IntoResponse;
     use std::sync::Arc;
+
+    /// A redirect that stalls costs only its own link: the ones that
+    /// answered in time are kept.
+    #[tokio::test]
+    async fn a_stalled_redirect_leaves_the_resolved_ones() {
+        let app = axum::Router::new()
+            .route(
+                "/fast",
+                axum::routing::get(|| async {
+                    (
+                        StatusCode::FOUND,
+                        [(header::LOCATION, "https://docs.rs/serde")],
+                    )
+                }),
+            )
+            .route(
+                "/stalled",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(GROUNDING_RESOLVE_TIMEOUT * 4).await;
+                    StatusCode::FOUND
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let (fast, stalled) = (format!("{base}/fast"), format!("{base}/stalled"));
+        let started = std::time::Instant::now();
+        let resolved = resolve_redirects(&client, &[&fast, &stalled]).await;
+        assert!(started.elapsed() < GROUNDING_RESOLVE_TIMEOUT * 2);
+        assert_eq!(
+            resolved,
+            [(fast, "https://docs.rs/serde".to_string())].into()
+        );
+    }
 
     #[tokio::test]
     async fn search_admission_closes_at_shutdown_and_running_streams_are_awaited() {

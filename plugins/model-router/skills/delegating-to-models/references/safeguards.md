@@ -129,6 +129,30 @@ a route that selects neither leaves the choice to OpenAI.
   Standard mode unless `[muse] contributor = true`, but the terms tie the
   designation to the Muse Code account setting, not the model ID; setup's
   `references/muse.md` covers it.
+- **Gemini 4 Neon / Argon / Carbon / Hydrogen (Google)** — assessed under Google
+  DeepMind's Frontier Safety Framework. Argon's
+  [model card, 2026-10-13](https://deepmind.google/models/model-cards/gemini-4-argon/)
+  says Google cannot rule out that the model reaches the framework's
+  critical capability levels for biological information and for
+  cybersecurity, and applies safeguards it assesses lower the risk to
+  below those levels, without describing them. Carbon's
+  [model card, 2026-11-10](https://deepmind.google/models/model-cards/gemini-4-carbon/)
+  reports strengthened CBRN and cyber-misuse safeguards, and says
+  specialized dual-use cyber capabilities go to verified defenders
+  through its Fairwind Program. Neon's
+  [model card, 2026-11-18](https://deepmind.google/models/model-cards/gemini-4-neon/)
+  carries Argon's results forward (Google cannot rule out the biology
+  and cyber levels) and reports strengthened CBRN and cyber-misuse
+  safeguards. Hydrogen's
+  [model card, 2026-11-12](https://deepmind.google/models/model-cards/gemini-4-hydrogen/)
+  says it does not reach those levels but reaches their alert
+  thresholds. None of the cards says which controls run on the AI Studio
+  API key path this plugin uses. On that path the Gemini
+  API's
+  [adjustable content filters](https://aistudio.google.com/docs/safety-settings)
+  are off: CLIProxyAPI sends them off, and Off is Google's default for
+  any it does not name. The protections Google always applies (it names
+  child safety) cannot be adjusted.
 - **Kimi K2.7 / K3** — no published vendor safety framework or model-card
   safety section ([Kimi K3 card](https://huggingface.co/moonshotai/Kimi-K3)).
 - **GLM-5.2** — no binding vendor framework (Z.ai co-authored a general

@@ -133,6 +133,9 @@ pub(crate) struct GptPolicies {
     /// context for nobody.
     pub(crate) scale: Option<UsageScale>,
     pub(crate) overflow: Option<crate::overflow::OverflowRewrite>,
+    /// Whether a streamed reply's text blocks are joined
+    /// ([`crate::text_blocks`]).
+    pub(crate) join_text: bool,
     /// What the auto-mode classifier does to the reply; `None` while it is
     /// off.
     pub(crate) auto_mode: Option<crate::auto_mode::ReplyMode>,
@@ -276,6 +279,7 @@ mod tests {
                 estimate,
                 scale,
                 overflow: None,
+                join_text: false,
                 auto_mode: None,
             },
         )
@@ -314,6 +318,7 @@ mod tests {
                 crate::overflow::Estimate::Computed(estimate),
                 crate::overflow::OverflowDialect::Codex,
             )),
+            join_text: false,
             auto_mode: None,
         }
     }

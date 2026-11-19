@@ -136,7 +136,7 @@ export function judgeDeadUrl(r: RunResult, parsed: ClaudeResult | undefined, rou
   return { status: 'pass', detail: `failed fast with a connection error (${(r.ms / 1000).toFixed(1)} s)` };
 }
 
-/** Grade the `gpt-edit` cell from the run, the edited file and the router log growth (undefined: not checked). */
+/** Grade an edit cell from the run, the edited file, the reply and the router log growth (undefined: not checked). */
 export function judgeEdit(r: RunResult, parsed: ClaudeResult | undefined, calc: string, gpt: string, routed: number | undefined): Verdict {
   const metrics: Record<string, number> = {};
   if (parsed?.duration_ms !== undefined) metrics.duration_s = parsed.duration_ms / 1000;
@@ -151,6 +151,9 @@ export function judgeEdit(r: RunResult, parsed: ClaudeResult | undefined, calc: 
     const why = denied.length ? `; permission denied for ${denied.join(', ')}` : '';
     return { status: 'fail', detail: `calc.py does not return ${MAGIC} (now: ${excerpt(calc, 120)})${why}; reply: ${excerpt(parsed.result ?? '', 80)}`, metrics };
   }
+  // The file can be right while the reply's text never reaches Claude Code: a streamed Gemini reply whose last
+  // content block was not its text left `result` empty (CLIProxyAPI 8.0.69, 2026-11-18).
+  if (!parsed.result?.trim()) return { status: 'fail', detail: 'edited calc.py, but the result text is empty: the reply did not reach Claude Code as text', metrics };
   // A non-Haiku Claude model doing work in a GPT session is a silent fallback (Claude Code 2.1.247 fallbackModel).
   const other = keys.filter((k) => !k.startsWith(gpt) && !k.includes('haiku') && (parsed.modelUsage![k]!.outputTokens ?? 0) > 0);
   if (other.length) return { status: 'warn', detail: `edited calc.py, but modelUsage also lists ${other.join(', ')}`, metrics };

@@ -21,8 +21,8 @@ import { discoverModels, isFamilyCheck, liveTarget, parseMiniToml, routerHealth,
 import type { ModelSet } from './lib/probes';
 import { Recorder, appendHistory, readHistory, renderMarkdown } from './lib/report';
 import type { CandidateVerdict, Check, RunReport, Tier } from './lib/report';
-import { credentialPrecheck, familyPrecheck, livePorts, startSandbox, sweepSandboxes } from './lib/sandbox';
-import type { FamilyLogins, Sandbox } from './lib/sandbox';
+import { credentialPrecheck, familyPrecheck, geminiKeyPrecheck, livePorts, startSandbox, sweepSandboxes } from './lib/sandbox';
+import type { FamilyLogins, GeminiUse, Sandbox } from './lib/sandbox';
 import { MAX_TRIES, MIN_AGE_DAYS, SUPERSEDED_LIMIT, isPatch, liveDue, newFindings, nextCandidate, supersededStreak } from './lib/schedule';
 import type { CandidateEntry, CandidateState, Finding, SessionLog } from './lib/schedule';
 import { auditSource, compareVersions, downloadCpa, downloadSource, listReleases, pickCandidate, pinnedVersion } from './lib/upstream';
@@ -152,8 +152,8 @@ function candidateBlocker(): string | undefined {
  * only, which is the regression we want reported (an unserved ID costs nothing in a sandbox).
  */
 function pinnedModels(pinned: ModelSet, candidate: ModelSet, rec: Recorder): ModelSet {
-  const served = new Set([...candidate.gpt, ...candidate.grok, ...candidate.muse]);
-  const dropped = [...pinned.gpt, ...pinned.grok, ...pinned.muse].filter((m) => !served.has(m));
+  const served = new Set([...candidate.gpt, ...candidate.grok, ...candidate.muse, ...candidate.gemini]);
+  const dropped = [...pinned.gpt, ...pinned.grok, ...pinned.muse, ...pinned.gemini].filter((m) => !served.has(m));
   if (dropped.length) rec.add({ tier: 'candidate', target: 'candidate', name: 'catalog', status: 'fail', detail: `no longer served: ${dropped.join(', ')}` });
   return pinned;
 }
@@ -220,11 +220,20 @@ async function sandboxPorts(): Promise<Record<'pinned' | 'candidate', { router: 
   return { pinned: { router: free[0]!, child: free[1]! }, candidate: { router: free[2]!, child: free[3]! } };
 }
 
-async function startBoth(rec: Recorder, routerVersion: string, binaries: Record<'pinned' | 'candidate', string>, files: Array<string>, family?: FamilyLogins): Promise<Array<Sandbox>> {
+async function startBoth(
+  rec: Recorder,
+  routerVersion: string,
+  binaries: Record<'pinned' | 'candidate', string>,
+  files: Array<string>,
+  family?: FamilyLogins,
+  gemini?: GeminiUse,
+): Promise<Array<Sandbox>> {
   const ports = await sandboxPorts();
   const sandboxes: Array<Sandbox> = [];
   for (const label of ['pinned', 'candidate'] as const) {
-    sandboxes.push(await startSandbox({ label, cpaBinary: binaries[label], routerVersion, routerPort: ports[label].router, childPort: ports[label].child, files, family }, rec));
+    sandboxes.push(
+      await startSandbox({ label, cpaBinary: binaries[label], routerVersion, routerPort: ports[label].router, childPort: ports[label].child, files, family, gemini }, rec),
+    );
   }
   return sandboxes;
 }
@@ -310,7 +319,16 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
   try {
     const family = familyPrecheck();
     rec.add({ tier: 'candidate', target: 'canary', name: 'family-logins', status: family.files.length ? 'pass' : 'skip', detail: family.detail });
-    sandboxes.push(...(await startBoth(rec, routerVersion, { pinned: pinnedBinary, candidate: cpaBinary }, pre.files, family)));
+    // Gemini rides an API key, not a login: reach per route, and one tool replay and one edit cell, billed to the key.
+    const gemini = geminiKeyPrecheck();
+    rec.add({
+      tier: 'candidate',
+      target: 'canary',
+      name: 'gemini-key',
+      status: gemini ? 'pass' : 'skip',
+      detail: gemini ? 'Gemini API key written to the sandboxes' : 'no Gemini API key in use ([gemini] off, or no key in secrets.toml)',
+    });
+    sandboxes.push(...(await startBoth(rec, routerVersion, { pinned: pinnedBinary, candidate: cpaBinary }, pre.files, family, gemini)));
     const targets = sandboxes.map((s) => s.target);
     const found = await Promise.allSettled(targets.map((t) => discoverModels(t)));
     found.forEach((r, i) => {
@@ -325,8 +343,9 @@ async function candidateTier(report: RunReport, rec: Recorder, opts: { version: 
         const wiring = { kind: 'base-url', baseUrl: t.baseUrl } as const;
         const cells = { tier: 'candidate' as const, rec, workRoot: join(report.dir, `cells-${t.label}`) };
         await runCells(t, wiring, { gpt: pm.primary }, cells);
-        // The real tool set: a request with one tool doesn't show what Meta's tool attestation rejects.
-        for (const model of [models.grok[0], models.muse[0]]) if (model) await runEditCell(t, wiring, model, `edit/${model}`, cells);
+        // The real tool set: a request with one tool doesn't show what Meta's tool attestation rejects, and only a
+        // Claude Code session shows whether a reply's text reaches it (a Gemini stream's did not on 8.0.69).
+        for (const model of [models.grok[0], models.muse[0], models.gemini[0]]) if (model) await runEditCell(t, wiring, model, `edit/${model}`, cells);
       }
       // The bench only adds to a candidate that passed everything else.
       if (opts.bench !== 'never' && verdictOf(rec, seen?.regressions ?? []).verdict === 'pass') {

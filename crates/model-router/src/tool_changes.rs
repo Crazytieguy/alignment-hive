@@ -1000,6 +1000,7 @@ mod tests {
         for family in [
             ModelFamily::Grok,
             ModelFamily::Muse,
+            ModelFamily::Gemini,
             ModelFamily::OpenAiCompat,
         ] {
             let mut document = request(&[tool("Bash"), placeholder()], &history);

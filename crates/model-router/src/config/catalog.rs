@@ -1,7 +1,7 @@
-//! The built-in routes: the GPT, Grok and Muse models the router serves by
-//! default (Grok and Muse only when enabled), which of them the `/model`
-//! picker ships, their `-fast` twins, the context windows assumed for them,
-//! and the model-ID predicates config validation keys off.
+//! The built-in routes: the GPT, Grok, Muse and Gemini models the router
+//! serves by default (Grok, Muse and Gemini only when enabled), which of
+//! them the `/model` picker ships, their `-fast` twins, the context windows
+//! assumed for them, and the model-ID predicates config validation keys off.
 
 use super::{CLIPROXY_UPSTREAM, ModelFamily, ModelRoute, split_effort_suffix};
 use crate::service_tier::ServiceTier;
@@ -202,7 +202,10 @@ impl Twin {
     pub(crate) fn serves(&self, route: &ModelRoute) -> bool {
         match route.family {
             ModelFamily::Gpt => self.models.contains(&route.split_upstream_model().0),
-            ModelFamily::Grok | ModelFamily::Muse | ModelFamily::OpenAiCompat => false,
+            ModelFamily::Grok
+            | ModelFamily::Muse
+            | ModelFamily::Gemini
+            | ModelFamily::OpenAiCompat => false,
         }
     }
 
@@ -289,6 +292,9 @@ pub(crate) fn overflow_dialect(route: &ModelRoute) -> Option<crate::overflow::Ov
         ModelFamily::Muse => {
             is_built_in_muse_model(&route.upstream_model).then_some(OverflowDialect::Meta)
         }
+        ModelFamily::Gemini => {
+            is_built_in(&GEMINI_MODELS, &route.upstream_model).then_some(OverflowDialect::Gemini)
+        }
         // Any host can sit behind an openai-compat route, and their error
         // strings are unknown.
         ModelFamily::OpenAiCompat => None,
@@ -300,6 +306,8 @@ pub(crate) fn overflow_dialect(route: &ModelRoute) -> Option<crate::overflow::Ov
 /// compaction with their hand-back tool otherwise, and Grok as it always
 /// has. An openai-compat host is left as it is, as is a hand-written `gpt`
 /// route to a model outside the Codex list, and Muse accepts only `auto`.
+/// Gemini answers compaction with text while tools are declared (all four
+/// built-in models, 2026-11-18).
 ///
 /// Matched exhaustively on purpose: a new family must decide.
 #[must_use]
@@ -307,7 +315,7 @@ pub(crate) fn forces_text_on_compaction(route: &ModelRoute) -> bool {
     match route.family {
         ModelFamily::Gpt => is_codex_native_model(&route.upstream_model),
         ModelFamily::Grok => true,
-        ModelFamily::Muse | ModelFamily::OpenAiCompat => false,
+        ModelFamily::Muse | ModelFamily::Gemini | ModelFamily::OpenAiCompat => false,
     }
 }
 
@@ -319,9 +327,13 @@ pub(crate) fn forces_text_on_compaction(route: &ModelRoute) -> bool {
 #[must_use]
 pub(crate) fn is_built_in_route(model: &str) -> bool {
     is_codex_native_model(twin_route_base(model).unwrap_or(model))
-        || [GROK_MODELS.as_slice(), MUSE_MODELS.as_slice()]
-            .into_iter()
-            .any(|table| is_built_in(table, model))
+        || [
+            GROK_MODELS.as_slice(),
+            MUSE_MODELS.as_slice(),
+            GEMINI_MODELS.as_slice(),
+        ]
+        .into_iter()
+        .any(|table| is_built_in(table, model))
 }
 
 /// The xAI-native upstream model IDs behind the built-in Grok routes, with
@@ -364,6 +376,80 @@ pub(crate) const MUSE_WONDER_FULL: &str = "muse-wonder-full-1.0";
 /// built-in Muse routes. Meta's docs say 1,048,576; the registry value is
 /// the smaller one, and both sit above Claude Code's 1M compaction cap.
 pub(super) const MUSE_CONTEXT_WINDOW: u64 = 1_007_997;
+
+/// Google's model IDs behind the built-in Gemini routes, with their display
+/// names, first the one setup suggests (Neon, Google's newest).
+///
+/// These are also all the AI Studio key reaches. The child's key entry
+/// declares exactly this list (`supervisor::gemini_key_section`), and the
+/// child serves the list an entry declares in place of its own Gemini
+/// catalog; so a `family = "gemini"` route must name one of them.
+///
+/// All but Hydrogen are paid-only: a key whose project has no billing gets
+/// an error from them. Hydrogen such a key can call, on a free tier whose
+/// prompts Google uses to improve its products, so a Hydrogen request
+/// passes a gate first ([`crate::gemini_billing`]). `gemini-3.8-flash`,
+/// which has a free tier too, has no route.
+pub(crate) const GEMINI_MODELS: [(&str, &str); 4] = [
+    (GEMINI_PROBE_MODEL, "Gemini 4 Neon"),
+    (GEMINI_PROBE_FALLBACK_MODEL, "Gemini 4 Argon"),
+    ("gemini-4-carbon", "Gemini 4 Carbon"),
+    (GEMINI_FREE_TIER_MODEL, "Gemini 4 Hydrogen"),
+];
+
+/// The one built-in Gemini model Google also serves on its free tier.
+const GEMINI_FREE_TIER_MODEL: &str = "gemini-4-hydrogen";
+
+/// The model every Gemini agent's search runs on (`proxy::search`): the
+/// fastest and cheapest, and the one a key on the free tier has. Its answer
+/// is never read, only the sources it searched; Neon took up to 208s on a
+/// grounded search where Hydrogen took 25s at most (live, 2026-11-19).
+pub(crate) const GEMINI_SEARCH_MODEL: &str = GEMINI_FREE_TIER_MODEL;
+
+/// The paid-only model the billing probe asks ([`crate::gemini_billing`]).
+pub(crate) const GEMINI_PROBE_MODEL: &str = "gemini-4-neon";
+
+/// The paid-only model the probe asks where Google rate-limits that one.
+pub(crate) const GEMINI_PROBE_FALLBACK_MODEL: &str = "gemini-4-argon";
+
+/// Whether Google serves `upstream_model` (effort suffix allowed) on its
+/// free tier, to a key whose project has no billing.
+#[must_use]
+pub(crate) fn has_gemini_free_tier(upstream_model: &str) -> bool {
+    bare_model_name(upstream_model) == GEMINI_FREE_TIER_MODEL
+}
+
+/// The thinking levels of a model in [`GEMINI_MODELS`] (thinking cannot be
+/// turned off): Google documents `xhigh` for Neon and Hydrogen. The child
+/// clamps a requested effort to them, so `max` runs as `xhigh` on those
+/// two, and `xhigh` and `max` as `high` on Argon and Carbon.
+#[must_use]
+pub(crate) fn gemini_thinking_levels(model: &str) -> &'static [&'static str] {
+    const LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
+    if matches!(model, "gemini-4-neon" | "gemini-4-hydrogen") {
+        &LEVELS
+    } else {
+        &LEVELS[..3]
+    }
+}
+
+/// The context window Google documents for the built-in Gemini models.
+/// Above Claude Code's 1M compaction cap, like Muse's.
+pub(super) const GEMINI_CONTEXT_WINDOW: u64 = 1_048_576;
+
+/// Whether `upstream_model` names a Google Gemini model (`gemini-*`),
+/// however it is spelled.
+#[must_use]
+pub(crate) fn names_gemini_model(upstream_model: &str) -> bool {
+    bare_model_name(upstream_model).starts_with("gemini-")
+}
+
+/// Whether `upstream_model` is one of [`GEMINI_MODELS`] (effort suffix
+/// allowed), spelled exactly.
+#[must_use]
+pub(super) fn is_built_in_gemini_model(upstream_model: &str) -> bool {
+    is_built_in(&GEMINI_MODELS, upstream_model)
+}
 
 /// Whether `upstream_model` names a Contributor-mode model: Meta's
 /// `<model>-contributor` IDs, whose traffic Meta trains on. The one

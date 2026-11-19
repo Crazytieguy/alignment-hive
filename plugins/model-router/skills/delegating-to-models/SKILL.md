@@ -1,6 +1,6 @@
 ---
 name: delegating-to-models
-description: This skill should be read before delegating work to subagents or Workflow agents. Covers picking a model from the Claude, GPT, and optionally Grok and Muse families (strengths, cost dynamics), setting the effort level, prompt hygiene per family, combining independent runs, and the mechanics of routing to non-Claude models through model-router.
+description: This skill should be read before delegating work to subagents or Workflow agents. Covers picking a model from the Claude, GPT, and optionally Grok, Muse and Gemini families (strengths, cost dynamics), setting the effort level, prompt hygiene per family, combining independent runs, and the mechanics of routing to non-Claude models through model-router.
 ---
 
 # Delegating to models
@@ -245,6 +245,24 @@ outside test put Full at 2-3x Wonder's quota per task. Effort: every
 level passes through unchanged; Muse Code defaults to high and advises
 the lowest level that gives acceptable results.
 
+## Gemini models (optional)
+
+Like Grok and Muse, use Google's Gemini models on the user's request or
+stated preference, not autonomously. The usual reason is writing, where
+evidence is thin: on Arena's human votes (November 18, 2026), Argon,
+Carbon and Neon sit within five points of Opus 5.5 on creative writing,
+and Hydrogen 25 behind. Default to the `gemini-4-neon` agent; use
+`gemini-4-argon`, `gemini-4-carbon` or the cheaper `gemini-4-hydrogen`
+when the user names one. A user on Google's free tier has only Hydrogen,
+without web search, and outside the EEA, Switzerland and the UK Google
+may use what it receives to improve its products: send it nothing
+sensitive. Effort tops out at high on Argon and Carbon, xhigh on Neon
+and Hydrogen. Paid calls bill the user's AI Studio key; on a 429, wait
+as long as Google's message says, or run fewer large-context Gemini
+agents at once. If model-router refuses a Hydrogen request, relay the
+reason and fix from its message; for a project without billing,
+`/model-router:setup` also explains the free-tier option.
+
 ## Open-weights models
 
 Open-weights models (Kimi, GLM, ...) are optional; `model-router:setup`
@@ -259,9 +277,10 @@ use the shipped agents, whose agent types carry the plugin's prefix:
 `model-router:gpt-6.2-astra`, `model-router:gpt-6.2-sol`,
 `model-router:gpt-6.1-terra`, `model-router:gpt-6-luna`. In Workflow, pass
 the bare route as the model: `agent(prompt, {model: 'gpt-6.2-sol', effort:
-'medium'})`. The Grok and Muse families have per-user agents that setup
-creates, named for the route without a prefix (`grok-4.7`,
-`muse-wonder-1.0`), and their routes work the same way in Workflow.
+'medium'})`. The Grok, Muse and Gemini families have per-user agents that
+setup creates, named for the route without a prefix (`grok-4.7`,
+`muse-wonder-1.0`, `gemini-4-neon`), and their routes work the same way
+in Workflow.
 
 Set the `effort` parameter for general-purpose and Workflow agents.
 Forks run at this session's effort. Custom agents can set their own

@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up, configure, verify, repair, or uninstall model-router, the local gateway that routes Claude Code to non-Claude models, including any of its config options — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI), Muse (Meta) and open-weights models, Ultrafast GPT models, OpenAI Daybreak (Trusted Access for Cyber), OS service, and Claude Code settings wiring.
+description: Set up, configure, verify, repair, or uninstall model-router, the local gateway that routes Claude Code to non-Claude models, including any of its config options — binary install, CLIProxyAPI, Codex OAuth or OpenAI API key, optional Grok (xAI), Muse (Meta), Gemini (Google) and open-weights models, Ultrafast GPT models, OpenAI Daybreak (Trusted Access for Cyber), OS service, and Claude Code settings wiring.
 ---
 
 # model-router setup
@@ -155,9 +155,11 @@ here works until the binary resolves.
    tier), `unread` (the read failed, as printed: retry once the service
    runs with a working Codex login), `unserved` (a test setup without the
    managed CLIProxyAPI). Add
-   a row per configured Grok, Muse or open-weights route (`routed-models`
+   a row per configured Grok, Muse, Gemini or open-weights route (`routed-models`
    in `$ROUTER doctor`; Muse: per `references/muse.md`, no Full row while
-   `muse-plan` warns) by hand, and drop a row when its route goes: rows are
+   `muse-plan` warns; Gemini: only the rows `references/gemini.md` step 6
+   picks) by hand, and drop a row when its
+   route goes: rows are
    never checked against the router, and an unserved one fails on its
    first turn. Two cases keep the single-slot pair instead, in the wired
    file's `env` block (one entry only; the other routes stay off the
@@ -191,7 +193,9 @@ here works until the binary resolves.
    `references/grok.md` and follow it; (c) Muse (Meta) models under their
    own Muse Code subscription login (no API key) — if yes, read
    `references/muse.md` and follow it; it opens with Meta's terms, which
-   the user decides on before anything is enabled. Agents from an earlier
+   the user decides on before anything is enabled; (d) Gemini (Google)
+   models on their own Google AI Studio API key — if yes, read
+   `references/gemini.md` and follow it. Agents from an earlier
    setup named `<routing-id>(<effort>)` (in `~/.claude/agents/` or the
    project's `.claude/agents/`): offer to replace them following
    `references/custom-agents.md`.
@@ -276,7 +280,7 @@ step 6's restart and smoke test.
 
 `$ROUTER config-template` prints the annotated template of every
 `~/.config/model-router/config.toml` option. Options with a step above
-(GPT auth, Grok, Muse, open-weights providers, the auto-mode classifier)
+(GPT auth, Grok, Muse, Gemini, open-weights providers, the auto-mode classifier)
 follow that step, and OpenAI Daybreak (`[gpt] daybreak`, a route's
 `cyber-access`) follows `references/daybreak.md`. After any other change, run `$ROUTER doctor` before
 restarting (its `config` check catches a file the service would refuse to
@@ -308,9 +312,9 @@ access program or Daybreak, or a `daybreak` warning in doctor, see
    user's other rows stay).
 2. Delete the agents whose routes go with the router: the Ultrafast
    agents it wrote (files in `~/.claude/agents` whose frontmatter has the
-   line `# Written by model-router`), and the Grok, Muse and open-weights
-   agents setup created (in `~/.claude/agents` or a project's
-   `.claude/agents`, with a `model:` naming a `grok-` or `muse-` route,
+   line `# Written by model-router`), and the Grok, Muse, Gemini and
+   open-weights agents setup created (in `~/.claude/agents` or a project's
+   `.claude/agents`, with a `model:` naming a `grok-`, `muse-` or `gemini-` route,
    or a routing-id under `[[openai-providers.models]]` in
    `~/.config/model-router/config.toml`). Ask before deleting an agent
    the user may have written or edited.

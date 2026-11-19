@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Recorder } from './report';
-import { copyCredentials, copyFamilyLogins, credentialPrecheck, familyPrecheck, MIN_LOGIN_HOURS, ownsCommand, renderConfigToml, sweepSandboxes } from './sandbox';
+import { copyCredentials, copyFamilyLogins, credentialPrecheck, familyPrecheck, geminiKeyPrecheck, MIN_LOGIN_HOURS, ownsCommand, renderConfigToml, renderSecretsToml, sweepSandboxes } from './sandbox';
 
 // Fake logins only: obviously fake token strings, an example.com address.
 const NAME = 'codex-0000aaaa-someone@example.com-pro.json';
@@ -198,6 +198,38 @@ test('config.toml sets the two ports and nothing else', () => {
     upstreams: { cliproxy: { port: 18397 } },
     grok: { enabled: true },
     muse: { enabled: true },
+  });
+  expect(Bun.TOML.parse(renderConfigToml(18797, 18397, { gemini: true }))).toEqual({
+    port: 18797,
+    upstreams: { cliproxy: { port: 18397 } },
+    gemini: { enabled: true },
+  });
+  // The live install's consent to Google's free tier for Hydrogen comes along, and only with the family.
+  expect(Bun.TOML.parse(renderConfigToml(18797, 18397, { gemini: true, geminiFreeTier: true }))).toMatchObject({ gemini: { enabled: true, 'allow-free-tier': true } });
+  expect(Bun.TOML.parse(renderConfigToml(18797, 18397, { geminiFreeTier: true }))).toEqual({ port: 18797, upstreams: { cliproxy: { port: 18397 } } });
+});
+
+test('the Gemini key is taken only from an install that turns [gemini] on, and written back as valid TOML', () => {
+  withDir((dir) => {
+    // A fake key: obviously not a Google one.
+    const key = 'fake-gemini-key_0123';
+    expect(geminiKeyPrecheck(dir)).toBeUndefined();
+    writeFileSync(join(dir, 'secrets.toml'), `[gpt]\napi-key = "fake-openai"\n\n[gemini]\napi-key = "${key}"\n`);
+    // A key left in secrets.toml with the family off is not used.
+    expect(geminiKeyPrecheck(dir)).toBeUndefined();
+    writeFileSync(join(dir, 'config.toml'), 'port = 8787\n\n[gemini]\nenabled = false\n');
+    expect(geminiKeyPrecheck(dir)).toBeUndefined();
+    writeFileSync(join(dir, 'config.toml'), 'port = 8787\n\n[gemini]\nenabled = true\n');
+    expect(geminiKeyPrecheck(dir)).toEqual({ key, allowFreeTier: false });
+    writeFileSync(join(dir, 'secrets.toml'), `[gemini]\napi-key = '${key}'\n`);
+    expect(geminiKeyPrecheck(dir)).toEqual({ key, allowFreeTier: false });
+    writeFileSync(join(dir, 'config.toml'), 'port = 8787\n\n[gemini]\nenabled = true\nallow-free-tier = true\n');
+    expect(geminiKeyPrecheck(dir)).toEqual({ key, allowFreeTier: true });
+    for (const empty of ['[gemini]\napi-key = ""\n', '[gemini]\n', '[gpt]\napi-key = "fake-openai"\n']) {
+      writeFileSync(join(dir, 'secrets.toml'), empty);
+      expect(geminiKeyPrecheck(dir)).toBeUndefined();
+    }
+    expect(Bun.TOML.parse(renderSecretsToml(key))).toEqual({ gemini: { 'api-key': key } });
   });
 });
 

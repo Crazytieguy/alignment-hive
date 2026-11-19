@@ -1,7 +1,7 @@
 # Custom model agents
 
 The plugin ships agents only for the GPT models. Any other routed model
-(open-weights, Grok, Muse) gets one user-created agent — ask where to put it:
+(open-weights, Grok, Muse, Gemini) gets one user-created agent — ask where to put it:
 `~/.claude/agents/` (all projects, usual choice since the router is global)
 or the project's `.claude/agents/`. Effort is chosen per Agent call, so
 offer to replace agents from an earlier setup named `<routing-id>(<effort>)`.
@@ -28,6 +28,9 @@ Complete the task you are given.
   `minimal` through `max`, with `high` as Muse Code's default and advice to
   use the lowest level that gives acceptable results; how much each level
   changes the output is not something this plugin has calibrated.
+- Gemini models: effort reaches Google as its thinking level: `low`,
+  `medium` or `high`, and on Neon and Hydrogen `xhigh` too. A higher
+  level runs as the model's highest, and thinking cannot be turned off.
 - The `model:` value must be a routing ID the router serves (a built-in
   route, a `[[model-overrides]]` entry or an `[[openai-providers.models]]`
   routing-id); anything else falls through to Anthropic and fails with

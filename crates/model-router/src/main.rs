@@ -55,6 +55,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Paste a provider's API key into a hidden prompt; it is checked and
+    /// saved to the secrets.toml next to the config.
+    SetKey {
+        /// Whose key.
+        #[arg(value_enum)]
+        provider: KeyProvider,
+    },
     /// Diagnose config, binaries, auth, and the running router.
     Doctor {
         /// Emit the report as JSON.
@@ -177,6 +184,13 @@ enum LoginProvider {
     Muse,
 }
 
+/// The providers `set-key` takes a key for.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum KeyProvider {
+    /// A Google AI Studio API key, for the Gemini family.
+    Gemini,
+}
+
 /// Everything that differs between the OAuth flows. Adding a provider is one
 /// more descriptor, never a second copy of the login routine.
 struct LoginDescriptor {
@@ -294,6 +308,9 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1)
             }
         }
+        Command::SetKey {
+            provider: KeyProvider::Gemini,
+        } => model_router::set_key::gemini(&config_path).await,
         Command::Doctor { json } => {
             let report = doctor::run(&dirs, &config_path).await;
             if json {

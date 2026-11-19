@@ -48,6 +48,22 @@ pub(crate) fn is_attribution_block(text: &str) -> bool {
     text.trim_start().starts_with("x-anthropic-billing-header:")
 }
 
+/// Removes Claude Code's attribution blocks from a parsed request's system
+/// prompt. Gemini's translator drops them before Google sees the prompt
+/// anyway, but the child keys its thought-signature replay store on the
+/// system prompt as it arrives, and the attribution block changes with
+/// every prompt: left in, a text reply's signature is never found again.
+pub(crate) fn remove_attribution_blocks(document: &mut Value) {
+    if let Some(Value::Array(blocks)) = document.get_mut("system") {
+        blocks.retain(|block| {
+            !block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(is_attribution_block)
+        });
+    }
+}
+
 /// Whether the request is a subagent conversation, per the
 /// `cc_is_subagent=true` flag Claude Code stamps into the attribution
 /// block. The flag is constant across a conversation's requests, so the

@@ -88,7 +88,7 @@ test('host target names match acquire.rs', () => {
 
 test('router-written YAML keys come from string literals in supervisor.rs, not from Rust identifiers', () => {
   const keys = routerYamlKeys(readFileSync(join(REPO, 'crates/model-router/src/supervisor.rs'), 'utf8'));
-  for (const k of ['host', 'port', 'auth-dir', 'api-keys', 'disable-claude-cloak-mode', 'session-affinity', 'oauth-excluded-models', 'alpha-search', 'api-key-entries', 'override-raw', 'override', 'headers'])
+  for (const k of ['host', 'port', 'auth-dir', 'api-keys', 'disable-claude-cloak-mode', 'session-affinity', 'oauth-excluded-models', 'alpha-search', 'gemini-api-key', 'thinking', 'levels', 'api-key-entries', 'override-raw', 'override', 'headers'])
     expect(keys).toContain(k);
   for (const k of ['served', 'pinned', 'exclusions', 'yaml', 'provider']) expect(keys).not.toContain(k);
 });
