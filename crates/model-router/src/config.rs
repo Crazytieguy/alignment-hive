@@ -928,8 +928,7 @@ fn template_models_section(models: &[ModelRoute]) -> String {
         .map(|route| {
             let window = route
                 .context_window
-                .map(|window| format!(", {window} tokens"))
-                .unwrap_or_default();
+                .map_or_default(|window| format!(", {window} tokens"));
             format!("#   {} ({}{window})", route.routing_id, route.display_name)
         })
         .collect::<Vec<_>>()
@@ -1875,15 +1874,12 @@ fn parse_toml_sanitized<T: serde::de::DeserializeOwned>(
     path: &Path,
 ) -> anyhow::Result<T> {
     toml::from_str(contents).map_err(|error| {
-        let location = error
-            .span()
-            .map(|span| {
-                let prefix = &contents[..span.start.min(contents.len())];
-                let line = prefix.matches('\n').count() + 1;
-                let column = prefix.rsplit('\n').next().map_or(0, str::len) + 1;
-                format!(" at line {line}, column {column}")
-            })
-            .unwrap_or_default();
+        let location = error.span().map_or_default(|span| {
+            let prefix = &contents[..span.start.min(contents.len())];
+            let line = prefix.matches('\n').count() + 1;
+            let column = prefix.rsplit('\n').next().map_or(0, str::len) + 1;
+            format!(" at line {line}, column {column}")
+        });
         // A key pasted without quotes is the common slip in secrets.toml.
         let hint = if error.message().contains("must be quoted") {
             " (wrap the value in double quotes)"

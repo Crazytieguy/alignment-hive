@@ -264,15 +264,13 @@ pub fn record_served_base_url(dirs: &Dirs, base_url: &str) -> anyhow::Result<()>
 /// oldest first; none when the history is missing or unreadable.
 #[must_use]
 pub fn served_base_urls(dirs: &Dirs) -> Vec<String> {
-    fs::read_to_string(dirs.served_file())
-        .map(|text| {
-            text.lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    fs::read_to_string(dirs.served_file()).map_or_default(|text| {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
 }
 
 /// The ingress token `serve` created, if any; never creates one.

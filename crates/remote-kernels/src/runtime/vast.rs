@@ -777,8 +777,7 @@ impl Runtime for VastRuntime {
                 instance
                     .status_msg
                     .as_deref()
-                    .map(|m| format!(" — {m}"))
-                    .unwrap_or_default()
+                    .map_or_default(|m| format!(" — {m}"))
             )),
         })
     }

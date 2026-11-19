@@ -451,8 +451,7 @@ impl InstanceState {
         let unfinished = self
             .notebooks
             .get(kernel_id)
-            .map(Notebook::unfinished_cells)
-            .unwrap_or_default();
+            .map_or_default(Notebook::unfinished_cells);
         for (cell_number, parent_msg_id) in unfinished {
             let key = (kernel_id.to_string(), cell_number);
             if self.running_cells.contains_key(&key) {
@@ -704,8 +703,7 @@ fn project_key_id(project_dir: &Path) -> String {
     let hash = hex::encode(&digest[..6]);
     let slug: String = canonical
         .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_default()
+        .map_or_default(|name| name.to_string_lossy().to_string())
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
         .take(40)
@@ -1077,14 +1075,13 @@ pub fn with_record<T>(
 }
 
 fn instance_ids(project_dir: &Path) -> Vec<String> {
-    let mut ids = std::fs::read_dir(state_dir(project_dir).join("instances"))
-        .map(|entries| {
+    let mut ids =
+        std::fs::read_dir(state_dir(project_dir).join("instances")).map_or_default(|entries| {
             entries
                 .flatten()
                 .map(|entry| entry.file_name().to_string_lossy().to_string())
                 .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        });
     ids.sort();
     ids
 }

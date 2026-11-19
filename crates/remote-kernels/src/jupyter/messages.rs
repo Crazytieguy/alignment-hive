@@ -333,14 +333,11 @@ impl ExecutionOutput {
                 self.apply_pending_clear();
                 let ename = msg.content["ename"].as_str().unwrap_or("Error").to_string();
                 let evalue = msg.content["evalue"].as_str().unwrap_or("").to_string();
-                let traceback = msg.content["traceback"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let traceback = msg.content["traceback"].as_array().map_or_default(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
                 self.error = Some(ErrorInfo {
                     ename,
                     evalue,

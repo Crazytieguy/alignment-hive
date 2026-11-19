@@ -722,9 +722,7 @@ impl RemoteKernelsServer {
                 "Kernel {}: alive and reconnected ({execution_state}); {} output(s) produced while disconnected were added to its notebook{} — read it to catch up",
                 kernel.id,
                 found.recovered,
-                notebook_path
-                    .map(|path| format!(" ({})", path.display()))
-                    .unwrap_or_default()
+                notebook_path.map_or_default(|path| format!(" ({})", path.display()))
             );
             let mut running = {
                 let state = self.state.lock().await;

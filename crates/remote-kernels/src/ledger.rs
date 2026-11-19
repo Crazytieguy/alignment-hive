@@ -117,17 +117,15 @@ pub fn import_rollups(project_dir: &Path) -> Result<BTreeMap<String, f64>, Strin
 /// Every machine with an old ledger file, whether or not it still has a record:
 /// a terminated machine's ledger outlives it until its epoch closes.
 pub fn ledger_machine_ids(project_dir: &Path) -> Vec<String> {
-    let mut ids = std::fs::read_dir(ledger_dir(project_dir))
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|entry| {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    Some(name.strip_suffix(".jsonl")?.to_string())
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut ids = std::fs::read_dir(ledger_dir(project_dir)).map_or_default(|entries| {
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                Some(name.strip_suffix(".jsonl")?.to_string())
+            })
+            .collect::<Vec<_>>()
+    });
     ids.sort();
     ids.dedup();
     ids

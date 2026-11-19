@@ -13,9 +13,7 @@ use serde_json::{Value, json};
 /// ([`crate::config::ModelFamily::maker`]).
 #[must_use]
 pub fn identity_text(display_name: &str, maker: Option<&str>) -> String {
-    let maker = maker
-        .map(|maker| format!(", a {maker} model"))
-        .unwrap_or_default();
+    let maker = maker.map_or_default(|maker| format!(", a {maker} model"));
     format!(
         "You are {display_name}{maker}, working inside Claude Code's \
          agent harness alongside Claude models. Do not present yourself as \

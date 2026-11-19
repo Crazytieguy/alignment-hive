@@ -890,8 +890,7 @@ async fn judge_message(judge: &Arc<Judge>, message: &Value) -> Option<Value> {
     let blocks: Vec<&Value> = message
         .get("content")
         .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
+        .map_or_default(Vec::as_slice)
         .iter()
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
         .collect();

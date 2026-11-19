@@ -304,9 +304,7 @@ impl RunPodRuntime {
                         );
                     }
                     if !crate::runpod::types::CREATE_POD_FIELDS.contains(&camel.as_str()) {
-                        let hint = v1_rename_hint(&camel)
-                            .map(|h| format!(" {h}"))
-                            .unwrap_or_default();
+                        let hint = v1_rename_hint(&camel).map_or_default(|h| format!(" {h}"));
                         anyhow::bail!(
                             "[runpod] {key} is not a field RunPod's pod-create API accepts, \
                              so it would reject the whole request.{hint} Keys it does accept \

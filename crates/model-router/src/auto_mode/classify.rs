@@ -109,8 +109,7 @@ pub(super) fn flagged(
 ) -> CallVerdict {
     let tag = policy
         .block_rule(rule)
-        .map(|rule| format!("[{}] ", sanitize::one_line(&rule, 80)))
-        .unwrap_or_default();
+        .map_or_default(|rule| format!("[{}] ", sanitize::one_line(&rule, 80)));
     let suffix = format!(" (model-router {})", sanitize::one_line(model, 60));
     let room = MAX_EXPLANATION_CHARS.saturating_sub(tag.chars().count() + suffix.chars().count());
     let reason = sanitize::one_line(reason, room);

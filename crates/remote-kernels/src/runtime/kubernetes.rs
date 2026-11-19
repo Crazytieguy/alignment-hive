@@ -318,8 +318,7 @@ fn workload_container_name(pod: &Pod, configured: Option<&str>) -> anyhow::Resul
     let containers = pod
         .spec
         .as_ref()
-        .map(|s| s.containers.as_slice())
-        .unwrap_or_default();
+        .map_or_default(|s| s.containers.as_slice());
     let idx = workload_container_idx(containers, configured).ok_or_else(|| match configured {
         Some(name) => anyhow::anyhow!(
             "Pod {:?} has no container named {name:?} (available: {}) — \

@@ -116,7 +116,7 @@ pub(crate) fn stage_route(config: &Config, model: &str) -> ModelRoute {
             upstream_model: twin.map_or(model, |(base, _)| base).to_string(),
             display_name: model.to_string(),
             family: crate::config::ModelFamily::Gpt,
-            tier: twin.map(|(_, tier)| tier).unwrap_or_default(),
+            tier: twin.map_or_default(|(_, tier)| tier),
             ..ModelRoute::default()
         }
     })
@@ -293,8 +293,7 @@ impl Runtime {
         let messages = document
             .get("messages")
             .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+            .map_or_default(Vec::as_slice);
         let provenance = transcript::Provenance::new(context.system_reminders.as_deref());
         let transcript = transcript::build(messages, &provenance, subagent);
         if let Some(unfaithful) = transcript.unfaithful {

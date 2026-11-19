@@ -121,7 +121,7 @@ pub(super) fn inspect(body: &Value) -> Gate {
     let Some(safeguards) = body.get("safeguards") else {
         return Gate::StayOut("the request carries no safeguards");
     };
-    let entries = safeguards.as_array().map(Vec::as_slice).unwrap_or_default();
+    let entries = safeguards.as_array().map_or_default(Vec::as_slice);
     let [entry] = entries else {
         return Gate::StayOut("safeguards is not exactly one entry");
     };

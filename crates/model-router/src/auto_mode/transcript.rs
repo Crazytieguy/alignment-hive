@@ -519,7 +519,7 @@ impl<'a> History<'a> {
     /// last one and its last prose (which a reply answers) are kept for the
     /// provenance ids.
     fn assistant(&mut self, content: &Value) {
-        for block in content.as_array().map(Vec::as_slice).unwrap_or_default() {
+        for block in content.as_array().map_or_default(Vec::as_slice) {
             match block.get("type").and_then(Value::as_str) {
                 Some("tool_use") => {
                     if let Some(id) = block.get("id").and_then(Value::as_str) {
@@ -745,8 +745,7 @@ fn shell(command: &str, input: &Value) -> String {
         .get("allowed_domains")
         .and_then(Value::as_array)
         .filter(|domains| domains.iter().all(Value::is_string))
-        .map(|domains| domains.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|domains| domains.iter().filter_map(Value::as_str).collect());
     let host = field(input, "_host")
         .map(str::trim)
         .filter(|host| !host.is_empty() && !matches!(*host, "container" | "this-machine"));

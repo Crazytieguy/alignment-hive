@@ -267,8 +267,7 @@ impl RemoteKernelsServer {
         let note = handle
             .note
             .as_ref()
-            .map(|n| format!("\n\nNote: {n}"))
-            .unwrap_or_default();
+            .map_or_default(|n| format!("\n\nNote: {n}"));
 
         if wait {
             match self
@@ -1496,8 +1495,7 @@ impl RemoteKernelsServer {
                 let note = record
                     .storage_rate_note
                     .as_deref()
-                    .map(|note| format!(": {note}"))
-                    .unwrap_or_default();
+                    .map_or_default(|note| format!(": {note}"));
                 let _ = write!(
                     section,
                     "\nstopped, storage billing may continue until terminated (rate unavailable{note})"
