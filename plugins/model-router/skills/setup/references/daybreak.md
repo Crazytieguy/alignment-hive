@@ -29,11 +29,6 @@ for every route listed above it is `daybreak_blue`, on a Red account
 too; that is the name doctor and the config use. So doctor's line
 doesn't name the level: ask the user which they have rather than assume.
 
-These settings need the CLIProxyAPI model-router manages itself. With
-`[upstreams.cliproxy] mode = "external"` the router refuses a config that
-has them, so say so and write nothing; such an install gets no `daybreak`
-line and no session-start row.
-
 ## Tell the user first
 
 Before asking what they want, tell the user:

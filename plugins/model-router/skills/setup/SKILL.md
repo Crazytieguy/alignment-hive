@@ -153,8 +153,8 @@ here works until the binary resolves.
    nothing is
    needed: `lists` (already set up), `lacks` (the plan doesn't have the
    tier), `unread` (the read failed, as printed: retry once the service
-   runs with a working Codex login), `unserved` (an external CLIProxyAPI,
-   which gets no `-ultrafast` routes). Add
+   runs with a working Codex login), `unserved` (a test setup without the
+   managed CLIProxyAPI). Add
    a row per configured Grok, Muse or open-weights route (`routed-models`
    in `$ROUTER doctor`; Muse: per `references/muse.md`, no Full row while
    `muse-plan` warns) by hand, and drop a row when its route goes: rows are

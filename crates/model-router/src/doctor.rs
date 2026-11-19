@@ -795,7 +795,7 @@ fn upstream_checks(
             name: "upstream-mode",
             ok: true,
             detail: format!(
-                "external CLIProxyAPI at {}",
+                "external CLIProxyAPI at {} (a test setup)",
                 upstream.base_url.as_deref().unwrap_or("<unset>")
             ),
         }),

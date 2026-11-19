@@ -867,6 +867,9 @@ pub struct UpstreamConfig {
 pub enum UpstreamMode {
     #[default]
     Managed,
+    /// A `CLIProxyAPI` the router doesn't run, at a loopback `base-url`.
+    /// For tests and experiments that stand in for the child (the
+    /// auto-mode classifier's harness does); not offered to users.
     External,
     Stub,
 }
@@ -1720,18 +1723,6 @@ impl Config {
 #[upstreams.cliproxy]
 #mode = "managed"
 #port = 8317
-
-# External mode connects to a user-run CLIProxyAPI. The URL MUST use a
-# loopback IP literal (127.0.0.0/8 or ::1); hostnames including "localhost"
-# are rejected because this is the boundary that receives the injected GPT
-# gateway credential.
-#[upstreams.cliproxy]
-#mode = "external"
-#base-url = "http://127.0.0.1:8317"
-# Optional local CLIProxyAPI gateway secret. When set, GPT requests receive
-# both `x-api-key: <key>` and `Authorization: Bearer <key>` after all incoming
-# Claude credentials have been removed. It is never sent to Anthropic.
-#api-key = "replace-with-a-local-secret"
 
 # Stub mode uses the built-in protocol smoke-test backend.
 #[upstreams.cliproxy]
