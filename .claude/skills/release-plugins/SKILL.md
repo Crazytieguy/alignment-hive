@@ -14,8 +14,11 @@ Code changes land without version bumps, so a release needs a bump commit.
 `bash .claude/skills/release-plugins/scripts/unreleased.sh` lists each
 component's commits since its version last changed on `origin/main`.
 
-- Changes that don't reach users don't need a release: tests, lint fixes, and
-  `CLAUDE.md` files. Whatever else is listed does.
+- Bump every plugin the script lists: *Promote to stable* holds `stable` while
+  any plugin has a shipped file changed since its last version bump
+  (`scripts/unbumped-plugins.sh`, which leaves out tests and `CLAUDE.md`
+  files, as the script does). For a crate or hive-cli, changes that don't reach
+  users (tests, lint fixes) don't need a release; whatever else is listed does.
 - A version already bumped in an unpushed commit (the script flags it) ships
   as-is, with no second bump.
 - Patch bumps by default. If a change might warrant more than a patch (a
@@ -45,13 +48,16 @@ component's commits since its version last changed on `origin/main`.
 ## What a push triggers
 
 - Users' marketplaces follow `stable`, the default branch, not `main`. The
-  *Promote to stable* workflow moves `stable` up to `main` once every binary
-  `main` pins is released; `.github/workflows/promote-stable.yml` says how
-  and why. Nothing is tagged by hand.
+  *Promote to stable* workflow moves `stable` up to `main` once no plugin has
+  an unbumped change and every binary `main` pins is released;
+  `.github/workflows/promote-stable.yml` says how and why. So a push between
+  releases, such as a merged PR, reaches no one until the next release, and a
+  plugin change pushed after a release's bump commit holds that release until
+  it is bumped too. Nothing is tagged by hand.
 - A `binary-version` change auto-tags and releases that binary. The binary
   workflow then calls *Plugin archives* and *Promote to stable*.
-- A content change to model-router or remote-kernels triggers *Plugin
-  archives*, which rebuilds the per-platform zips.
+- Each push to `stable` triggers *Plugin archives*, which rebuilds the
+  per-platform zips from `stable`.
 - *Release hive-cli* runs on hive-cli source changes and, only when
   `packages/hive-cli/package.json` has a new version, attaches compiled
   binaries to a `hive-cli-vX.Y.Z` GitHub release (it isn't on npm), then calls
@@ -79,13 +85,13 @@ the release on this machine now instead of at the next auto-update pass.
 These are also published as `archive` marketplace entries: one zip per
 platform, with that platform's released binary bundled inside, so a plugin
 update and its binary install as one artifact. *Plugin archives* builds them
-from `main`, not `stable`, each as soon as its own binary is released.
-`plugins/<name>/` stays the single source.
+from `stable`, so they move when `stable` does. `plugins/<name>/` stays the
+single source.
 
-**Rollback:** revert the commit and push. The build is byte-deterministic, so
-CI reproduces the previous zips exactly (unless that binary release was re-run
-since, which replaces its assets) and puts them back; machines on the
-bad version move back on their next update pass.
+**Rollback:** revert the commit, bump the plugin's version (and
+`binary-version`, if the binary changed) to a new, higher one, and push. A
+revert without a bump holds `stable` like any other unbumped change, and the
+updater only moves machines to a different version.
 
 `python3 scripts/plugin-archives.py build` builds the zips into
 `dist/plugin-archives/` (git-ignored) to inspect them; `publish` is CI only.
@@ -93,9 +99,11 @@ bad version move back on their next update pass.
 ## Troubleshooting
 
 **`stable` is behind `main`, so users aren't getting a release.** A warning
-on the last *Promote to stable* run's page names the release it waits for. Fix
-that release (next entry); its workflow promotes when it finishes. If nothing
-is missing, re-run *Promote to stable* against `main`. It fails, rather than
+on the last *Promote to stable* run's page names what it waits for. Plugins
+"changed since their last version bump" need a bump commit: bump each and
+push. A release it waits for needs fixing (next entry); its workflow promotes
+when it finishes. If nothing is missing, re-run *Promote to stable* against
+`main`. It fails, rather than
 waits, when `stable` holds commits `main` doesn't, which a ruleset that lets
 only the deploy key update `stable` should prevent: ask the user before
 touching either branch.
@@ -103,13 +111,14 @@ touching either branch.
 **A binary release failed or is missing its assets.** For model-router or
 remote-kernels, re-run *Auto-tag binary releases* against `main`; for the
 CLI, re-run the failed jobs of *Release hive-cli*. Each promotes when it
-finishes, and the first two also publish the plugin archives. The release is
+finishes, and also republishes the plugin archives. The release is
 created with all its assets in one `gh release create`, so a re-run fails if
 a partial release exists; delete that release (keep the tag) first.
 
-**The zips are missing but the binary release is fine.** Re-run *Plugin
-archives* against `main`. It skips any plugin whose binary release is missing
-rather than failing, so check the run's log rather than only its status.
+**The zips are missing or stale but `stable` is right.** Run *Plugin
+archives* (it always builds `stable`). It skips any plugin whose binary
+release is missing rather than failing, so check the run's log rather than
+only its status.
 
 **A binary release's builds are slow again.** They restore cargo caches that
 *Release build cache* saves from `stable`, because a cache saved at one tag

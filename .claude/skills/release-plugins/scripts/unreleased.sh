@@ -31,10 +31,14 @@ report() { # name, version file, version pattern, paths...
   echo
 }
 
+# A plugin's shipped files, as Promote to stable counts them: it holds `stable`
+# until every plugin listed here is bumped.
+source scripts/unbumped-plugins.sh
 for dir in plugins/*/; do
   name=$(basename "$dir")
   [ -f "$dir.claude-plugin/plugin.json" ] || continue
-  report "plugin $name" "$dir.claude-plugin/plugin.json" '"version"' "$dir"
+  shipped_pathspec "${dir%/}"
+  report "plugin $name" "$dir.claude-plugin/plugin.json" '"version"' "${SHIPPED[@]}"
 done
 for dir in crates/*/; do
   [ -f "${dir}Cargo.toml" ] || continue

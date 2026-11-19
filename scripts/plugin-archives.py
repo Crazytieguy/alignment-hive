@@ -14,10 +14,10 @@ changes: publishing replaces the assets in place. At any instant a url serves a
 coherent plugin+binary pair that is either current or one release behind, so a
 fresh install during a release gets a working older version rather than a 404.
 
-Rolling back is `git revert` + land: the build is byte-deterministic (contents
-and modes from `git ls-files -s`, sorted entries, fixed timestamps, stored
-uncompressed), so CI reproduces the previous zips exactly and puts them back.
-Determinism also lets publish skip assets that are already identical.
+CI builds them from `stable`, which holds only released plugin content. The
+build is byte-deterministic (contents and modes from `git ls-files -s`, sorted
+entries, fixed timestamps, stored uncompressed), so publish skips assets that
+are already identical.
 
 Commands:
   build     build the zips into dist/plugin-archives/ (downloads the binaries)

@@ -3,22 +3,19 @@
 # release, replacing the assets in place. The urls are fixed, so nothing in
 # marketplace.json changes at release time.
 #
-# Runs on a push that changes plugin content, and again from each binary
-# release workflow once that workflow has cut the binary — which is what makes
-# a binary-version bump a single push. See
-# .claude/skills/release-plugins/SKILL.md.
+# Built from `stable`, which holds only released plugin content with every
+# pinned binary public (promote-stable.yml), so a fresh install of an archive
+# entry gets what a fresh install from the marketplace does. Runs on each push
+# to `stable`, unfiltered: a promotion can span more files than path filters
+# look at. The binary release workflows also call it once their binary exists;
+# that rebuilds stable's zips, which matters only when a release `stable`
+# already pins was re-run. See .claude/skills/release-plugins/SKILL.md.
 
 name: Plugin archives
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'plugins/model-router/**'
-      - 'plugins/remote-kernels/**'
-      - 'dist-workspace.toml'
-      - 'scripts/plugin-archives.py'
-      - '.github/workflows/plugin-archives.yml'
+    branches: [stable]
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -47,12 +44,11 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      # Always main, never the caller's ref. A release workflow calls us from a
-      # tag, and building that tree would republish it over any content that
-      # landed while the binary was building.
+      # Always stable, never the caller's ref: a release workflow calls us from
+      # a tag, and only stable holds released plugin content.
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: stable
 
       - name: Cache the released binaries
         uses: actions/cache@v4

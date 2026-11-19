@@ -1,22 +1,27 @@
 # Users' marketplaces follow `stable`, the repository's default branch: Claude
 # Code re-clones a marketplace from the default branch whenever that branch has
 # moved. Pushes go to `main`, where the binary releases are built, and this
-# workflow fast-forwards `stable` to `main` once the release behind every pin
-# on main is public:
+# workflow fast-forwards `stable` to `main` once two things hold:
 #
-# - plugins/*/cli-version (hive):   release hive-cli-v<version>
-# - plugins/*/binary-version:       release <plugin>-v<version>
+# - No plugin has a shipped file changed since the last commit that changed its
+#   plugin.json version (scripts/unbumped-plugins.sh). An installed plugin
+#   updates only when its version changes, but a fresh install takes whatever
+#   `stable` holds, so an unreleased change pushed between releases, or after a
+#   release's bump commit, would otherwise reach it under a version released
+#   without it. Changes outside the plugins wait on main for the next release.
+# - The release behind every pin on main is public:
+#   - plugins/*/cli-version (hive):   release hive-cli-v<version>
+#   - plugins/*/binary-version:       release <plugin>-v<version>
+#   so no one is handed a plugin whose binary can't be downloaded yet, however
+#   long the release takes to build and whether or not it succeeds. Public is
+#   enough, because every release workflow makes its release with `gh release
+#   create <tag> <files>`, which keeps it a draft until the files are
+#   uploaded, and hive-cli's stays a draft until its checksums are checked as
+#   well.
 #
-# Until then `stable` stays where it is, so no one is handed a plugin whose
-# binary can't be downloaded yet, however long the release takes to build and
-# whether or not it succeeds. All of main waits together. Public is enough,
-# because every release workflow makes its release with `gh release create
-# <tag> <files>`, which keeps it a draft until the files are uploaded, and
-# hive-cli's stays a draft until its checksums are checked as well.
-#
-# The per-platform zips of model-router and remote-kernels don't come from
-# `stable`: plugin-archives.yml publishes each from main once its own binary
-# is released, with that binary inside.
+# Until then `stable` stays where it is, and all of main waits together. The
+# per-platform zips of model-router and remote-kernels are built from `stable`
+# too (plugin-archives.yml runs on each push to it).
 #
 # Runs on each push to main, and from each binary release workflow once its
 # release is public.
@@ -56,6 +61,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          unbumped=$(bash scripts/unbumped-plugins.sh)
+          if [ -n "$unbumped" ]; then
+            echo "::warning::stable is not moved: changed since their last version bump: ${unbumped//$'\n'/, }"
+            exit 0
+          fi
           tags=()
           for pin in plugins/*/cli-version; do
             tags+=("hive-cli-v$(tr -d '[:space:]' < "$pin")")
