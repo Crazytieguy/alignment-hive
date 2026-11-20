@@ -4359,3 +4359,64 @@ async fn an_origin_search_on_the_claude_branch_keeps_the_output_limit() {
         assert_eq!(document["max_tokens"], 4096, "{document}");
     }
 }
+
+/// The output-cap hint names a `[[openai-providers.models]]` entry, so it is
+/// never added where there is none: on an external child, a hand-written
+/// open-weights route's turn, a GPT turn and a `WebSearch` sub-call (search
+/// off) all get the child's refusal unchanged. (The hint itself is tested
+/// with a managed child, in `proxy`'s own tests.)
+#[tokio::test]
+async fn an_output_cap_refusal_passes_through_without_a_provider_entry() {
+    const REFUSAL: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Invalid max_tokens value, the valid range of max_tokens is [1, 4096]"}}"#;
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        let mut response = Response::new(Body::from(REFUSAL));
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        response
+    }
+    let (cpa_address, _) = spawn_fake(handler).await;
+    let config = Config {
+        upstreams: external_upstreams(format!("http://{cpa_address}")),
+        web_search: model_router::config::WebSearchConfig {
+            mode: model_router::config::WebSearchMode::Off,
+        },
+        models: vec![
+            ModelRoute {
+                routing_id: "deepseek-v4".to_string(),
+                upstream: "cliproxy".to_string(),
+                upstream_model: "openai-compat--deepseek-v4".to_string(),
+                display_name: "DeepSeek V4".to_string(),
+                family: model_router::config::ModelFamily::OpenAiCompat,
+                ..Default::default()
+            },
+            ModelRoute {
+                routing_id: "gpt-test".to_string(),
+                upstream: "cliproxy".to_string(),
+                upstream_model: "gpt-test".to_string(),
+                display_name: "GPT test".to_string(),
+                ..Default::default()
+            },
+        ],
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let turn = |model: &str| {
+        serde_json::json!({
+            "model": model, "max_tokens": 32000, "stream": true,
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        .to_string()
+    };
+    for request in [
+        turn("deepseek-v4"),
+        turn("gpt-test"),
+        origin_subcall_body("deepseek-v4"),
+    ] {
+        let (status, body) = send(&app, request.clone(), &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{request}");
+        assert_eq!(body, REFUSAL, "{request}");
+    }
+}

@@ -185,26 +185,16 @@ impl OverflowRewrite {
     /// in place when it carries the route's backend overflow error. Returns
     /// whether anything changed.
     pub(crate) fn rewrite_envelope(&self, envelope: &mut Value) -> bool {
-        if envelope.get("type").and_then(Value::as_str) != Some("error") {
-            return false;
-        }
-        let Some(error) = envelope.get_mut("error") else {
-            return false;
-        };
-        if error.get("type").and_then(Value::as_str) != Some("invalid_request_error") {
-            return false;
-        }
-        let Some(message) = error.get("message").and_then(Value::as_str) else {
-            return false;
-        };
-        if !is_overflow_message(message, self.dialect) {
+        if !invalid_request_message(envelope)
+            .is_some_and(|message| is_overflow_message(message, self.dialect))
+        {
             return false;
         }
         let estimate = self.estimate();
         if !self.near_window(estimate) {
             return false;
         }
-        error["message"] = Value::from(self.message(estimate));
+        envelope["error"]["message"] = Value::from(self.message(estimate));
         true
     }
 
@@ -217,6 +207,19 @@ impl OverflowRewrite {
         }
         serde_json::to_vec(&envelope).ok().map(Bytes::from)
     }
+}
+
+/// The message of an Anthropic `invalid_request_error` envelope
+/// (`{"type":"error","error":{..}}`).
+pub(crate) fn invalid_request_message(envelope: &Value) -> Option<&str> {
+    if envelope.get("type").and_then(Value::as_str) != Some("error") {
+        return None;
+    }
+    let error = envelope.get("error")?;
+    if error.get("type").and_then(Value::as_str) != Some("invalid_request_error") {
+        return None;
+    }
+    error.get("message").and_then(Value::as_str)
 }
 
 fn is_overflow_message(message: &str, dialect: OverflowDialect) -> bool {

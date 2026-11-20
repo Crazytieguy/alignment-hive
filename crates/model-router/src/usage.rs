@@ -119,8 +119,8 @@ fn count_serialized_tokens(encoding: &tiktoken_rs::CoreBPE, value: &Value) -> u6
 
 /// Everything the GPT branch rewrites in one request's response: usage
 /// reporting, plus (for routes where it is known-correct) the
-/// context-overflow error translation, and the auto-mode classifier's
-/// verdicts.
+/// context-overflow error translation, the output-cap hint, and the
+/// auto-mode classifier's verdicts.
 #[derive(Clone, Debug)]
 pub(crate) struct GptPolicies {
     /// Stands in for the `input_tokens: 0` that `CLIProxyAPI` reports at
@@ -139,6 +139,9 @@ pub(crate) struct GptPolicies {
     /// What the auto-mode classifier does to the reply; `None` while it is
     /// off.
     pub(crate) auto_mode: Option<crate::auto_mode::ReplyMode>,
+    /// Appended to an open-weights host's refusal of the output cap
+    /// ([`crate::output_cap`]); set on those routes' own turns only.
+    pub(crate) output_cap_hint: Option<String>,
 }
 
 /// Applies [`GptPolicies`] to a streamed response event by event, holding a
@@ -281,6 +284,7 @@ mod tests {
                 overflow: None,
                 join_text: false,
                 auto_mode: None,
+                output_cap_hint: None,
             },
         )
     }
@@ -320,6 +324,7 @@ mod tests {
             )),
             join_text: false,
             auto_mode: None,
+            output_cap_hint: None,
         }
     }
 

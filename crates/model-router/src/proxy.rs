@@ -964,6 +964,12 @@ async fn gpt_response(
         },
     );
     policies.auto_mode = auto_mode_plan(state, parts, &body).await;
+    // Turns only, whose errors Claude Code shows the user; and only a model
+    // with a provider entry, the one place the setting goes.
+    policies.output_cap_hint = state
+        .config
+        .provider_model(&route.upstream_model)
+        .map(|model| crate::output_cap::hint(&model.routing_id));
     forward_gpt(
         state,
         parts,
@@ -1055,6 +1061,7 @@ fn gpt_policies(rewritten: &Bytes, route: &crate::config::ModelRoute) -> GptPoli
         overflow,
         join_text: route.family.streams_text_in_pieces(),
         auto_mode: None,
+        output_cap_hint: None,
     }
 }
 
@@ -1395,11 +1402,11 @@ async fn upstream_response(
         });
     if status == StatusCode::BAD_REQUEST
         && !is_sse
-        && let Some(overflow) = policies
+        && let Some(policies) = policies
             .as_ref()
-            .and_then(|policies| policies.overflow.as_ref())
+            .filter(|policies| policies.overflow.is_some() || policies.output_cap_hint.is_some())
     {
-        return overflow_translated_response(state, status, response, overflow, capture).await;
+        return translated_error_response(state, status, response, policies, capture).await;
     }
     // Only a 200 carries a reply to judge (or upstream verdicts to strip).
     let auto_mode = policies
@@ -1484,24 +1491,25 @@ async fn upstream_response(
     build_response(status, response_headers, body)
 }
 
-/// Upper bound on a buffered error body. The captured overflow errors are
-/// ~160 bytes; anything past this bound is not the error we are looking for
-/// and streams through untouched.
-const OVERFLOW_BUFFER_LIMIT: usize = 64 * 1024;
+/// Upper bound on a buffered error body. The captured errors it rewrites are
+/// ~160 bytes; anything past this bound is not one of them and streams
+/// through untouched.
+const ERROR_BUFFER_LIMIT: usize = 64 * 1024;
 
-/// A non-streaming 400 on a route with overflow translation armed: buffer
+/// A non-streaming 400 on a route with an error translation armed: buffer
 /// the (small) body, rewrite it when it is the backend's context-overflow
-/// error (see [`crate::overflow`]), and pass everything else through
+/// error (see [`crate::overflow`]) or append the hint to an output-cap
+/// refusal (see [`crate::output_cap`]), and pass everything else through
 /// unchanged.
-async fn overflow_translated_response(
+async fn translated_error_response(
     state: &AppState,
     status: StatusCode,
     response: reqwest::Response,
-    overflow: &OverflowRewrite,
+    policies: &GptPolicies,
     capture: Option<RequestCapture>,
 ) -> Response {
     let upstream_headers = response.headers().clone();
-    let body = match buffer_bounded(response, OVERFLOW_BUFFER_LIMIT).await {
+    let body = match buffer_bounded(response, ERROR_BUFFER_LIMIT).await {
         Ok(body) => body,
         Err(unbuffered) => {
             return pass_through(
@@ -1513,10 +1521,23 @@ async fn overflow_translated_response(
             );
         }
     };
-    let rewritten = overflow.rewrite_body(&body);
-    if rewritten.is_some() {
+    let rewritten = if let Some(translated) = policies
+        .overflow
+        .as_ref()
+        .and_then(|overflow| overflow.rewrite_body(&body))
+    {
         tracing::info!("translated a context-overflow error to the canonical Anthropic form");
-    }
+        Some(translated)
+    } else if let Some(hinted) = policies
+        .output_cap_hint
+        .as_ref()
+        .and_then(|hint| crate::output_cap::with_hint(&body, hint))
+    {
+        tracing::info!("the host refused the output cap; added the max-output-tokens hint");
+        Some(hinted)
+    } else {
+        None
+    };
     buffered_reply(state, status, &upstream_headers, body, rewritten, capture).await
 }
 
@@ -2228,5 +2249,67 @@ mod tests {
         );
         assert_eq!(answers[1].0, StatusCode::OK);
         assert_eq!(relayed(&seen), [(Some("ultrafast"), None)]);
+    }
+
+    /// On a provider model's turn through the managed child, a host's
+    /// refusal of the output cap ends with where to set `max-output-tokens`
+    /// on that model, named by its routing ID; a GPT turn's same 400 passes
+    /// through unchanged.
+    #[tokio::test]
+    async fn an_output_cap_refusal_names_the_provider_model() {
+        const REFUSAL: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Invalid max_tokens value, the valid range of max_tokens is [1, 4096]"}}"#;
+        let child = {
+            let app = Router::new().fallback(any(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    REFUSAL,
+                )
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            format!("http://{address}")
+        };
+        let config: Config = toml::from_str(
+            r#"
+                [[openai-providers]]
+                name = "deepseek"
+                base-url = "https://api.deepseek.com/v1"
+                [[openai-providers.models]]
+                name = "deepseek-chat"
+                routing-id = "deepseek-v4"
+                display-name = "DeepSeek V4"
+            "#,
+        )
+        .unwrap();
+        let handle = crate::supervisor::ManagedHandle::ready_for_tests(child);
+        let (app, _) = build(config, Some(handle)).await.unwrap();
+        let mut messages = Vec::new();
+        for model in ["deepseek-v4", "gpt-6.2-sol"] {
+            let body = serde_json::json!({
+                "model": model, "max_tokens": 32000, "stream": true,
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            let request = Request::post("/v1/messages")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{model}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            messages.push(envelope["error"]["message"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(
+            messages,
+            [
+                format!(
+                    "Invalid max_tokens value, the valid range of max_tokens is [1, 4096] ({})",
+                    crate::output_cap::hint("deepseek-v4")
+                ),
+                "Invalid max_tokens value, the valid range of max_tokens is [1, 4096]".to_owned(),
+            ]
+        );
     }
 }

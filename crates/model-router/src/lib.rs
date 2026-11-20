@@ -28,6 +28,7 @@ mod identity;
 mod logins;
 pub mod mitm;
 pub mod muse;
+mod output_cap;
 mod overflow;
 mod prompt_cache;
 pub mod proxy;
