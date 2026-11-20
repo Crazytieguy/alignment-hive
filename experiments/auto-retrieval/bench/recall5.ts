@@ -1,13 +1,14 @@
 // Automatic recall as the hive plugin runs it (plugins/hive/hooks/recall-text.ts), one model call per case over
-// `hive local` as of the prompt. Usage: bun recall5.ts <variant[,variant...]> [--par N]
+// `hive local` as of the prompt. Usage: bun recall5.ts <variant[,variant...]> [--par N] [--cases c01,c02]
 // Writes $BENCH/runs/<case>/<variant>/{answer.md (what the main agent reads, or NONE), raw.md, out.json, meta.json}.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { INSTRUCTIONS, budgetFor, citations, history, promptBlocks, report, sessionsFor } from '../../../plugins/hive/hooks/recall-text';
-import type { Listed, Row } from '../../../plugins/hive/hooks/recall-text';
+import { INSTRUCTIONS, budgetFor, citations, entries, history, promptBlocks, report, reportOf, sessionsFor } from '../../../plugins/hive/hooks/recall-text';
+import type { History, Listed, Row } from '../../../plugins/hive/hooks/recall-text';
 import { BENCH, BIN, CLAUDE_ENV, CWD, PROJECT } from './env';
 import { index } from './score4';
+import { FORMATS, INSTRUCTIONS as R13_INSTRUCTIONS, shipped } from './variants13';
 
 // Round 6: the shipped prompt and history (chunked by content, sessions read until the budget is covered).
 // `effort` reaches the model: claude -p sends adaptive thinking, so CLIProxyAPI passes it on (low unless set).
@@ -16,7 +17,11 @@ import { index } from './score4';
 // `scripted`: sessions a script ran are left out, as the plugin leaves them out. It goes by the CLI's `scripted` mark,
 // which the bench's CLI (older) does not give: $BENCH/scripted.json lists the sessions today's CLI marks
 // (`hive local sessions -n 3000 --project <project>`, the locs of the rows with `scripted`).
-type Variant = { model: string; budget?: number; effort?: string; rereadOf?: string; scripted?: boolean };
+// Round 14 (`delivery`): the plugin shipped round 13's para-always variant (its history numbers paragraphs, a reply
+// names them, the main agent gets those). `whole`: each cite delivered whole (with `rereadOf`, that variant's reply, as
+// a -whole variant reads it). `before`: the plugin before it shipped para-always: its instructions, an unnumbered
+// history, every cite whole.
+type Variant = { model: string; budget?: number; effort?: string; rereadOf?: string; scripted?: boolean; delivery?: 'whole' | 'before' };
 const VARIANTS: Record<string, Variant> = {
   'recall6-sol': { model: 'gpt-6.1-sol' },
   'recall6-sol-1200k': { model: 'gpt-6.1-sol', budget: 1_200_000 },
@@ -57,6 +62,14 @@ const VARIANTS: Record<string, Variant> = {
   'recall12-sol61': { model: 'gpt-6.1-sol', scripted: true },
   'recall12-sol62': { model: 'gpt-6.2-sol', scripted: true },
   'recall12-sol61-dashed': { model: 'gpt-6.1-sol', scripted: true, rereadOf: 'recall12-sol61' },
+  // Round 14: the plugin as shipped, on Sol and on Sonnet (at the plugin's Sonnet budget); Sonnet's citations whole
+  // (no call); and the plugin before this round on Sonnet, as round 13's control was on Sol.
+  'recall14-sol62': { model: 'gpt-6.2-sol', scripted: true },
+  'recall14-sonnet': { model: 'claude-sonnet-5-5', scripted: true },
+  // The final segmentation (no fence join, open fences and short remainders not special-cased), on Sol again.
+  'recall14b-sol62': { model: 'gpt-6.2-sol', scripted: true },
+  'recall14-sonnet-whole': { model: 'claude-sonnet-5-5', scripted: true, rereadOf: 'recall14-sonnet', delivery: 'whole' },
+  'recall13-control-sonnet': { model: 'claude-sonnet-5-5', scripted: true, delivery: 'before' },
 };
 // BENCH_SETTINGS=<file>: settings for recall's claude, to send it through a gateway other than the bench's.
 const SETTINGS = process.env.BENCH_SETTINGS ?? join(BENCH, 'settings.json');
@@ -66,6 +79,8 @@ const scripted = new Set<string>(existsSync(SCRIPTED) ? JSON.parse(readFileSync(
 const args = process.argv.slice(2);
 const parAt = args.indexOf('--par');
 const par = parAt >= 0 ? Number(args.splice(parAt, 2)[1]) : 6;
+const casesAt = args.indexOf('--cases');
+const only = casesAt >= 0 ? new Set(args.splice(casesAt, 2)[1]!.split(',')) : undefined;
 const names = args[0]!.split(',');
 for (const n of names) if (!VARIANTS[n]) throw new Error(`unknown variant ${n}`);
 
@@ -124,7 +139,7 @@ async function runOne(c: (typeof index)[number], name: string, v: Variant): Prom
   const all = (await hive(['sessions', '-n', '500', '--project', PROJECT])) as Array<Listed>;
   const listed = v.scripted ? all.map((s) => (scripted.has(s.loc) ? { ...s, scripted: true } : s)) : all;
   const sessions = await sessionsFor(listed, async (locs) => (await hive(['outline', ...locs, '--replies', '--clip', '0'])) as Array<Row>, budget);
-  const h = history(sessions, now, budget, session);
+  const h = v.delivery === 'before' ? history(sessions, now, budget, session, undefined, FORMATS.none) : history(sessions, now, budget, session);
   const prompt = readFileSync(join(BENCH, 'cases', c.id, 'prompt.txt'), 'utf8');
   const text = promptBlocks(h, session, { prompt }).map((b) => b.text).join('');
   const t0 = performance.now();
@@ -133,7 +148,7 @@ async function runOne(c: (typeof index)[number], name: string, v: Variant): Prom
     kept ??
     (await run(
       'claude',
-      ['-p', '--model', v.model, '--effort', v.effort ?? 'low', '--system-prompt', INSTRUCTIONS, '--tools', '', '--strict-mcp-config', '--setting-sources', 'project', '--settings', SETTINGS, '--output-format', 'json'],
+      ['-p', '--model', v.model, '--effort', v.effort ?? 'low', '--system-prompt', v.delivery === 'before' ? R13_INSTRUCTIONS : INSTRUCTIONS, '--tools', '', '--strict-mcp-config', '--setting-sources', 'project', '--settings', SETTINGS, '--output-format', 'json'],
       // A Claude model would write the whole prompt to the cache, which no later case reads.
       { ...CLAUDE_ENV, DISABLE_PROMPT_CACHING: '1' },
       text,
@@ -149,7 +164,7 @@ async function runOne(c: (typeof index)[number], name: string, v: Variant): Prom
   let delivered: string | undefined;
   if (r.code === 0 && typeof out.result === 'string') {
     writeFileSync(join(dir, 'raw.md'), out.result);
-    delivered = report(out.result, h);
+    delivered = deliver(out.result, h, v);
     writeFileSync(join(dir, 'answer.md'), delivered ?? 'NONE');
   }
   const usage = Object.values((out.modelUsage ?? {}) as Record<string, Record<string, number>>)[0] ?? {};
@@ -171,10 +186,24 @@ async function runOne(c: (typeof index)[number], name: string, v: Variant): Prom
   console.error(`${c.id} ${name} code=${r.code} ${(callMs / 1000).toFixed(0)}s report=${delivered?.length ?? 0}`);
 }
 
-const jobs = index.flatMap((c) => names.map((n) => () => runOne(c, n, VARIANTS[n]!)));
-let next = 0;
-await Promise.all(
-  Array.from({ length: Math.min(par, jobs.length) }, async () => {
-    while (next < jobs.length) await jobs[next++]!().catch((e) => console.error(String(e)));
-  }),
-);
+/** What the main agent reads of a reply: the plugin's report, or the variant's other delivery; undefined when nothing. */
+function deliver(reply: string, h: History, v: Variant): string | undefined {
+  if (v.delivery === undefined) return report(reply, h);
+  // Whole: the plugin's entries (no news left out, as it does), each with its whole text; before: every cite whole.
+  const found = v.delivery === 'whole' ? entries(reply, h).map((e) => ({ ...e, text: h.seen.get(e.loc)!.text })) : shipped(reply, h);
+  return found.length ? reportOf(found, h.from, { prompt: '' }) : undefined;
+}
+
+// A variant that reads another's reply runs once every other job is done.
+const cases = index.filter((c) => !only || only.has(c.id));
+const pool = async (jobs: Array<() => Promise<void>>) => {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(par, jobs.length) }, async () => {
+      while (next < jobs.length) await jobs[next++]!().catch((e) => console.error(String(e)));
+    }),
+  );
+};
+const jobsOf = (vs: Array<string>) => cases.flatMap((c) => vs.map((n) => () => runOne(c, n, VARIANTS[n]!)));
+await pool(jobsOf(names.filter((n) => !VARIANTS[n]!.rereadOf)));
+await pool(jobsOf(names.filter((n) => VARIANTS[n]!.rereadOf)));

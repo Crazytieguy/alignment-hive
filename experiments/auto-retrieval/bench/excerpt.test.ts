@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { Entry, History } from '../../../plugins/hive/hooks/recall-text';
 import { history, quotesIn } from '../../../plugins/hive/hooks/recall-text';
-import { GAP, blocks, byAnchors, byPointers, byQuote, deliver, excerptOf, isLong, numbered, reportOfExcerpts } from './excerpt';
+import { GAP, blocks, byAnchors, byPointers, byQuote, deliver, isLong, parsePointers, reportOfExcerpts } from './excerpt';
 import { quotesOf } from './quotes';
 import {
   ANCHOR100_INSTRUCTIONS,
@@ -16,80 +16,22 @@ import {
   bm25,
   tokens,
   parseAnchors,
-  parsePointers,
   parseQuote,
   spanBlocks,
   stage2Choices,
 } from './variants13';
 
 const para = (word: string, n: number) => Array.from({ length: n }, (_, i) => `${word}${i}`).join(' ') + '.';
-const slice = (text: string) => blocks(text).map((b) => text.slice(b.start, b.end));
 
-// --- Segmentation
-
-test('blocks split at blank lines and are exact source slices', () => {
-  const text = `${para('alpha', 20)}\n\n${para('beta', 20)}\n\n\n${para('gamma', 20)}`;
-  expect(slice(text)).toEqual([para('alpha', 20), para('beta', 20), para('gamma', 20)]);
-});
-
-test('a short piece (a heading) joins the next; a short last piece joins the one before', () => {
-  const text = `## Findings\n\n${para('alpha', 20)}\n\n${para('beta', 20)}\n\nDone.`;
-  expect(slice(text)).toEqual([`## Findings\n\n${para('alpha', 20)}`, `${para('beta', 20)}\n\nDone.`]);
-});
-
-test('never splits inside fenced code; a fence joins the block before it, or stands alone if first', () => {
-  const code = '```ts\nconst a = 1\n\nconst b = 2\n\n\nconst c = 3 // a long enough line to pass the short rule\n```';
-  const text = `${para('alpha', 20)}\n\n${code}\n\n${para('beta', 20)}`;
-  expect(slice(text)).toEqual([`${para('alpha', 20)}\n\n${code}`, para('beta', 20)]);
-  expect(slice(`${code}\n\n${para('beta', 20)}`)).toEqual([code, para('beta', 20)]);
-});
-
-test('a long list splits at line breaks into pieces of about 1,200 characters', () => {
-  const items = Array.from({ length: 40 }, (_, i) => `- item ${i}: ${'x'.repeat(60)}`);
-  const text = `Here is the list:\n${items.join('\n')}`;
-  const bs = slice(text);
-  expect(bs.length).toBeGreaterThan(1);
-  for (const b of bs) expect(b.length).toBeLessThanOrEqual(1200);
-  expect(bs.join('\n')).toBe(text);
-  expect(bs[0]!.startsWith('Here is the list:\n- item 0')).toBe(true);
-});
-
-test('a long list with a fence inside splits around the fence, not in it', () => {
-  const fence = `\`\`\`\n${Array.from({ length: 30 }, (_, i) => `line ${i} ${'y'.repeat(40)}`).join('\n')}\n\`\`\``;
-  const items = Array.from({ length: 10 }, (_, i) => `- item ${i}: ${'x'.repeat(60)}`);
-  const text = `${items.join('\n')}\n${fence}\n${items.join('\n')}`;
-  const bs = slice(text);
-  expect(bs.some((b) => b.includes(fence))).toBe(true);
-});
-
-test('numbered: ¶ marks before each block, separators kept; a block opening with a fence gets its mark on its own line', () => {
-  const text = `${para('alpha', 20)}\n\n${para('beta', 20)}`;
-  expect(numbered(text)).toBe(`¶1 ${para('alpha', 20)}\n\n¶2 ${para('beta', 20)}`);
-  const code = '```bash\necho one two three four five six seven eight nine ten eleven twelve thirteen fourteen\n```';
-  expect(numbered(`${code}\n\n${para('beta', 20)}`)).toBe(`¶1\n${code}\n\n¶2 ${para('beta', 20)}`);
-});
-
-test('a fence the clip left open is not a fence: the rest still splits', () => {
-  const text = `${para('alpha', 20)}\n\n\`\`\`ts\nconst a = 1 // long enough to stand as its own piece of the text here\n\n${para('beta', 20)}\n\n${para('gamma', 20)} [+4646 chars]`;
-  expect(slice(text).length).toBe(3);
-});
+// --- Segmentation (the plugin's: plugins/hive/tests/paragraphs.test.ts)
 
 test('isLong: over 100 words', () => {
   expect(isLong(para('w', 100))).toBe(false);
   expect(isLong(para('w', 101))).toBe(true);
 });
 
-// --- Excerpts and gap markers
-
 const four = [para('alpha', 20), para('beta', 20), para('gamma', 20), para('delta', 20)];
 const text4 = four.join('\n\n');
-
-test('excerptOf: kept blocks verbatim, a gap line wherever blocks are skipped, at either end too', () => {
-  expect(excerptOf(text4, [1])).toBe([GAP, four[1], GAP].join('\n\n'));
-  expect(excerptOf(text4, [0, 1, 3])).toBe([`${four[0]}\n\n${four[1]}`, GAP, four[3]].join('\n\n'));
-  expect(excerptOf(text4, [3, 0])).toBe([four[0], GAP, four[3]].join('\n\n'));
-  expect(excerptOf(text4, [0, 1, 2, 3])).toBe(text4);
-});
 
 // --- Resolvers
 
@@ -102,6 +44,36 @@ test('byPointers: ¶ lists, bare lists, all, and numbers out of range', () => {
   expect(byPointers(text4, '¶9-12')).toBeUndefined();
   expect(byPointers(text4, '¶3-1')).toBeUndefined();
   expect(byPointers(text4, '¶0')).toBeUndefined();
+  expect(byPointers(text4, '¶2–3; ¶1')).toEqual([0, 1, 2]);
+  expect(byPointers(text4, '¶2 ¶4')).toEqual([1, 3]);
+});
+
+test('parsePointers: before the pipe, after it, all, missing, malformed', () => {
+  expect(parsePointers(' ¶2-3,6 | ctx')).toEqual({ context: 'ctx', choice: { kind: 'pointers', text: '¶2-3,6' } });
+  expect(parsePointers(' ¶2, ¶4')).toEqual({ context: '', choice: { kind: 'pointers', text: '¶2, ¶4' } });
+  expect(parsePointers(' 2-3 | ctx')).toEqual({ context: 'ctx', choice: { kind: 'pointers', text: '2-3' } });
+  expect(parsePointers(' all | ctx')).toEqual({ context: 'ctx', choice: { kind: 'whole' } });
+  expect(parsePointers(' | ¶4 | ctx')).toEqual({ context: 'ctx', choice: { kind: 'pointers', text: '¶4' } });
+  expect(parsePointers(' | all')).toEqual({ context: '', choice: { kind: 'whole' } });
+  expect(parsePointers(' | ctx')).toEqual({ context: 'ctx', choice: { kind: 'absent' } });
+  expect(parsePointers('')).toEqual({ context: '', choice: { kind: 'absent' } });
+  expect(parsePointers(' ¶? | ctx')).toEqual({ context: 'ctx', choice: { kind: 'malformed' } });
+  // The whole field must parse: never a shorter list than the reply gave.
+  expect(parsePointers(' ¶1-oops | ctx')).toEqual({ context: 'ctx', choice: { kind: 'malformed' } });
+  expect(parsePointers(' ¶1-2, all of ¶5 | ctx').choice.kind).toBe('malformed');
+  expect(parsePointers(' | ¶2-oops | ctx')).toEqual({ context: 'ctx', choice: { kind: 'malformed' } });
+  // Lists by spaces, semicolons, `and`, brackets around them.
+  expect(parsePointers(' ¶2 ¶5 | ctx').choice).toEqual({ kind: 'pointers', text: '¶2 ¶5' });
+  expect(parsePointers(' (¶2–4; ¶7) | ctx').choice).toEqual({ kind: 'pointers', text: '¶2–4; ¶7' });
+  expect(parsePointers(' ¶2 and ¶4').choice).toEqual({ kind: 'pointers', text: '¶2 and ¶4' });
+  expect(parsePointers(' paragraphs 2 to 4 | ctx').choice).toEqual({ kind: 'pointers', text: 'paragraphs 2 to 4' });
+  // Words after the loc that point at nothing are no choice; their context is still what follows the pipe.
+  expect(parsePointers(' (see above) | ctx')).toEqual({ context: 'ctx', choice: { kind: 'absent' } });
+  expect(parsePointers(' assistant | labelled')).toEqual({ context: 'labelled', choice: { kind: 'absent' } });
+  // A context after the pipe that opens like a pointer but is words is the context.
+  expect(parsePointers(' | p50 latency was the question')).toEqual({ context: 'p50 latency was the question', choice: { kind: 'absent' } });
+  expect(parsePointers(' | P0 outage | more')).toEqual({ context: 'P0 outage | more', choice: { kind: 'absent' } });
+  expect(parsePointers(' | p3 | ctx')).toEqual({ context: 'ctx', choice: { kind: 'pointers', text: 'p3' } });
 });
 
 test('byAnchors: a unique phrase gives its block; ambiguous or missing anchors are dropped', () => {
@@ -134,9 +106,8 @@ test('a report round trip: reportOf -> quotesOf gives back the excerpt text and 
   expect(report).toContain('> [assistant, excerpt] […]');
   const q = quotesOf(report);
   expect(q).toEqual([{ loc: 'abcdef01:12', text: d.entry.text.split('\n').join(' ') }]);
-  // Known, for shipping (the bench never reads its own reports back): the plugin's quotesIn starts a new quote at
-  // every `> [` line, so a gap line splits the excerpt and the report no longer reads back as one quote.
-  expect(quotesIn(report).map((x) => x.kind)).toEqual(['…']);
+  // The plugin's quotesIn reads it back as one quote, gap lines and all.
+  expect(quotesIn(report)).toEqual([{ kind: 'assistant, excerpt', text: d.entry.text, loc: 'abcdef01:12', date: '2026-11-02' }]);
 });
 
 test('a recall report cites only by each quote\'s closing parentheses', () => {
@@ -163,12 +134,13 @@ test('deliver: every block chosen is whole by choice, unlabelled', () => {
 
 // --- History numbering
 
-test('history format: marks print, seen keeps the raw text, and the default prints as before', () => {
+test('history format: marks print, seen keeps the raw text; the plugin numbers by default, as paraAlways', () => {
   const long = Array.from({ length: 3 }, (_, i) => para(`w${i}x`, 40)).join('\n\n');
   const now = Date.parse('2026-10-20T15:30:00Z');
   const sessions = [{ loc: 'aaaa0001', rows: [{ loc: 'aaaa0001:1', time: '2026-10-20T10:00:00Z', kind: 'assistant', text: long }] }];
-  const plainH = history(sessions, now, 100_000);
+  const plainH = history(sessions, now, 100_000, '', undefined, FORMATS.none);
   const marked = history(sessions, now, 100_000, '', undefined, FORMATS.para100);
+  expect(history(sessions, now, 100_000).open).toBe(history(sessions, now, 100_000, '', undefined, FORMATS.paraAlways).open);
   expect(plainH.open).toContain(`[aaaa0001:1] assistant: ${long}`);
   expect(marked.open).toContain(`[aaaa0001:1] assistant: \n¶1 ${para('w0x', 40)}\n\n¶2 `);
   expect(marked.seen.get('aaaa0001:1')!.text).toBe(long);
@@ -212,29 +184,6 @@ test('quote replies: excerpt and context, empty fields, whole, pipes in the quot
   expect(parseQuote(` | ${piped} |`, `intro.\n\n${piped}`)).toEqual({ context: '', choice: { kind: 'quote', text: piped } });
 });
 
-test('pointer replies: before the pipe, after it, all, missing, malformed', () => {
-  expect(parsePointers(' ¶2-3,6 | ctx')).toEqual({ context: 'ctx', choice: { kind: 'pointers', text: '¶2-3,6' } });
-  expect(parsePointers(' ¶2, ¶4')).toEqual({ context: '', choice: { kind: 'pointers', text: '¶2, ¶4' } });
-  expect(parsePointers(' 2-3 | ctx')).toEqual({ context: 'ctx', choice: { kind: 'pointers', text: '2-3' } });
-  expect(parsePointers(' all | ctx')).toEqual({ context: 'ctx', choice: { kind: 'whole' } });
-  expect(parsePointers(' | ¶4 | ctx')).toEqual({ context: 'ctx', choice: { kind: 'pointers', text: '¶4' } });
-  expect(parsePointers(' | all')).toEqual({ context: '', choice: { kind: 'whole' } });
-  expect(parsePointers(' | ctx')).toEqual({ context: 'ctx', choice: { kind: 'absent' } });
-  expect(parsePointers(' ¶? | ctx')).toEqual({ context: 'ctx', choice: { kind: 'malformed' } });
-  // The whole field must parse: never a shorter list than the reply gave.
-  expect(parsePointers(' ¶1-oops | ctx')).toEqual({ context: 'ctx', choice: { kind: 'malformed' } });
-  expect(parsePointers(' ¶1-2, all of ¶5 | ctx').choice.kind).toBe('malformed');
-  expect(parsePointers(' | ¶2-oops | ctx')).toEqual({ context: 'ctx', choice: { kind: 'malformed' } });
-  // Lists by spaces, semicolons, `and`, brackets around them.
-  expect(parsePointers(' ¶2 ¶5 | ctx').choice).toEqual({ kind: 'pointers', text: '¶2 ¶5' });
-  expect(parsePointers(' (¶2–4; ¶7) | ctx').choice).toEqual({ kind: 'pointers', text: '¶2–4; ¶7' });
-  expect(parsePointers(' ¶2 and ¶4').choice).toEqual({ kind: 'pointers', text: '¶2 and ¶4' });
-  expect(byPointers(text4, '¶2–3; ¶1')).toEqual([0, 1, 2]);
-  expect(byPointers(text4, '¶2 ¶4')).toEqual([1, 3]);
-  // Words after the loc that point at nothing are no choice.
-  expect(parsePointers(' (see above) | ctx').choice.kind).toBe('absent');
-});
-
 test('anchor replies: a list, null, curly quotes, pipes inside anchors, none given, malformed', () => {
   expect(parseAnchors(' | anchors=["one two three four", "five | six"] | ctx')).toEqual({ context: 'ctx', choice: { kind: 'anchors', list: ['one two three four', 'five | six'] } });
   expect(parseAnchors(' | anchors=null | ctx')).toEqual({ context: 'ctx', choice: { kind: 'whole' } });
@@ -254,6 +203,7 @@ const fakeHistory = (es: Record<string, { label: string; text: string }>): Histo
   from: '2026-10-01',
   seen: new Map(Object.entries(es).map(([loc, e]) => [loc, { ...e, date: '2026-10-02' }])),
   isNew: (loc) => !loc.startsWith('cccccccc'),
+  fresh: (loc) => blocks(es[loc]?.text ?? '').map((_, i) => i),
 });
 const long4 = [para('alpha', 30), para('beta', 30), para('gamma', 30), para('delta', 30)].join('\n\n');
 const h = fakeHistory({ 'aaaaaaaa:1': { label: 'assistant', text: long4 }, 'aaaaaaaa:2': { label: 'user', text: 'short one' }, 'cccccccc:3': { label: 'user', text: 'current session' } });

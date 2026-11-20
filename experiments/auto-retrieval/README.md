@@ -10,7 +10,7 @@ Every run sees transcripts as they stood when its prompt was typed: the bench's 
 
 ## Scripts
 
-From this folder:
+From `bench/`:
 
 ```bash
 bun recall5.ts recall8-sol,recall8-sonnet --par 6  # recall as the plugin runs it, per case -> runs/<case>/<variant>/
@@ -22,6 +22,7 @@ BENCH_CASES=c01-d17 bun score4.ts --compare 'a:b'  # recall, precision, NONE rat
 bun recall13.ts recall13-para100,recall13-para100-whole --par 6 [--cases c03,c11]  # round 13: excerpts of long entries (variants in its header)
 BENCH_CASES=c01-d17 bun score4.ts --retention 'recall13-para100:recall13-para100-whole'  # relevant value an excerpt kept, and its size
 BENCH_CASES=c01-d17 bun pair13.ts recall13-para100 --par 8                        # Opus and Sol compare excerpt vs whole report: what was lost, which is better
+bun recall5.ts recall14-sol62,recall14-sonnet,recall14-sonnet-whole,recall13-control-sonnet --par 6 [--cases c03,c30]  # round 14: the shipped excerpts on Sol and Sonnet, Sonnet whole, and Sonnet before excerpts
 BENCH_CASES=c01-d17 bun sweep5.ts [clips]          # no model calls: what recall's history lets a reader see
 BENCH_CASES=c01-d17 bun gaps5.ts                   # what the retrieval agent delivers that recall does not, and why
 bun cost5.ts 2026-09-21 2026-10-19 800 800000      # recall's cost over real use, with a simulated prompt cache

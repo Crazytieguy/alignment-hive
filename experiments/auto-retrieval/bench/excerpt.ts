@@ -1,161 +1,20 @@
 // Excerpts of a cited entry (round 13): its paragraphs ("blocks"), how a reply's pointer, anchors or quote pick some of
 // them, and the excerpt the main agent then reads, verbatim from the entry with `[…]` where blocks are left out.
+import { blocks, excerptOf } from '../../../plugins/hive/hooks/paragraphs';
+import type { Block } from '../../../plugins/hive/hooks/paragraphs';
 import { reportOf } from '../../../plugins/hive/hooks/recall-text';
 import type { Entry } from '../../../plugins/hive/hooks/recall-text';
 
-/** A block of an entry's text: [start, end) in the source, from its first to its last non-blank character's line. */
-export type Block = { start: number; end: number };
-
-/** A piece under this many characters (a heading, "Here's what I found:") joins the next one. */
-const SHORT = 80;
-/** A piece over this many characters (a long list) splits at line breaks into pieces of about this size. */
-const LONG = 1200;
-/** Where an excerpt leaves blocks out; recall-text.ts's ELIDED reads it as a gap in a quote. */
-export const GAP = '[…]';
-
-type Line = { start: number; end: number; blank: boolean };
-/** A fence line: ``` or ~~~ (3+), up to 3 spaces in. */
-const FENCE = /^ {0,3}(`{3,}|~{3,})/;
-
-function linesOf(text: string): Array<Line> {
-  const out: Array<Line> = [];
-  let at = 0;
-  for (const l of text.split('\n')) {
-    out.push({ start: at, end: at + l.length, blank: !l.trim() });
-    at += l.length + 1;
-  }
-  return out;
-}
-
-/**
- * Paragraph segmentation, deterministic: blocks split at blank lines, never inside fenced code (a block starting with
- * a fence joins the one before it, or stands alone if first); a piece under SHORT characters joins the next one (the
- * last one, the one before it); a piece over LONG characters splits at line breaks outside fences into pieces of at
- * most about LONG (a remainder under SHORT stays with the piece before it).
- */
-export function blocks(text: string): Array<Block> {
-  const lines = linesOf(text);
-  // Pieces: runs of non-blank lines, a fence's lines all in one piece. `units` are the piece's line groups that a long
-  // piece may split between: a line, or a whole fence.
-  type Piece = { start: number; end: number; code: boolean; units: Array<Block> };
-  const pieces: Array<Piece> = [];
-  let cur: Piece | undefined;
-  let fence: { ch: string; n: number; unit: Block } | undefined;
-  const closer = (raw: string, ch: string, n: number) => {
-    const m = FENCE.exec(raw);
-    return !!m && m[1]![0] === ch && m[1]!.length >= n && !raw.slice(m[0].length).trim();
-  };
-  // A fence the text never closes (cut at the clip) is not a fence: its lines split as prose would.
-  const isClosed = (k: number, ch: string, n: number) => lines.slice(k + 1).some((x) => closer(text.slice(x.start, x.end), ch, n));
-  for (const [k, l] of lines.entries()) {
-    const raw = text.slice(l.start, l.end);
-    if (fence) {
-      fence.unit.end = l.end;
-      cur!.end = l.end;
-      if (closer(raw, fence.ch, fence.n)) fence = undefined;
-      continue;
-    }
-    if (l.blank) {
-      cur = undefined;
-      continue;
-    }
-    const f = FENCE.exec(raw);
-    const m = f && isClosed(k, f[1]![0]!, f[1]!.length) ? f : null;
-    if (!cur) pieces.push((cur = { start: l.start, end: l.end, code: !!m, units: [] }));
-    cur.end = l.end;
-    const unit = { start: l.start, end: l.end };
-    cur.units.push(unit);
-    if (m) fence = { ch: m[1]![0]!, n: m[1]!.length, unit };
-  }
-  // A piece that opens with a fence joins the piece before it.
-  const joined: Array<Piece> = [];
-  for (const p of pieces) {
-    const prev = joined.at(-1);
-    if (p.code && prev) {
-      prev.end = p.end;
-      prev.units.push(...p.units);
-    } else joined.push({ ...p, units: [...p.units] });
-  }
-  // A short piece joins the next one; a short last piece, the one before it.
-  const merged: Array<Piece> = [];
-  let carry: Piece | undefined;
-  for (const p of joined) {
-    const q: Piece = carry ? { start: carry.start, end: p.end, code: false, units: [...carry.units, ...p.units] } : p;
-    carry = undefined;
-    if (q.end - q.start < SHORT) carry = q;
-    else merged.push(q);
-  }
-  if (carry) {
-    const prev = merged.at(-1);
-    if (prev) {
-      prev.end = carry.end;
-      prev.units.push(...carry.units);
-    } else merged.push(carry);
-  }
-  // A long piece splits between units.
-  const out: Array<Block> = [];
-  for (const p of merged) {
-    if (p.end - p.start <= LONG) {
-      out.push({ start: p.start, end: p.end });
-      continue;
-    }
-    const parts: Array<Block> = [];
-    for (const u of p.units) {
-      const last = parts.at(-1);
-      if (last && u.end - last.start <= LONG) last.end = u.end;
-      else parts.push({ ...u });
-    }
-    const tail = parts.at(-1)!;
-    if (parts.length > 1 && tail.end - tail.start < SHORT) {
-      parts.pop();
-      parts.at(-1)!.end = tail.end;
-    }
-    out.push(...parts);
-  }
-  return out;
-}
+// Segmentation, numbering and excerpts are the plugin's (plugins/hive/hooks/paragraphs.ts), which shipped round 13's
+// para-always variant; the rest here is the bench's own, round 13's lenient pointer parser among it (the plugin reads
+// only `¶2-3,6` lists and delivers anything else whole).
+export { GAP, blocks, excerptOf, numbered } from '../../../plugins/hive/hooks/paragraphs';
+export type { Block } from '../../../plugins/hive/hooks/paragraphs';
 
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
 /** Whether an entry counts as long: over 100 whitespace-separated words. */
 export const isLong = (text: string): boolean => words(text) > 100;
 export const wordCount = words;
-
-/**
- * The text with `¶1 `, `¶2 ` ... before each block, the source's separators between them; a block that opens with a
- * fence gets its mark on a line of its own, so the fence still starts its line.
- */
-export function numbered(text: string): string {
-  const bs = blocks(text);
-  let out = '';
-  let at = 0;
-  bs.forEach((b, i) => {
-    const body = text.slice(b.start, b.end);
-    out += `${text.slice(at, b.start)}¶${i + 1}${FENCE.test(body) ? '\n' : ' '}${body}`;
-    at = b.end;
-  });
-  return out + text.slice(at);
-}
-
-/**
- * The chosen blocks (0-based) in source order, verbatim, with a GAP line wherever blocks are left out (before the
- * first kept block and after the last too, when they are not the entry's first and last). Every block chosen, or none
- * valid: the text unchanged.
- */
-export function excerptOf(text: string, blockIndexes: ReadonlyArray<number>): string {
-  const bs = blocks(text);
-  const keep = [...new Set(blockIndexes)].filter((i) => Number.isInteger(i) && i >= 0 && i < bs.length).sort((a, b) => a - b);
-  if (!keep.length || keep.length === bs.length) return text;
-  const parts: Array<string> = [];
-  if (keep[0]! > 0) parts.push(GAP);
-  for (let i = 0; i < keep.length; ) {
-    let j = i;
-    while (j + 1 < keep.length && keep[j + 1] === keep[j]! + 1) j++;
-    parts.push(text.slice(bs[keep[i]!]!.start, bs[keep[j]!]!.end));
-    if (j + 1 < keep.length || keep[j]! < bs.length - 1) parts.push(GAP);
-    i = j + 1;
-  }
-  return parts.join('\n\n');
-}
 
 /** Whether these blocks are every block of the text. */
 export const coversAll = (text: string, idx: ReadonlyArray<number>) => new Set(idx).size >= blocks(text).length;
@@ -191,24 +50,6 @@ const span = (bs: ReadonlyArray<Block>, from: number, to: number) => {
   return Array.from({ length: b - a + 1 }, (_, k) => a + k);
 };
 const sorted = (xs: Iterable<number>) => [...new Set(xs)].sort((a, b) => a - b);
-
-/**
- * A pointer list (`¶2-3,6`, `2-3, 6`, `p2`) as 0-based block indexes; `all`, or nothing valid left once numbers out
- * of range are dropped, gives undefined.
- */
-export function byPointers(text: string, pointers: string): Array<number> | undefined {
-  const s = pointers.replace(/¶|\bp(?=\d)/gi, ' ');
-  if (/^\W*all\b/i.test(s)) return undefined;
-  const n = blocks(text).length;
-  const out: Array<number> = [];
-  for (const m of s.matchAll(/(\d+)(?:\s*(?:[-–—]|to)\s*(\d+))?/g)) {
-    const a = Number(m[1]);
-    const b = m[2] === undefined ? a : Number(m[2]);
-    if (b < a) continue;
-    for (let k = Math.max(1, a); k <= Math.min(b, n); k++) out.push(k - 1);
-  }
-  return out.length ? sorted(out) : undefined;
-}
 
 /**
  * Anchors: phrases from inside the passages wanted. Each that occurs exactly once in the entry (plain() normalized)
@@ -316,3 +157,66 @@ export function deliver(e: Entry, mode: Mode, idx?: ReadonlyArray<number>, reaso
 /** The report the main agent reads, as the plugin's `report()` writes it, of entries already excerpted. */
 export const reportOfExcerpts = (found: ReadonlyArray<Entry>, from: string): string | undefined =>
   found.length ? reportOf(found, from, { prompt: '' }) : undefined;
+
+// --- Pointer lists, as round 13 parsed them.
+
+/**
+ * A pointer list (`¶2-3,6`, `2-3, 6`, `p2`) as 0-based block indexes; `all`, or nothing valid left once numbers out
+ * of range are dropped, gives undefined.
+ */
+export function byPointers(text: string, pointers: string): Array<number> | undefined {
+  const s = pointers.replace(/¶|\bp(?=\d)/gi, ' ');
+  if (/^\W*all\b/i.test(s)) return undefined;
+  const n = blocks(text).length;
+  const out: Array<number> = [];
+  for (const m of s.matchAll(/(\d+)(?:\s*(?:[-–—]|to)\s*(\d+))?/g)) {
+    const a = Number(m[1]);
+    const b = m[2] === undefined ? a : Number(m[2]);
+    if (b < a) continue;
+    for (let k = Math.max(1, a); k <= Math.min(b, n); k++) out.push(k - 1);
+  }
+  return out.length ? sorted(out) : undefined;
+}
+
+/** What a cite line chose for its entry: nothing, all of it, a pointer list, or something that doesn't parse as one. */
+export type Pointed = {
+  context: string;
+  choice: { kind: 'absent' } | { kind: 'whole' } | { kind: 'pointers'; text: string } | { kind: 'malformed' };
+};
+
+// A pointer field, whole: paragraph numbers and ranges (`¶2-3`, `¶5–7`, `2 to 4`, `p3`), separated by commas,
+// semicolons, `and` or spaces, optionally after `paragraphs`. Anything else in the field makes it malformed, never a
+// shorter list than the reply gave.
+const NUM = String.raw`(?:¶\s*|p(?=\d))?\d+`;
+const RANGE = String.raw`${NUM}(?:\s*(?:[-–—]|to)\s*${NUM})?`;
+const LIST = new RegExp(String.raw`^(?:(?:paragraphs?|paras?)\s*)?${RANGE}(?:(?:\s*[,;&+]\s*|\s+and\s+|\s+)${RANGE})*$`, 'i');
+const ALL = /^(?:all|whole|entire)(?:\s+(?:of it|paragraphs))?$/i;
+/** A field without the brackets, emphasis, colons or dashes around it. */
+const bare = (s: string) => s.trim().replace(/^[\s:()[\]`*_—–-]+/, '').replace(/[\s:()[\]`*_.]+$/, '');
+/** Whether a field after the loc means to point at paragraphs: it names one (¶, p3) or starts with a number. */
+const pointsAt = (s: string) => /¶|^p\d|^\d/i.test(s);
+
+/**
+ * What follows a cite line's loc: `¶2-3,6 | <context>` or `all | <context>`; a pointer field right after the pipe
+ * (`| ¶2-3 | <context>`) is taken too. Anything else before the pipe is not a pointer list, and the context is what
+ * follows the pipe.
+ */
+export function parsePointers(rest: string): Pointed {
+  const i = rest.indexOf('|');
+  const head = bare(i < 0 ? rest : rest.slice(0, i));
+  const after = i < 0 ? '' : rest.slice(i + 1);
+  if (head) {
+    if (LIST.test(head)) return { context: after.trim(), choice: { kind: 'pointers', text: head } };
+    if (ALL.test(head)) return { context: after.trim(), choice: { kind: 'whole' } };
+    return { context: after.trim(), choice: { kind: pointsAt(head) ? 'malformed' : 'absent' } };
+  }
+  // `- <loc> | ¶2-3 | <context>`
+  const k = after.indexOf('|');
+  const field = bare(k < 0 ? after : after.slice(0, k));
+  const tail = k < 0 ? '' : after.slice(k + 1).trim();
+  if (ALL.test(field)) return { context: tail, choice: { kind: 'whole' } };
+  if (LIST.test(field)) return { context: tail, choice: { kind: 'pointers', text: field } };
+  // A field that starts with ¶ and doesn't parse: malformed. Anything else is the context, `p50 latency` too.
+  if (field.startsWith('¶')) return { context: tail, choice: { kind: 'malformed' } };
+  return { context: after.trim(), choice: { kind: 'absent' } };
+}

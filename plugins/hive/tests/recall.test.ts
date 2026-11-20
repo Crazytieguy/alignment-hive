@@ -516,6 +516,24 @@ describe('the recall tool', () => {
     expect(asked).toEqual([SOL])
   })
 
+  test('on: the paragraphs a reply points to, then on a later call only the ones not given yet', { options: { recall: true } }, async ($, on) => {
+    const { asked, prompts, state } = world(on)
+    const paras = ['Tabs, not spaces.', 'Two-space indents in YAML.', 'Spaces in Markdown tables.'].map(p => `${p} ${'Some reasoning behind it follows here. '.repeat(3)}`.trim())
+    state.historyRows = [{ ...ENTRY, kind: 'assistant', text: paras.join('\n\n') }]
+    state.reply = '- feed0001:7 ¶2 | '
+    await start($)
+    const { result } = await callTool($)
+    expect(prompts[0]).toContain(JSON.stringify(`[feed0001:7] assistant: \n¶1 ${paras[0]}\n\n¶2 ${paras[1]}`).slice(1, -1))
+    expect(result).toContain(`> [assistant] […]\n> \n> ${paras[1]}\n> \n> […] (feed0001:7, 2026-10-19)`)
+    expect(result).toContain('`hive local show <loc> --clip 0` prints the whole entry')
+    state.sessionRows = [{ loc: 'abcd1234:5', time: '2026-10-20T15:29:40Z', kind: 'tool', tool: TOOL, recall: true, result }]
+    expect((await callTool($)).result).toStartWith('Recall found nothing new')
+    state.reply = '- feed0001:7 all | '
+    const again = (await callTool($)).result
+    expect(again).toContain(`> [assistant] ${paras[0]}\n> \n> […]\n> \n> ${paras[2]} (feed0001:7, 2026-10-19)`)
+    expect(asked).toEqual([SOL, SOL, SOL])
+  })
+
   test('on: nothing found says so, and so does running past 30 seconds', { options: { recall: true } }, async ($, on) => {
     const { clock, state } = world(on)
     await start($)

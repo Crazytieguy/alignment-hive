@@ -4,7 +4,7 @@
 // cite's delivery (excerpt.ts's CiteTelemetry), mode counts, and the cited entries' whole and delivered characters.
 // Variants (variants13.ts has the instructions and parsers):
 //   live, one Sol call each (gpt-6.2-sol, low, scripted sessions left out, as recall12-sol62):
-//     recall13-control       the shipped instructions and whole entries, in the same batch: the latency baseline
+//     recall13-control       the instructions shipped then (variants13.ts INSTRUCTIONS) and whole entries: the latency baseline
 //     recall13-quote         optional verbatim excerpt, nudged at assistant replies
 //     recall13-quote100      verbatim excerpt mandatory for entries over 100 words (labelled with their length), `whole` escape
 //     recall13-para100       entries over 100 words get ¶-numbered paragraphs; the cite names them, or `all`
@@ -21,7 +21,7 @@
 import { spawn } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { budgetFor, citations, history, promptBlocks, report, sessionsFor } from '../../../plugins/hive/hooks/recall-text';
+import { budgetFor, citations, history, promptBlocks, sessionsFor } from '../../../plugins/hive/hooks/recall-text';
 import type { Entry, History, Listed, Row, Session } from '../../../plugins/hive/hooks/recall-text';
 import { BENCH, BIN, CLAUDE_ENV, CWD, PROJECT } from './env';
 import type { CiteTelemetry } from './excerpt';
@@ -164,8 +164,8 @@ async function runLive(c: Case, name: string, dir: string) {
   writeFileSync(join(dir, 'out.json'), JSON.stringify(r.out, null, 2));
   if (r.reply !== undefined) writeFileSync(join(dir, 'raw.md'), r.reply);
   const d = r.reply !== undefined ? deliverReply(r.reply, h, v.parse, v.policy) : undefined;
-  // The control must deliver what the plugin would.
-  const control = name === CONTROL && d ? { matches_shipped: (reportOfExcerpts(d.entries, h.from) ?? 'NONE') === (report(r.reply!, h) ?? 'NONE') } : {};
+  // The control must deliver what the plugin did before it shipped para-always (round 14): every cite whole.
+  const control = name === CONTROL && d ? { matches_shipped: (reportOfExcerpts(d.entries, h.from) ?? 'NONE') === (reportOfExcerpts(shipped(r.reply!, h), h.from) ?? 'NONE') } : {};
   write(dir, c, name, h, d, {
     ...control, cited: r.reply !== undefined ? citations(r.reply).length : 0,
     code: r.code, call_ms: r.ms, e2e_ms: r.ms, history_chars: text.length, chunks: h.closed.length,
@@ -200,7 +200,7 @@ async function runPosthoc(c: Case, name: string, dir: string) {
   const found = shipped(s.reply, h);
   // The rebuilt history must give recall12-sol62's own report, or the post-hoc variants excerpt other text.
   const stored = existsSync(join(s.dir, 'answer.md')) ? readFileSync(join(s.dir, 'answer.md'), 'utf8') : undefined;
-  const base = { source: SOURCE, history_matches_source: (report(s.reply, h) ?? 'NONE') === stored, ...copied(s.meta), cited: citations(s.reply).length };
+  const base = { source: SOURCE, history_matches_source: (reportOfExcerpts(found, h.from) ?? 'NONE') === stored, ...copied(s.meta), cited: citations(s.reply).length };
   const d: Delivered = { entries: [], tel: [] };
   const push = (x: { entry: Entry; tel: CiteTelemetry }) => (d.entries.push(x.entry), d.tel.push(x.tel));
   const assistantLong = posthocEligible(true);
