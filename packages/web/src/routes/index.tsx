@@ -169,7 +169,7 @@ function Home() {
   return (
     <div className="theme-dark relative isolate min-h-screen bg-background text-foreground">
       <header className={wrap}>
-        <nav className="flex items-center justify-between gap-4 py-6">
+        <nav className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-6">
           <a
             href="/"
             className="inline-flex items-baseline gap-2 text-[1.05rem] font-semibold tracking-[0.01em]"
@@ -206,7 +206,13 @@ function Home() {
             </svg>
             Alignment Hive
           </a>
-          <span className="flex items-center gap-6">
+          <span className="flex items-center gap-4 sm:gap-6">
+            <a
+              href="/agent-advice"
+              className="text-[0.95rem] text-primary hover:underline"
+            >
+              Agent advice
+            </a>
             <a
               href={GITHUB_URL}
               className="text-[0.95rem] text-primary hover:underline"
