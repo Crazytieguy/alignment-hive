@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
+import { Route as AgentAdviceRouteImport } from './routes/agent-advice'
 import { Route as AuthorizedRouteImport } from './routes/authorized'
 import { Route as CallbackRouteImport } from './routes/callback'
 import { Route as AuthenticatedConsentRouteImport } from './routes/_authenticated/consent'
@@ -44,6 +45,11 @@ const IndexRoute = IndexRouteImport.update({
 } as any)
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
   id: '/_authenticated',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AgentAdviceRoute = AgentAdviceRouteImport.update({
+  id: '/agent-advice',
+  path: '/agent-advice',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthorizedRoute = AuthorizedRouteImport.update({
@@ -176,6 +182,7 @@ const AuthorizedUsersUserIdRoute = AuthorizedUsersUserIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/agent-advice': typeof AgentAdviceRoute
   '/authorized': typeof AuthorizedRouteWithChildren
   '/callback': typeof CallbackRoute
   '/consent': typeof AuthenticatedConsentRoute
@@ -204,6 +211,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/agent-advice': typeof AgentAdviceRoute
   '/callback': typeof CallbackRoute
   '/consent': typeof AuthenticatedConsentRoute
   '/install': typeof AuthenticatedInstallRoute
@@ -233,6 +241,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/_authenticated': typeof AuthenticatedRouteWithChildren
+  '/agent-advice': typeof AgentAdviceRoute
   '/authorized': typeof AuthorizedRouteWithChildren
   '/callback': typeof CallbackRoute
   '/_authenticated/consent': typeof AuthenticatedConsentRoute
@@ -263,6 +272,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/agent-advice'
     | '/authorized'
     | '/callback'
     | '/consent'
@@ -291,6 +301,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/agent-advice'
     | '/callback'
     | '/consent'
     | '/install'
@@ -319,6 +330,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/_authenticated'
+    | '/agent-advice'
     | '/authorized'
     | '/callback'
     | '/_authenticated/consent'
@@ -349,6 +361,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
+  AgentAdviceRoute: typeof AgentAdviceRoute
   AuthorizedRoute: typeof AuthorizedRouteWithChildren
   CallbackRoute: typeof CallbackRoute
   AuthSignInRoute: typeof AuthSignInRoute
@@ -379,6 +392,13 @@ declare module '@tanstack/react-router' {
       path: ''
       fullPath: '/'
       preLoaderRoute: typeof AuthenticatedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/agent-advice': {
+      id: '/agent-advice'
+      path: '/agent-advice'
+      fullPath: '/agent-advice'
+      preLoaderRoute: typeof AgentAdviceRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/authorized': {
@@ -604,6 +624,7 @@ const AuthorizedRouteWithChildren = AuthorizedRoute._addFileChildren(
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthenticatedRoute: AuthenticatedRouteWithChildren,
+  AgentAdviceRoute: AgentAdviceRoute,
   AuthorizedRoute: AuthorizedRouteWithChildren,
   CallbackRoute: CallbackRoute,
   AuthSignInRoute: AuthSignInRoute,
