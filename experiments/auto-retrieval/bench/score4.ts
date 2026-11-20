@@ -1,6 +1,6 @@
 // Round 4's scores: which judged claims each run conveyed (credit.ts against what it delivered), and per variant
 // recall, precision, harm, NONE rate, end-to-end time and cost, on dev, holdout and all cases. Usage:
-//   bun score4.ts [--compare a:b;c:d]   -> $BENCH/analysis/scores4.json, and a table on stdout
+//   bun score4.ts [--compare a:b;c:d] [--retention a:b;c:d]   -> $BENCH/analysis/scores4.json, and a table on stdout
 // Definitions (cases with at least one relevant claim; relevant = median judge score >= 2, decoys excluded):
 //   recall        per case, summed median score of the relevant claims the run conveyed / of all relevant claims; mean over cases
 //   recall_any    the same, counting claims instead of weighting by score
@@ -9,6 +9,10 @@
 //                 (current-session, future and unresolvable citations included); pooled over runs
 //   harmful_rate  conveyed claims the judges' majority marked harmful / all conveyed claims
 //   recall_<phase> recall restricted to relevant claims of that majority phase (spec, impl, review)
+//   recall_strict recall where a claim counts only when a delivered excerpt holds a whole span (credit.ts carriesWhole)
+//   chars_mean/med characters delivered per run (answer.md; 0 for NONE)
+// --retention a:b (round 13: an excerpting variant against the same citations whole), paired over cases where b
+// conveyed relevant value: the relevant value a conveyed / b's (also strict), and a's delivered characters / b's.
 // A variant counts as covered on a case when every judgeable entry it cited was read by claim extraction.
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -83,6 +87,12 @@ export type Run = {
   conveyed: Array<string>;
   relevant_conveyed: Array<string>;
   recall?: number;
+  recall_strict?: number;
+  /** Summed score of the relevant claims conveyed, and strictly conveyed. */
+  relevant_value: number;
+  relevant_value_strict: number;
+  /** answer.md's length; 0 for NONE or no answer. */
+  delivered_chars: number;
   recall_any?: number;
   recall_entry?: number;
   by_phase: Record<string, { got: number; total: number }>;
@@ -111,8 +121,10 @@ export function scoreRun(d: CaseData, variant: string): Run {
   const cites = ok && !isNone(answer) ? quotesOf(answer).map((q) => q.loc) : [];
   const covered = cites.every((l) => pooled.has(l)) && cited.filter(judgeable).every((it) => seen.has(it.id));
   const got = conveyed(variant, pool, claims);
+  const gotStrict = conveyed(variant, pool, claims, true);
   const rel = relevantClaims(d);
   const relGot = rel.filter((cl) => got.has(cl.id));
+  const relStrict = rel.filter((cl) => gotStrict.has(cl.id));
   const w = (cl: Claim) => verdicts.get(cl.id)!.score;
   const sum = (xs: Array<Claim>) => xs.reduce((s, cl) => s + w(cl), 0);
   const relItems = new Set(rel.flatMap((cl) => cl.spans.filter((s) => s.ok !== false).map((s) => s.item)));
@@ -136,6 +148,10 @@ export function scoreRun(d: CaseData, variant: string): Run {
     conveyed: [...got],
     relevant_conveyed: relGot.map((cl) => cl.id),
     recall: rel.length ? sum(relGot) / sum(rel) : undefined,
+    recall_strict: rel.length ? sum(relStrict) / sum(rel) : undefined,
+    relevant_value: sum(relGot),
+    relevant_value_strict: sum(relStrict),
+    delivered_chars: ok && !isNone(answer) ? answer.length : 0,
     recall_any: rel.length ? relGot.length / rel.length : undefined,
     recall_entry: relItems.size ? [...relItems].filter((i) => citedIds.has(i)).length / relItems.size : undefined,
     by_phase,
@@ -172,6 +188,22 @@ export function pairedBootstrap(diffs: Array<number>, iters = 5000): { diff: num
   return { diff: mean(diffs), lo: means[Math.floor(iters * 0.025)]!, hi: means[Math.floor(iters * 0.975)]!, n: diffs.length };
 }
 
+/**
+ * Retention of a against b (b: the same citations delivered whole), paired over cases where b conveyed relevant value:
+ * per case a's relevant value / b's (credit and strict credit) and a's delivered characters / b's; the mean over
+ * cases with a bootstrap interval, and the pooled ratio (sum over sum).
+ */
+export function retentionOf(A: Map<string, Run>, B: Map<string, Run>) {
+  const ks = [...A.keys()].filter((k) => B.has(k) && B.get(k)!.relevant_value > 0);
+  const ratio = (f: (r: Run) => number) => {
+    const xs = ks.filter((k) => f(B.get(k)!) > 0);
+    const pooled = xs.reduce((s, k) => s + f(A.get(k)!), 0) / Math.max(1e-9, xs.reduce((s, k) => s + f(B.get(k)!), 0));
+    const b = pairedBootstrap(xs.map((k) => f(A.get(k)!) / f(B.get(k)!)));
+    return { mean: r2(b.diff), lo: r2(b.lo), hi: r2(b.hi), n: b.n, pooled: r2(pooled) };
+  };
+  return { retention: ratio((r) => r.relevant_value), retention_strict: ratio((r) => r.relevant_value_strict), chars: ratio((r) => r.delivered_chars) };
+}
+
 export function summarize(runs: Array<Run>) {
   const ok = runs.filter((r) => r.ok);
   // Recall only where extraction read everything the run cited; uncovered runs wait for an increment.
@@ -185,6 +217,7 @@ export function summarize(runs: Array<Run>) {
     uncovered: ok.filter((r) => !r.covered).length,
     cases_scored: scored.length,
     recall: r2(mean(scored.map((r) => r.recall!))),
+    recall_strict: r2(mean(scored.map((r) => r.recall_strict!))),
     recall_any: r2(mean(scored.map((r) => r.recall_any!))),
     recall_entry: r2(mean(scored.filter((r) => r.recall_entry !== undefined).map((r) => r.recall_entry!))),
     recall_spec: r2(phase('spec')),
@@ -195,6 +228,8 @@ export function summarize(runs: Array<Run>) {
     none_on_pos: `${scored.filter((r) => r.none).length}/${scored.length}`,
     e2e_s_med: Math.round(median(ok.filter((r) => r.e2e_s !== undefined).map((r) => r.e2e_s!))),
     cost_med: Math.round(median(ok.filter((r) => r.cost !== undefined).map((r) => r.cost!)) * 1000) / 1000,
+    chars_mean: Math.round(mean(ok.map((r) => r.delivered_chars))),
+    chars_med: Math.round(median(ok.map((r) => r.delivered_chars))),
   };
 }
 
@@ -202,6 +237,8 @@ if (import.meta.main) {
   const args = process.argv.slice(2);
   const cmpAt = args.indexOf('--compare');
   const compares = cmpAt >= 0 ? args.splice(cmpAt, 2)[1]!.split(';').map((p) => p.split(':') as [string, string]) : [];
+  const retAt = args.indexOf('--retention');
+  const retentions = retAt >= 0 ? args.splice(retAt, 2)[1]!.split(';').map((p) => p.split(':') as [string, string]) : [];
   const runs: Array<Run> = [];
   const t0 = performance.now();
   for (const c of index) {
@@ -231,9 +268,11 @@ if (import.meta.main) {
     }
     return out;
   });
+  const retention = retentions.map(([a, b]) => ({ a, b, ...retentionOf(byCase(a), byCase(b)) }));
   mkdirSync(join(BENCH, 'analysis'), { recursive: true });
-  writeFileSync(join(BENCH, 'analysis', 'scores4.json'), JSON.stringify({ definitions: 'see score4.ts header', all, dev: table('dev'), holdout: table('holdout'), stability, comparisons, runs }, null, 1));
-  console.table(all.map(({ variant, runs: n, uncovered, recall, recall_any, recall_entry, recall_spec, recall_impl, precision, harmful_rate, none_on_pos, e2e_s_med, cost_med }) => ({ variant, n, uncovered, recall, recall_any, recall_entry, recall_spec, recall_impl, precision, harmful_rate, none_on_pos, e2e_s_med, cost_med })));
+  writeFileSync(join(BENCH, 'analysis', 'scores4.json'), JSON.stringify({ definitions: 'see score4.ts header', all, dev: table('dev'), holdout: table('holdout'), stability, comparisons, ...(retention.length ? { retention } : {}), runs }, null, 1));
+  console.table(all.map(({ variant, runs: n, uncovered, recall, recall_any, recall_entry, recall_spec, recall_impl, precision, harmful_rate, none_on_pos, e2e_s_med, cost_med, recall_strict, chars_mean, chars_med }) => ({ variant, n, uncovered, recall, recall_any, recall_entry, recall_spec, recall_impl, precision, harmful_rate, none_on_pos, e2e_s_med, cost_med, recall_strict, chars_mean, chars_med })));
   for (const c of comparisons) console.log(JSON.stringify(c));
+  for (const r of retention) console.log(JSON.stringify(r));
   console.error(`${runs.length} runs in ${Math.round((performance.now() - t0) / 1000)} s`);
 }

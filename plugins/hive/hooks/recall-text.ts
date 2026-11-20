@@ -181,9 +181,17 @@ const againSize = (loc: string) => loc.length + 10
  * whatever its time span), and whole chunks leave the window, oldest first: the entries before the newest chunk
  * print the same from one call to the next until a chunk leaves, so the prompt cache serves them. An entry prints
  * once, where it first appears: its own row, or an earlier report that quoted it from before the window; it takes
- * the budget once too.
+ * the budget once too. `format` rewrites an entry's text where it prints (its own row, a report's quote of it), never
+ * the text `seen` keeps; the benchmark uses it to number a long entry's paragraphs.
  */
-export function history(sessions: ReadonlyArray<Session>, now: number, budget: number, current = '', n = CLIP): History {
+export function history(
+  sessions: ReadonlyArray<Session>,
+  now: number,
+  budget: number,
+  current = '',
+  n = CLIP,
+  format: (label: string, text: string) => string = (_label, text) => text,
+): History {
   type Item = { session: string; row: Row; t: number; label: string; text: string; quotes: Array<Quote> }
   const items: Array<Item> = []
   for (const session of sessions)
@@ -221,7 +229,8 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
     if (it.label !== 'recall') return appearance(it.row.loc, it.text)
     return it.quotes.length ? it.quotes.reduceRight((sum, q) => sum + appearance(q.loc, clip(q.text, n)), 40) : 0
   }
-  // The window, newest back while it fits: the open chunk entry by entry, then closed chunks whole.
+  // The window, newest back while it fits: the open chunk entry by entry, then closed chunks whole. Sizes are of the
+  // text before `format`: what it adds is left out of the budget.
   const open = chunks.pop()!
   const units = [...chunks, ...open.map(it => [it])]
   let total = 0
@@ -282,7 +291,7 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
             seen.set(q.loc, { label: q.kind, text, date: q.date })
             const first = firstOf(q.loc, text)
             if (first !== undefined) return `  ${q.loc} unchanged since ${first}`
-            return `  ${q.loc}${q.date && ` (${q.date})`} ${q.kind}: ${text}`
+            return `  ${q.loc}${q.date && ` (${q.date})`} ${q.kind}: ${format(q.kind, text)}`
           })
           .join('\n')}`
       } else if (it.label === 'compaction') {
@@ -291,7 +300,7 @@ export function history(sessions: ReadonlyArray<Session>, now: number, budget: n
         if (seen.has(it.row.loc)) continue // recalled above
         seen.set(it.row.loc, { label: it.label, text: it.text, date: (it.row.time ?? '').slice(0, 10) })
         const first = firstOf(it.row.loc, it.text)
-        line = `[${it.row.loc}] ${it.label}: ${first === undefined ? it.text : `unchanged since ${first}`}`
+        line = `[${it.row.loc}] ${it.label}: ${first === undefined ? format(it.label, it.text) : `unchanged since ${first}`}`
       }
       const lines = bySession.get(it.session)
       if (lines) lines.push(line)

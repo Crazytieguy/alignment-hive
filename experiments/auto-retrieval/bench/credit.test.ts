@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { Claim } from './claims';
-import { carries, conveyed } from './credit';
+import { carries, carriesWhole, conveyed } from './credit';
 import type { PoolItem } from './pool4';
 
 const entry =
@@ -47,6 +47,20 @@ test('a quote cut with an ellipsis is credited by the pieces it kept', () => {
   const span =
     'you should delegate important copy-writing to a fresh fable agent and probably stop using the "plan gemini support" agent since it\'s already at over 600k tokens and i don\'t trust opus with copy';
   expect(carries("also you should delegate important copy-writing to a fresh fable agent … i don't trust opus with copy", span)).toBe(true);
+});
+
+test('strict credit: only a whole span (every ellipsis piece) counts', () => {
+  expect(carriesWhole('… the **reviewer** should run at medium effort, not high. […] more', 'the reviewer should run at medium effort, not high.')).toBe(true);
+  expect(carriesWhole('the reviewer should run at medium effort', 'the reviewer should run at medium effort, not high.')).toBe(false);
+  expect(carriesWhole('a b c. […] d e f.', 'a b c... d e f')).toBe(true);
+  // A fragment-validated span counts only with its pieces in its order.
+  expect(carriesWhole('Disable the flag first... The rollback is necessary.', 'The rollback is necessary. […] Disable the flag first.')).toBe(false);
+  expect(carriesWhole('The rollback is necessary. Then: disable the flag first.', 'The rollback is necessary. […] Disable the flag first.')).toBe(true);
+  // A literal ellipsis in a contiguous span is part of it.
+  expect(carriesWhole('wait... then go', 'wait... then go')).toBe(true);
+  const pool = [item('i01', { v: 'Please replace gpt-6 with astra in the router. Also, the reviewer should run at medium effort' })];
+  expect([...conveyed('v', pool, claims, true)]).toEqual(['c1']);
+  expect([...conveyed('v', pool, claims)].sort()).toEqual(['c1', 'c2']);
 });
 
 test('a short shared phrase is not enough for a long span', () => {

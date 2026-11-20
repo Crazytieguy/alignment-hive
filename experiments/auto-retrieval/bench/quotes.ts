@@ -16,6 +16,7 @@ export type Quote = { loc: string; text: string };
  * isEveryCitation. With isCommits, commit cites count too.
  */
 export function quotesOf(answer: string, isEveryCitation = false, isCommits = false): Array<Quote> {
+  if (answer.startsWith(RECALL_PREFIX)) return recallQuotesOf(answer);
   const out: Array<Quote> = [];
   let block: Array<string> = [];
   for (const line of answer.split('\n')) {
@@ -30,5 +31,34 @@ export function quotesOf(answer: string, isEveryCitation = false, isCommits = fa
       block = [];
     } else if (!isQuote) block = [];
   }
+  return out;
+}
+
+/** How recall's report (recall-text.ts reportOf) starts. */
+const RECALL_PREFIX = '[hive recall]';
+
+/**
+ * The entries of a recall report: each blockquote is one entry, `> [label] text (loc, date)`, and only its closing
+ * parentheses cite. A loc mentioned in a `Context:` line or inside the quoted text is not a citation: the main agent
+ * never got that entry's text. Each loc once.
+ */
+export function recallQuotesOf(answer: string): Array<Quote> {
+  const out: Array<Quote> = [];
+  let block: Array<string> = [];
+  const close = () => {
+    const body = block.join(' ');
+    block = [];
+    const m = /\(([^()]*)\)\s*$/.exec(body);
+    const l = m && new RegExp(LOC.source).exec(m[1]!);
+    if (!m || !l) return;
+    const loc = `${l[1]}:${l[2]}`;
+    const text = body.slice(0, m.index).replace(/^\s*\[[a-z]+[^\]]*\]\s*/i, '').trim();
+    if (!out.some((q) => q.loc === loc)) out.push({ loc, text });
+  };
+  for (const line of answer.split('\n')) {
+    if (/^\s*>/.test(line)) block.push(line.replace(/^\s*>\s?/, ''));
+    else if (block.length) close();
+  }
+  if (block.length) close();
   return out;
 }

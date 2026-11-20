@@ -39,14 +39,36 @@ export function carries(delivered: string, span: string): boolean {
   return Math.min(covered, s.length) >= Math.min(80, Math.ceil(s.length / 2));
 }
 
+/**
+ * Strict: a delivered excerpt contains the whole span (normalized), literal ellipses included. A span that only
+ * claims.ts's fragment check validated (its pieces between ellipses each in the entry) counts when every piece is in
+ * the excerpt in the span's order. No partial credit, so an excerpt that cut a span's qualifier doesn't carry it.
+ */
+export function carriesWhole(delivered: string, span: string): boolean {
+  const d = normalize(delivered).text;
+  const s = normalize(span).text;
+  if (!d || !s) return false;
+  if (d.includes(s)) return true;
+  const pieces = span.split(/\[\s*(?:\.\.\.|…)\s*\]|\.\.\.|…/).map((p) => normalize(p).text.trim()).filter(Boolean);
+  if (pieces.length < 2) return false;
+  let from = 0;
+  for (const p of pieces) {
+    const i = d.indexOf(p, from);
+    if (i < 0) return false;
+    from = i + p.length;
+  }
+  return true;
+}
+
 /** The claims a variant conveyed, given the case's pool (with each variant's delivered excerpts) and claims. */
-export function conveyed(variant: string, pool: Array<PoolItem>, claims: Array<Claim>): Set<string> {
+export function conveyed(variant: string, pool: Array<PoolItem>, claims: Array<Claim>, isStrict = false): Set<string> {
+  const has = isStrict ? carriesWhole : carries;
   const delivered = new Map(pool.filter((it) => it.systems[variant]).map((it) => [it.id, it.systems[variant]!.text]));
   const out = new Set<string>();
   for (const c of claims)
     for (const s of c.spans) {
       const d = delivered.get(s.item);
-      if (s.ok !== false && d !== undefined && carries(d, s.text)) {
+      if (s.ok !== false && d !== undefined && has(d, s.text)) {
         out.add(c.id);
         break;
       }

@@ -19,6 +19,9 @@ bun claims.ts increment all                        # claims in entries no extrac
 bun judge4.ts score-new fable,opus,sol all         # three blind judges on the new claims
 bun judge4.ts merge all                            # -> claims/<case>/verdicts.json
 BENCH_CASES=c01-d17 bun score4.ts --compare 'a:b'  # recall, precision, NONE rate, time, cost; paired bootstrap
+bun recall13.ts recall13-para100,recall13-para100-whole --par 6 [--cases c03,c11]  # round 13: excerpts of long entries (variants in its header)
+BENCH_CASES=c01-d17 bun score4.ts --retention 'recall13-para100:recall13-para100-whole'  # relevant value an excerpt kept, and its size
+BENCH_CASES=c01-d17 bun pair13.ts recall13-para100 --par 8                        # Opus and Sol compare excerpt vs whole report: what was lost, which is better
 BENCH_CASES=c01-d17 bun sweep5.ts [clips]          # no model calls: what recall's history lets a reader see
 BENCH_CASES=c01-d17 bun gaps5.ts                   # what the retrieval agent delivers that recall does not, and why
 bun cost5.ts 2026-09-21 2026-10-19 800 800000      # recall's cost over real use, with a simulated prompt cache
