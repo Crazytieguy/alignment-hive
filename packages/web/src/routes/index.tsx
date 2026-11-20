@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Button } from "@alignment-hive/ui";
 import { KintsugiHero } from "@/components/landing/kintsugi-hero";
 import { TestimonialCarousel } from "@/components/landing/testimonial-carousel";
+import { useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 // Hero display font: Fraunces at the H1's weight, Latin-1 glyphs only
 // (regenerate with scripts/subset-hero-font.sh).
@@ -44,7 +45,6 @@ export const Route = createFileRoute("/")({
 });
 
 const GITHUB_URL = "https://github.com/Crazytieguy/alignment-hive";
-const CODEX_REPO_URL = "https://github.com/Crazytieguy/codex-plugin-cc";
 const EMAIL = "yoav.tzfati@gmail.com";
 
 /** Shared horizontal rhythm for every band of the page. */
@@ -102,29 +102,63 @@ const WORKSHOPS_COPY =
   "Talks, workshops, and consulting for AI safety fellowships and research orgs: where the state of the art of reliable agent delegation lies, tools and techniques that help you get there, and personalized hands-on advice.";
 
 const TOOLS_INTRO =
-  "Open source and shaped by concrete bottlenecks in real research work. Here are some of the most-used tools in the collection:";
+  "Open source and shaped by concrete bottlenecks in real research work. Here are some of the most-used tools in the collection. Get started:";
 
-const TOOLS = [
+const TOOLS: { name: string; href?: string; description: string }[] = [
   {
     name: "Hive",
     description:
-      "Alignment Hive entry point and memory for Claude Code: instead of relying on model-written memories, Claude searches your past sessions directly. Also home to the community's opt-in knowledge and data aggregation.",
+      "Alignment Hive entry point and memory for Claude Code: instead of relying on model-written memories, Claude searches your past sessions for relevant context as it works.",
   },
   {
-    name: "Codex for Claude Code",
-    href: CODEX_REPO_URL,
+    name: "Model Router",
     description:
-      "Codex reviews and task delegation without leaving Claude Code. Claude understands fuzzy constraints better; GPT is more careful and catches mistakes; together they're more than the sum of their parts.",
+      "GPT and other non-Claude models as native subagents in Claude Code.",
+  },
+  {
+    name: "Debrief",
+    description:
+      "Reports on finished agent work, written for you to review and comment on.",
   },
   {
     name: "Remote Kernels",
     description:
       "Unblock Claude to run experiments for you autonomously by letting it operate cloud compute efficiently and reliably.",
   },
-] as const;
+  {
+    name: "tldr",
+    description:
+      "Collapses each long agent reply to a one-sentence summary you can expand.",
+  },
+];
 
 const USED_BY =
-  "Used by dozens of researchers across MATS, Far Labs, and other AI safety organizations.";
+  "Used by researchers across MATS, Far Labs, Iliad, and other AI safety organizations.";
+
+const INSTALL_COMMAND = "curl -fsSL https://alignment-hive.com/install.sh | bash";
+
+function InstallCommand() {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="mt-4 flex items-center gap-3 rounded-md border border-border bg-card py-2 pl-4 pr-2">
+      <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-sm">
+        {INSTALL_COMMAND}
+      </code>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => {
+          void navigator.clipboard.writeText(INSTALL_COMMAND).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          });
+        }}
+      >
+        {copied ? "Copied" : "Copy"}
+      </Button>
+    </div>
+  );
+}
 
 function ToolName({ name, href }: { name: string; href?: string }) {
   return href ? (
@@ -297,6 +331,11 @@ function LandingSections() {
           <Button asChild size="lg" className="mt-6">
             <a href={`mailto:${EMAIL}`}>Email me</a>
           </Button>
+          <p className="mt-5 text-[0.95rem]">
+            <a href="/agent-advice" className={inlineLink}>
+              Read my advice
+            </a>
+          </p>
         </div>
       </section>
 
@@ -309,13 +348,16 @@ function LandingSections() {
           <h2 id="tools-h" className={sectionHeading}>
             Tools
           </h2>
-          <p className="mb-6 max-w-[38rem] leading-relaxed">{TOOLS_INTRO}</p>
+          <div className="mb-6 max-w-[38rem]">
+            <p className="leading-relaxed">{TOOLS_INTRO}</p>
+            <InstallCommand />
+          </div>
         </div>
         {TOOLS.map((t, i) => (
           <Tool
             key={t.name}
             name={t.name}
-            href={"href" in t ? t.href : undefined}
+            href={t.href}
             last={i === TOOLS.length - 1}
           >
             {t.description}
