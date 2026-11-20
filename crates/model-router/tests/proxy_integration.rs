@@ -4246,3 +4246,116 @@ async fn credentialed_anthropic_tunnels_fail_without_a_ca() {
     stream.read_exact(&mut reply).await.unwrap();
     assert_eq!(&reply, b"HTTP/1.1 503");
 }
+
+/// An openai-compat route with `max-output-tokens` lowers a larger
+/// `max_tokens` to it (Claude Code's 32,000 and its 128,000 continuation) and
+/// forwards a smaller or missing one as sent; a route without it forwards
+/// every value as sent.
+#[tokio::test]
+async fn an_output_limit_lowers_larger_requests_only() {
+    fn handler(_parts: &axum::http::request::Parts, _body: &Bytes) -> Response {
+        plain_message_response()
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(handler).await;
+    let route = |routing_id: &str, limit: Option<u64>| ModelRoute {
+        routing_id: routing_id.to_string(),
+        upstream: "cliproxy".to_string(),
+        upstream_model: format!("openai-compat--{routing_id}"),
+        display_name: routing_id.to_string(),
+        family: model_router::config::ModelFamily::OpenAiCompat,
+        max_output_tokens: limit,
+        ..Default::default()
+    };
+    let config = Config {
+        upstreams: external_upstreams(format!("http://{cpa_address}")),
+        models: vec![route("deepseek-v4", Some(8192)), route("kimi-k3", None)],
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    let cases: [(&str, Option<u64>, Option<u64>); 7] = [
+        ("deepseek-v4", Some(32_000), Some(8192)),
+        ("deepseek-v4", Some(128_000), Some(8192)),
+        ("deepseek-v4", Some(8192), Some(8192)),
+        ("deepseek-v4", Some(4096), Some(4096)),
+        ("deepseek-v4", None, None),
+        ("kimi-k3", Some(32_000), Some(32_000)),
+        ("kimi-k3", Some(128_000), Some(128_000)),
+    ];
+    for (model, requested, _) in cases {
+        let mut body = serde_json::json!({
+            "model": model, "stream": true,
+            "messages": [{"role": "user", "content": "hello"}],
+        });
+        if let Some(requested) = requested {
+            body["max_tokens"] = requested.into();
+        }
+        let (status, response) = send(&app, body.to_string(), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{model} {requested:?}: {response}");
+    }
+    let forwarded = cpa_observed.lock().await;
+    assert_eq!(forwarded.len(), cases.len());
+    for ((model, requested, expected), request) in cases.iter().zip(forwarded.iter()) {
+        let document: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(
+            document
+                .get("max_tokens")
+                .and_then(serde_json::Value::as_u64),
+            *expected,
+            "{model} asked {requested:?}: {document}"
+        );
+    }
+}
+
+/// An open-weights agent's `WebSearch` sub-call, carried on the Claude
+/// branch at 32,000 and answered through the origin's scrape path, reaches
+/// the child within the origin route's output limit, as its turns do.
+#[tokio::test]
+async fn an_origin_search_on_the_claude_branch_keeps_the_output_limit() {
+    fn cpa(parts: &axum::http::request::Parts, body: &Bytes) -> Response {
+        match parts.uri.path() {
+            "/v1/alpha/search" => {
+                let mut response = Response::new(Body::from("search backend down"));
+                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                response
+            }
+            "/v1/messages" => {
+                let document: serde_json::Value = serde_json::from_slice(body).unwrap();
+                if document["stream"] == true {
+                    sse_response(websearch_tool_use_sse(), true)
+                } else {
+                    plain_message_response()
+                }
+            }
+            path => panic!("unexpected CPA path {path}"),
+        }
+    }
+    let (cpa_address, cpa_observed) = spawn_fake(cpa).await;
+    let (anthropic_address, anthropic_observed) = spawn_fake(never_called).await;
+    let config = Config {
+        anthropic_upstream_base: format!("http://{anthropic_address}"),
+        upstreams: external_upstreams(format!("http://{cpa_address}")),
+        models: vec![ModelRoute {
+            routing_id: "deepseek-v4".to_string(),
+            upstream: "cliproxy".to_string(),
+            upstream_model: "openai-compat--deepseek-v4".to_string(),
+            display_name: "DeepSeek V4".to_string(),
+            family: model_router::config::ModelFamily::OpenAiCompat,
+            max_output_tokens: Some(4096),
+            ..Default::default()
+        }],
+        ..Config::default()
+    };
+    let app = model_router::proxy::app(config).await.unwrap();
+    turn_then_subcall(app, "deepseek-v4", "claude-sonnet-4-5").await;
+
+    assert_eq!(anthropic_observed.lock().await.len(), 0);
+    let cpa_requests = cpa_observed.lock().await;
+    assert_eq!(
+        observed_paths(&cpa_requests),
+        ["/v1/messages", "/v1/alpha/search", "/v1/messages"]
+    );
+    for request in [&cpa_requests[0], &cpa_requests[2]] {
+        let document: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(document["max_tokens"], 4096, "{document}");
+    }
+}

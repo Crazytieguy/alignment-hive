@@ -730,6 +730,11 @@ pub struct ProviderModel {
     /// TOML. `None` with `min_context_window` set means: not served.
     #[serde(skip)]
     pub pinned_providers: Option<Vec<String>>,
+
+    /// The most output tokens the host accepts for this model: a request's
+    /// larger `max_tokens` is lowered to it; a smaller or missing one is
+    /// forwarded as sent.
+    pub max_output_tokens: Option<u64>,
 }
 
 impl ProviderModel {
@@ -748,6 +753,22 @@ impl ProviderModel {
 #[must_use]
 pub fn is_openrouter(base_url: &str) -> bool {
     reqwest::Url::parse(base_url).is_ok_and(|url| url.host_str() == Some("openrouter.ai"))
+}
+
+/// See [`Config::provider_model`]. The child trims an effort suffix before
+/// it looks the alias up, so a suffixed alias reaches the same model.
+fn provider_model<'a>(
+    providers: &'a [OpenAiProvider],
+    upstream_model: &str,
+) -> Option<&'a ProviderModel> {
+    let routing_id = split_effort_suffix(upstream_model.trim())
+        .0
+        .trim()
+        .strip_prefix(DERIVED_ALIAS_PREFIX)?;
+    providers
+        .iter()
+        .flat_map(|provider| &provider.models)
+        .find(|model| model.routing_id == routing_id)
 }
 
 /// The internal `CLIProxyAPI` alias for a provider model. Routing IDs are
@@ -800,6 +821,10 @@ pub struct ModelRoute {
     /// See [`ProviderModel::pinned_providers`]; generated routes only.
     #[serde(skip)]
     pub pinned_providers: Option<Vec<String>>,
+
+    /// See [`ProviderModel::max_output_tokens`]; generated routes only.
+    #[serde(skip)]
+    pub max_output_tokens: Option<u64>,
 
     /// The service tier the route asks for ([`crate::service_tier`]):
     /// `Standard` but on the generated `-fast` and `-ultrafast` twins; never
@@ -1108,6 +1133,11 @@ const TEMPLATE_PROVIDERS_SECTION: &str = r#"# OpenAI-compatible providers (manag
 # windows differ). The service picks and pins them at start; `verify-providers`
 # shows which. A model with no qualifying sub-provider is not served.
 #min-context-window = 1000000
+# The most output tokens the host accepts for this model. Claude Code asks
+# for 32000, and 128000 to continue a cut reply; a host with a lower limit
+# refuses those requests. Set this to the host's limit and larger requests
+# are lowered to it. Unset: the request's own value is forwarded.
+#max-output-tokens = 8192
 
 "#;
 
@@ -1295,6 +1325,13 @@ impl Config {
         self.models.iter().chain(self.generated_models.iter())
     }
 
+    /// The `[[openai-providers.models]]` entry a route's upstream model
+    /// reaches through its `CLIProxyAPI` alias, effort suffix or not.
+    #[must_use]
+    pub fn provider_model(&self, upstream_model: &str) -> Option<&ProviderModel> {
+        provider_model(&self.openai_providers, upstream_model)
+    }
+
     /// The route clients address as `routing_id`, if any.
     #[must_use]
     pub fn route(&self, routing_id: &str) -> Option<&ModelRoute> {
@@ -1381,6 +1418,7 @@ impl Config {
                 context_window_scaling: model.context_window_scaling,
                 min_context_window: model.min_context_window,
                 pinned_providers: model.pinned_providers.clone(),
+                max_output_tokens: model.max_output_tokens,
                 ..ModelRoute::default()
             })
         });
@@ -1446,6 +1484,15 @@ impl Config {
             .into_iter()
             .filter(|twin| !taken(&generated, twin))
             .collect();
+        // A route written by hand to an open-weights model's alias reaches
+        // the same host, so it keeps that model's output limit.
+        for route in &mut self.models {
+            if route.max_output_tokens.is_none()
+                && let Some(model) = provider_model(&self.openai_providers, &route.upstream_model)
+            {
+                route.max_output_tokens = model.max_output_tokens;
+            }
+        }
         self.generated_models = generated;
     }
 
@@ -1594,6 +1641,14 @@ impl Config {
             "[auto-mode-classifier] {key} {model:?} is neither a routing ID this router serves \
              nor a model ID (set the effort with its own key)"
         );
+        // Named directly, an open-weights alias would skip its route's
+        // guards and output limit.
+        if let Some(routing_id) = model.strip_prefix(DERIVED_ALIAS_PREFIX) {
+            anyhow::bail!(
+                "[auto-mode-classifier] {key} {model:?} is model-router's internal name for an \
+                 open-weights model; name its routing ID, {routing_id:?}, instead"
+            );
+        }
         ensure!(
             !names_auto_model(model)
                 && !names_muse_model(model)
@@ -1880,6 +1935,12 @@ impl Config {
                         model.name
                     );
                 }
+                ensure!(
+                    model.max_output_tokens != Some(0),
+                    "openai-provider {} model {} max-output-tokens must be greater than zero",
+                    provider.name,
+                    model.name
+                );
             }
         }
         Ok(())
@@ -2760,6 +2821,34 @@ mod tests {
         ));
         assert!(error.contains("only OpenRouter supports"), "{error}");
         let error = prepare_error(&kimi_toml("min-context-window = 0"));
+        assert!(error.contains("greater than zero"), "{error}");
+    }
+
+    #[test]
+    fn max_output_tokens_reaches_the_route_and_must_be_positive() {
+        let config = parse_and_prepare(&kimi_toml("max-output-tokens = 8192"));
+        let route = config
+            .generated_models
+            .iter()
+            .find(|route| route.routing_id == "kimi-k3")
+            .unwrap();
+        assert_eq!(route.max_output_tokens, Some(8192));
+        // A hand-written route to the same alias reaches the same host.
+        let config = parse_and_prepare(&format!(
+            "{}\n[[model-overrides]]\nrouting-id = \"kimi-judge\"\nupstream = \"cliproxy\"\n\
+             upstream-model = \"openai-compat--kimi-k3\"\ndisplay-name = \"Kimi judge\"\n\
+             [[model-overrides]]\nrouting-id = \"kimi-low\"\nupstream = \"cliproxy\"\n\
+             upstream-model = \"openai-compat--kimi-k3(low)\"\ndisplay-name = \"Kimi low\"\n",
+            kimi_toml("max-output-tokens = 8192")
+        ));
+        for routing_id in ["kimi-judge", "kimi-low"] {
+            assert_eq!(
+                config.route(routing_id).unwrap().max_output_tokens,
+                Some(8192),
+                "{routing_id}"
+            );
+        }
+        let error = prepare_error(&kimi_toml("max-output-tokens = 0"));
         assert!(error.contains("greater than zero"), "{error}");
     }
 
@@ -3838,6 +3927,7 @@ mod tests {
                 "grok-4.7",
                 "claude-sonnet-5",
                 "anthropic/Claude-opus-5-5",
+                "openai-compat--kimi-k2.7",
                 "codex-auto-review(low)",
                 "two words",
                 "",
@@ -3851,6 +3941,14 @@ mod tests {
                 assert!(error.contains(key), "{key} {model}: {error}");
             }
         }
+        // An open-weights alias would skip its route's guards and output
+        // limit: the error names the routing ID to use.
+        assert!(
+            prepare_error(
+                "[auto-mode-classifier]\nenabled = true\nmodel = \"openai-compat--kimi-k2.7\""
+            )
+            .contains("\"kimi-k2.7\"")
+        );
         // A Grok route is named by its routing ID.
         parse_and_prepare(
             "[grok]\nenabled = true\n[auto-mode-classifier]\nenabled = true\n\

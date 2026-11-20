@@ -82,12 +82,12 @@ pub(super) async fn gpt_origin_on_claude_branch(
     // A forced search may carry the caller's full tool set alongside
     // `web_search` (see `websearch::detect`), and `legacy_websearch` forwards
     // it, so this GPT-bound body needs the tool rewrites too, and the origin's
-    // service tier — identity it does not: the side call's own system prompt
-    // is not a conversation.
+    // service tier and output limit — identity it does not: the side call's
+    // own system prompt is not a conversation.
     match (route, gpt_forward_target(&state.cliproxy_upstream)) {
         (Some(route), Some(target)) => match substitute_model(&body, &route.upstream_model)
             .and_then(|body| crate::tool_changes::portable_tools_in_body(&body, route.family))
-            .and_then(|body| at_tier(&body, route.tier.side_call_tier()))
+            .and_then(|body| as_origin(&body, route))
         {
             Ok(rewritten) => {
                 // No turn planned this route: its own program, not the
@@ -873,6 +873,17 @@ async fn alpha_search(
 fn at_tier(body: &[u8], tier: ServiceTier) -> anyhow::Result<Vec<u8>> {
     let mut document = serde_json::from_slice::<serde_json::Value>(body)?;
     crate::service_tier::apply(&mut document, tier);
+    Ok(serde_json::to_vec(&document)?)
+}
+
+/// `body` at the origin `route`'s side-call tier and within its output limit
+/// ([`super::lower_max_tokens`]), as its own turns are.
+fn as_origin(body: &[u8], route: &crate::config::ModelRoute) -> anyhow::Result<Vec<u8>> {
+    let mut document = serde_json::from_slice::<serde_json::Value>(body)?;
+    crate::service_tier::apply(&mut document, route.tier.side_call_tier());
+    if let Some(limit) = route.max_output_tokens {
+        super::lower_max_tokens(&mut document, limit);
+    }
     Ok(serde_json::to_vec(&document)?)
 }
 

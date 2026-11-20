@@ -290,6 +290,9 @@ pub(super) struct Classifier {
     pub effort: Option<String>,
     pub service_tier: Option<String>,
     pub forced_choice: bool,
+    /// [`MAX_TOKENS`], or less where the route's host accepts less
+    /// ([`crate::config::ProviderModel::max_output_tokens`]).
+    pub max_tokens: u64,
     pub capture: Option<CaptureSink>,
     /// Shared by both stages.
     pub permits: Arc<Semaphore>,
@@ -309,6 +312,8 @@ pub(super) struct Prompt<'a> {
     pub policy: &'a EffectivePolicy,
 }
 
+/// The output tokens a classification asks for.
+pub(super) const MAX_TOKENS: u64 = 8192;
 /// How many attempts one classification may make.
 const ATTEMPTS: u32 = 2;
 /// A retry needs at least this much of the budget left.
@@ -336,7 +341,7 @@ impl Classifier {
     fn body(&self, prompt: &Prompt<'_>, user_message: &str) -> Value {
         let mut body = json!({
             "model": self.upstream_model,
-            "max_tokens": 8192,
+            "max_tokens": self.max_tokens,
             "stream": false,
             "system": [{"type": "text", "text": prompt.system}],
             "messages": [{"role": "user", "content": [{"type": "text", "text": user_message}]}],
@@ -639,6 +644,7 @@ mod tests {
             effort: None,
             service_tier: None,
             forced_choice: true,
+            max_tokens: MAX_TOKENS,
             capture: None,
             permits: Arc::new(Semaphore::new(1)),
             breaker: Breaker::new(stage),

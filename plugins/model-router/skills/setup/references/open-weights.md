@@ -58,7 +58,14 @@ CLIProxyAPI child.
    ```
    curl -s <base_url from doctor --json>/v1/messages \
      -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
-     -d '{"model":"<routing-id>","max_tokens":300,"messages":[{"role":"user","content":"reply with exactly: ok"}]}'
+     -d '{"model":"<routing-id>","max_tokens":32000,"messages":[{"role":"user","content":"reply with exactly: ok"}]}'
    ```
-   A response naming the provider's model ID proves the chain. On failure,
-   report provider, base-url, model ID, and HTTP status.
+   `32000` is what Claude Code asks for on every turn. A response naming
+   the provider's model ID proves the chain. A 400 naming a lower output
+   limit means the host would refuse every Claude Code turn: set
+   `max-output-tokens = <that limit>` in the model's block,
+   `$ROUTER service restart`, and smoke-test again. Claude Code continues a
+   reply cut at 32000 with 128000, so even when this test passes, set
+   `max-output-tokens` to the host's documented output limit if that is
+   under 128000. On any other failure, report provider, base-url, model
+   ID, and HTTP status.

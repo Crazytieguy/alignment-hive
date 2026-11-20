@@ -831,6 +831,9 @@ fn rewrite_gpt_body(
         crate::identity::remove_attribution_blocks(&mut document);
     }
     crate::service_tier::apply(&mut document, route.tier);
+    if let Some(limit) = route.max_output_tokens {
+        lower_max_tokens(&mut document, limit);
+    }
     if route.family.tool_choice_auto_only() {
         let forced = document.get("tool_choice").is_some_and(|choice| {
             choice.get("type").and_then(serde_json::Value::as_str) != Some("auto")
@@ -874,6 +877,22 @@ fn rewrite_gpt_body(
         );
     }
     Ok(serde_json::to_vec(&document)?)
+}
+
+/// Lowers a request's `max_tokens` to `limit`, the route's
+/// [`crate::config::ProviderModel::max_output_tokens`]. A smaller, missing or
+/// non-integer value is left for the host to judge.
+fn lower_max_tokens(document: &mut serde_json::Value, limit: u64) {
+    let Some(requested) = document
+        .get("max_tokens")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return;
+    };
+    if requested > limit {
+        document["max_tokens"] = limit.into();
+        tracing::debug!(requested, limit, "lowered max_tokens to the route's limit");
+    }
 }
 
 async fn gpt_response(

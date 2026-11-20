@@ -157,6 +157,11 @@ impl Runtime {
                         .then(|| "priority".to_string())
                 }),
                 forced_choice: !route.family.tool_choice_auto_only(),
+                max_tokens: route
+                    .max_output_tokens
+                    .map_or(classify::MAX_TOKENS, |limit| {
+                        limit.min(classify::MAX_TOKENS)
+                    }),
                 capture: capture.cloned(),
                 permits: permits.clone(),
                 breaker: classify::Breaker::new(which),
@@ -612,6 +617,32 @@ mod tests {
         assert_eq!(relayed(&screen).as_deref(), Some("standard"));
         let (judge, screen) = StagePrograms::default().targets(&upstream);
         assert_eq!((relayed(&judge), relayed(&screen)), (None, None));
+    }
+
+    /// A stage on a route whose host accepts fewer output tokens than a
+    /// classification asks for asks for that many; another stage keeps
+    /// [`super::classify::MAX_TOKENS`].
+    #[test]
+    fn a_stage_asks_within_its_route_s_output_limit() {
+        let config = crate::config::parse_and_prepare(
+            r#"
+                [auto-mode-classifier]
+                enabled = true
+                model = "deepseek-v4"
+                [[openai-providers]]
+                name = "deepseek"
+                base-url = "https://api.deepseek.com/v1"
+                [[openai-providers.models]]
+                name = "deepseek-chat"
+                routing-id = "deepseek-v4"
+                display-name = "DeepSeek V4"
+                max-output-tokens = 4096
+            "#,
+        );
+        let runtime = Runtime::new(&config, &reqwest::Client::new(), None).expect("enabled");
+        assert_eq!(runtime.judge.classifier.max_tokens, 4096);
+        let screen = runtime.screen.as_ref().expect("the default screen");
+        assert_eq!(screen.classifier.max_tokens, super::classify::MAX_TOKENS);
     }
 
     /// A tool Claude Code declares mid-conversation has its schema read; one
