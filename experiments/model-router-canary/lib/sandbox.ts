@@ -488,23 +488,26 @@ export async function startSandbox(spec: SandboxSpec, rec: Recorder): Promise<Sa
         } catch (e) {
           leftovers.push(`stop error: ${e instanceof Error ? e.message : String(e)}`);
         } finally {
-          // The copies go whatever happened above (never the live auth dir: nothing here points at it).
+          // Keeping the logs is best effort: a failure here (a full disk, say) must neither keep the sandbox nor throw,
+          // or the stopAll loop would skip the sandboxes after this one.
           try {
             if (opts.keepLogsIn) {
               mkdirSync(opts.keepLogsIn, { recursive: true });
               for (const [src, name] of [[logFile, 'router.log'], [cpaLogFile, 'cliproxyapi.log']] as const)
                 if (existsSync(src)) copyFileSync(src, join(opts.keepLogsIn, `${spec.label}-${name}`));
             }
-          } finally {
-            rmSync(root, { recursive: true, force: true });
-            ACTIVE.delete(sb);
+          } catch (e) {
+            leftovers.push(`logs not kept: ${e instanceof Error ? e.message : String(e)}`);
           }
+          // The copies go whatever happened above (never the live auth dir: nothing here points at it).
+          rmSync(root, { recursive: true, force: true });
+          ACTIVE.delete(sb);
         }
         const gone = !existsSync(root);
         rec.add({
           ...base,
           name: 'sandbox-stop',
-          status: !gone || leftovers.some((l) => /left alone|stop error|still running/.test(l)) ? 'warn' : 'pass',
+          status: !gone || leftovers.some((l) => /left alone|stop error|still running|logs not kept/.test(l)) ? 'warn' : 'pass',
           detail: [gone ? 'stopped; sandbox deleted' : `could not delete ${root}`, ...leftovers].join('; '),
           ms: performance.now() - t1,
         });
