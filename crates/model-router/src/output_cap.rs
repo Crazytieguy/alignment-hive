@@ -2,10 +2,13 @@
 //! refusal of a request's output cap.
 //!
 //! Claude Code asks unrecognized models for 32000 output tokens (128000 to
-//! continue a cut reply) and, since 2.1.329, no longer retries at a limit the
-//! refusal names, so a host with a lower limit refuses those requests until
-//! the route's `max-output-tokens` is set. Its bare 400 doesn't say so. No
-//! number is parsed and nothing is retried; any other error passes through.
+//! continue a cut reply). It retries at a lower limit only when the refusal
+//! uses Anthropic's own wording (`max_tokens: N > M, which is the maximum
+//! allowed number of output tokens for ...`), which open-weights hosts don't,
+//! so a host with a lower limit refuses those requests until the route's
+//! `max-output-tokens` is set. Its bare 400 doesn't say so. No number is
+//! parsed and nothing is retried; any other error passes through, including
+//! Anthropic's wording, which the bounds below don't match.
 
 use axum::body::Bytes;
 use serde_json::Value;
