@@ -1,5 +1,6 @@
-// public/install.sh, run function by function in a scratch HOME: the script is sourced without
-// its `main` call, so nothing reaches Claude Code, WorkOS or the network.
+// src/content/scripts/install.sh (served at /install.sh), run function by function in a scratch
+// HOME: the script is sourced without its `main` call, so nothing reaches Claude Code, WorkOS or
+// the network.
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
@@ -19,7 +20,7 @@ import { join } from "node:path";
 // Each test runs bash a few times, which on a busy machine takes seconds.
 setDefaultTimeout(20_000);
 
-const installSh = join(import.meta.dir, "..", "public", "install.sh");
+const installSh = join(import.meta.dir, "..", "src", "content", "scripts", "install.sh");
 const root = mkdtempSync(join(tmpdir(), "install-sh-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 

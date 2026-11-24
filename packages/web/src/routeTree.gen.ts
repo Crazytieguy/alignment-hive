@@ -14,10 +14,13 @@ import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as AgentAdviceRouteImport } from './routes/agent-advice'
 import { Route as AuthorizedRouteImport } from './routes/authorized'
 import { Route as CallbackRouteImport } from './routes/callback'
+import { Route as InstallDotshRouteImport } from './routes/install[.]sh'
+import { Route as UninstallDotshRouteImport } from './routes/uninstall[.]sh'
 import { Route as AuthenticatedConsentRouteImport } from './routes/_authenticated/consent'
 import { Route as AuthenticatedInstallRouteImport } from './routes/_authenticated/install'
 import { Route as AuthenticatedPolicyRouteImport } from './routes/_authenticated/policy'
 import { Route as AuthenticatedWelcomeRouteImport } from './routes/_authenticated/welcome'
+import { Route as ApiArticleEventsRouteImport } from './routes/api/article-events'
 import { Route as AuthSignInRouteImport } from './routes/auth/sign-in'
 import { Route as AuthSignOutRouteImport } from './routes/auth/sign-out'
 import { Route as AuthorizedIndexRouteImport } from './routes/authorized/index'
@@ -62,6 +65,16 @@ const CallbackRoute = CallbackRouteImport.update({
   path: '/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
+const InstallDotshRoute = InstallDotshRouteImport.update({
+  id: '/install.sh',
+  path: '/install.sh',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UninstallDotshRoute = UninstallDotshRouteImport.update({
+  id: '/uninstall.sh',
+  path: '/uninstall.sh',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AuthenticatedConsentRoute = AuthenticatedConsentRouteImport.update({
   id: '/consent',
   path: '/consent',
@@ -81,6 +94,11 @@ const AuthenticatedWelcomeRoute = AuthenticatedWelcomeRouteImport.update({
   id: '/welcome',
   path: '/welcome',
   getParentRoute: () => AuthenticatedRoute,
+} as any)
+const ApiArticleEventsRoute = ApiArticleEventsRouteImport.update({
+  id: '/api/article-events',
+  path: '/api/article-events',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const AuthSignInRoute = AuthSignInRouteImport.update({
   id: '/auth/sign-in',
@@ -185,10 +203,13 @@ export interface FileRoutesByFullPath {
   '/agent-advice': typeof AgentAdviceRoute
   '/authorized': typeof AuthorizedRouteWithChildren
   '/callback': typeof CallbackRoute
+  '/install.sh': typeof InstallDotshRoute
+  '/uninstall.sh': typeof UninstallDotshRoute
   '/consent': typeof AuthenticatedConsentRoute
   '/install': typeof AuthenticatedInstallRoute
   '/policy': typeof AuthenticatedPolicyRoute
   '/welcome': typeof AuthenticatedWelcomeRoute
+  '/api/article-events': typeof ApiArticleEventsRoute
   '/auth/sign-in': typeof AuthSignInRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/agreement': typeof AuthorizedAgreementRoute
@@ -213,10 +234,13 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/agent-advice': typeof AgentAdviceRoute
   '/callback': typeof CallbackRoute
+  '/install.sh': typeof InstallDotshRoute
+  '/uninstall.sh': typeof UninstallDotshRoute
   '/consent': typeof AuthenticatedConsentRoute
   '/install': typeof AuthenticatedInstallRoute
   '/policy': typeof AuthenticatedPolicyRoute
   '/welcome': typeof AuthenticatedWelcomeRoute
+  '/api/article-events': typeof ApiArticleEventsRoute
   '/auth/sign-in': typeof AuthSignInRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/agreement': typeof AuthorizedAgreementRoute
@@ -244,10 +268,13 @@ export interface FileRoutesById {
   '/agent-advice': typeof AgentAdviceRoute
   '/authorized': typeof AuthorizedRouteWithChildren
   '/callback': typeof CallbackRoute
+  '/install.sh': typeof InstallDotshRoute
+  '/uninstall.sh': typeof UninstallDotshRoute
   '/_authenticated/consent': typeof AuthenticatedConsentRoute
   '/_authenticated/install': typeof AuthenticatedInstallRoute
   '/_authenticated/policy': typeof AuthenticatedPolicyRoute
   '/_authenticated/welcome': typeof AuthenticatedWelcomeRoute
+  '/api/article-events': typeof ApiArticleEventsRoute
   '/auth/sign-in': typeof AuthSignInRoute
   '/auth/sign-out': typeof AuthSignOutRoute
   '/authorized/agreement': typeof AuthorizedAgreementRoute
@@ -275,10 +302,13 @@ export interface FileRouteTypes {
     | '/agent-advice'
     | '/authorized'
     | '/callback'
+    | '/install.sh'
+    | '/uninstall.sh'
     | '/consent'
     | '/install'
     | '/policy'
     | '/welcome'
+    | '/api/article-events'
     | '/auth/sign-in'
     | '/auth/sign-out'
     | '/authorized/agreement'
@@ -303,10 +333,13 @@ export interface FileRouteTypes {
     | '/'
     | '/agent-advice'
     | '/callback'
+    | '/install.sh'
+    | '/uninstall.sh'
     | '/consent'
     | '/install'
     | '/policy'
     | '/welcome'
+    | '/api/article-events'
     | '/auth/sign-in'
     | '/auth/sign-out'
     | '/authorized/agreement'
@@ -333,10 +366,13 @@ export interface FileRouteTypes {
     | '/agent-advice'
     | '/authorized'
     | '/callback'
+    | '/install.sh'
+    | '/uninstall.sh'
     | '/_authenticated/consent'
     | '/_authenticated/install'
     | '/_authenticated/policy'
     | '/_authenticated/welcome'
+    | '/api/article-events'
     | '/auth/sign-in'
     | '/auth/sign-out'
     | '/authorized/agreement'
@@ -364,6 +400,9 @@ export interface RootRouteChildren {
   AgentAdviceRoute: typeof AgentAdviceRoute
   AuthorizedRoute: typeof AuthorizedRouteWithChildren
   CallbackRoute: typeof CallbackRoute
+  InstallDotshRoute: typeof InstallDotshRoute
+  UninstallDotshRoute: typeof UninstallDotshRoute
+  ApiArticleEventsRoute: typeof ApiArticleEventsRoute
   AuthSignInRoute: typeof AuthSignInRoute
   AuthSignOutRoute: typeof AuthSignOutRoute
   BookOfficeRoute: typeof BookOfficeRoute
@@ -415,6 +454,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof CallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/install.sh': {
+      id: '/install.sh'
+      path: '/install.sh'
+      fullPath: '/install.sh'
+      preLoaderRoute: typeof InstallDotshRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/uninstall.sh': {
+      id: '/uninstall.sh'
+      path: '/uninstall.sh'
+      fullPath: '/uninstall.sh'
+      preLoaderRoute: typeof UninstallDotshRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_authenticated/consent': {
       id: '/_authenticated/consent'
       path: '/consent'
@@ -442,6 +495,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/welcome'
       preLoaderRoute: typeof AuthenticatedWelcomeRouteImport
       parentRoute: typeof AuthenticatedRoute
+    }
+    '/api/article-events': {
+      id: '/api/article-events'
+      path: '/api/article-events'
+      fullPath: '/api/article-events'
+      preLoaderRoute: typeof ApiArticleEventsRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/auth/sign-in': {
       id: '/auth/sign-in'
@@ -627,6 +687,9 @@ const rootRouteChildren: RootRouteChildren = {
   AgentAdviceRoute: AgentAdviceRoute,
   AuthorizedRoute: AuthorizedRouteWithChildren,
   CallbackRoute: CallbackRoute,
+  InstallDotshRoute: InstallDotshRoute,
+  UninstallDotshRoute: UninstallDotshRoute,
+  ApiArticleEventsRoute: ApiArticleEventsRoute,
   AuthSignInRoute: AuthSignInRoute,
   AuthSignOutRoute: AuthSignOutRoute,
   BookOfficeRoute: BookOfficeRoute,

@@ -11,6 +11,8 @@ A TanStack Start + React web application for alignment researchers to share sess
 - **Booking**: Public per-office pages (`/book/<office>`) to book in-person meetings with Yoav, backed by Google Calendar (see `src/lib/booking/` and `src/routes/booking/`; env vars in `scripts/google-calendar-auth.ts`).
 - **Feedback**: Anonymous consulting-session feedback (`/feedback/mats`) behind single-use HMAC-signed links (generate with `scripts/generate-feedback-tokens.ts`). Answers append to a Google Sheet (`FEEDBACK_SHEET_ID`; testimonials in a separate tab, unlinked from answers); single-use state lives in the Convex `feedbackTokens` table, guarded by `FEEDBACK_TOKEN_SECRET` (set in Vercel and in the Convex deployment env). See `src/lib/feedback/`.
 
+- **Article analytics**: Anonymous reading analytics for public articles (`src/lib/article-analytics.ts`, called by the article page) beacon to `/api/article-events`, which writes to the Convex `articleEvents` table. `/install.sh` and `/uninstall.sh` are served by routes (`src/content/scripts/`) that count fetches in `scriptFetches`. No cookies, IPs or user agents are stored. Read it with `npx convex run articleEvents:summary '{"from":"YYYY-MM-DD"}'` (add `--prod` for production).
+
 ## Local Development
 
 ### Setup

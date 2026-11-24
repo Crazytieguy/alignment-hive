@@ -149,6 +149,37 @@ export default defineSchema({
     claimedAt: v.number(),
   }).index("by_token_hash", ["tokenHash"]),
 
+  // Anonymous reading analytics for public articles (/agent-advice). One row per event; `visit` is
+  // a random id generated per page load and kept in memory, so it ties one visit's events together
+  // and nothing else. No IP, user agent, cookie or full referrer is stored. Written only by the web
+  // server's /api/article-events route (convex/articleEvents.ts).
+  articleEvents: defineTable({
+    day: v.string(), // UTC "YYYY-MM-DD"
+    article: v.string(),
+    visit: v.string(),
+    type: v.union(
+      v.literal("view"),
+      v.literal("section"),
+      v.literal("engaged"),
+      v.literal("click"),
+      v.literal("toggle"),
+    ),
+    name: v.optional(v.string()), // section id, or click/toggle name
+    venue: v.optional(v.string()),
+    referrer: v.optional(v.string()), // host only
+    viewport: v.optional(v.string()),
+    hash: v.optional(v.string()),
+    bucket: v.optional(v.string()), // engaged-time bucket
+    deepest: v.optional(v.string()), // deepest section reached, on `engaged`
+  }).index("by_day", ["day"]),
+
+  // Fetches of /install.sh and /uninstall.sh, counted by the web server's script routes.
+  scriptFetches: defineTable({
+    day: v.string(),
+    script: v.union(v.literal("install"), v.literal("uninstall")),
+    venue: v.optional(v.string()),
+  }).index("by_day", ["day"]),
+
   linkedRepos: defineTable({
     installationId: v.number(),
     gitRemote: v.string(), // "github.com/owner/repo"

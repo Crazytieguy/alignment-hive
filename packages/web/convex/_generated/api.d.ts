@@ -9,6 +9,7 @@
  */
 
 import type * as agreement from "../agreement.js";
+import type * as articleEvents from "../articleEvents.js";
 import type * as auth from "../auth.js";
 import type * as authorized from "../authorized.js";
 import type * as consent from "../consent.js";
@@ -25,6 +26,7 @@ import type * as lib_childCounts from "../lib/childCounts.js";
 import type * as lib_consentVisibility from "../lib/consentVisibility.js";
 import type * as lib_projectConsent from "../lib/projectConsent.js";
 import type * as lib_schemas from "../lib/schemas.js";
+import type * as lib_serviceSecret from "../lib/serviceSecret.js";
 import type * as lib_users from "../lib/users.js";
 import type * as maintenance from "../maintenance.js";
 import type * as sessions from "../sessions.js";
@@ -37,6 +39,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   agreement: typeof agreement;
+  articleEvents: typeof articleEvents;
   auth: typeof auth;
   authorized: typeof authorized;
   consent: typeof consent;
@@ -53,6 +56,7 @@ declare const fullApi: ApiFromModules<{
   "lib/consentVisibility": typeof lib_consentVisibility;
   "lib/projectConsent": typeof lib_projectConsent;
   "lib/schemas": typeof lib_schemas;
+  "lib/serviceSecret": typeof lib_serviceSecret;
   "lib/users": typeof lib_users;
   maintenance: typeof maintenance;
   sessions: typeof sessions;

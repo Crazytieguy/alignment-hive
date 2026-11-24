@@ -2,6 +2,7 @@
 // release on a failure that wrote nothing. Called only by the web server (src/lib/feedback/server.ts).
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { requireServiceSecret } from "./lib/serviceSecret";
 
 // A pending claim older than this may be re-claimed: it means a submission died between claim
 // and confirm (e.g. a Sheets timeout), and we prefer a small at-least-once duplicate window over
@@ -14,25 +15,6 @@ export const CLAIM_TTL_MS = 10 * 60 * 1000;
  * HMAC verification itself happens in the web server — the only thing Convex ever sees is an
  * opaque hash.
  */
-function requireServiceSecret(provided: string): void {
-  const expected = process.env.FEEDBACK_TOKEN_SECRET;
-  if (!expected || !constantTimeEquals(provided, expected)) throw new Error("Unauthorized");
-}
-
-/**
- * String equality that reads every character of `expected` whatever `provided` is, so the time it
- * takes doesn't reveal how much of a guess matched. node:crypto's timingSafeEqual is only available
- * in Node actions, and these are queries and mutations.
- */
-function constantTimeEquals(provided: string, expected: string): boolean {
-  let diff = provided.length ^ expected.length;
-  for (let i = 0; i < expected.length; i++) {
-    // Past the end of `provided`, charCodeAt is NaN, which ^ treats as 0.
-    diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
-  }
-  return diff === 0;
-}
-
 export const claim = mutation({
   args: { tokenHash: v.string(), serviceSecret: v.string() },
   handler: async (ctx, { tokenHash, serviceSecret }) => {
