@@ -21,7 +21,7 @@ When a run finds something, `run.sh` starts a background Claude Code session (`c
 - The child's Codex catalog still lists the priority tier for every model with a `-fast` route (no model call).
 - Wire probes over HTTP, on every built-in model the child serves:
   - a streaming and a non-streaming reply per model;
-  - on the primary GPT model (`gpt-6-luna`): a two-turn tool round trip that replays the reasoning signature, a prompt-cache hit, an image, a web search that must be answered by the alpha/search backend rather than the fallback (skipped if `[web-search] mode` isn't the default), and request latency against the last two weeks.
+  - on the primary GPT model (`gpt-6-luna`): a two-turn tool round trip that replays the reasoning signature, a prompt-cache hit (follow-ups 10 s apart, up to three, since the provider can be slow to write the cache), an image, a web search that must be answered by the alpha/search backend rather than the fallback (skipped if `[web-search] mode` isn't the default), and request latency against the last two weeks.
 - Nested `claude -p` cells through your real wiring (HTTPS proxy or base URL), on the installed Claude Code version: a GPT session that reads and edits a file, and a Claude Haiku "ok" for the passthrough.
 
 A probe that finds the live router restarting (the port refused, or the router's own "cliproxy upstream is not ready") is sent once more when the service is back, waiting at most 90 s in all per run. Other sessions restart it: the first Claude Code session after a plugin update moves the service onto the new binary, and the triage and changelog jobs start sessions at 04:00 too.

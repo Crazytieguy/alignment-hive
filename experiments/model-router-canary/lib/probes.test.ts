@@ -363,9 +363,17 @@ describe('validators', () => {
   test('prompt cache', () => {
     const hit = ok(msg([], { usage: { input_tokens: 100, cache_read_input_tokens: 4096 } }));
     const miss = ok(msg([], { usage: { input_tokens: 5000 } }));
-    expect(judgeCache(miss, hit)).toMatchObject({ status: 'pass', metrics: { cache_read: 4096 } });
-    expect(judgeCache(miss, miss).status).toBe('warn');
-    expect(judgeCache(bad('x'), hit).status).toBe('fail');
+    expect(judgeCache([miss, hit])).toMatchObject({ status: 'pass', detail: 'second request read 4096 cached tokens', metrics: { cache_read: 4096 } });
+    expect(judgeCache([miss, miss, hit])).toMatchObject({
+      status: 'pass',
+      detail: 'third request read 4096 cached tokens after 1 follow-up missed (the cache warmed late)',
+      metrics: { cache_requests: 3 },
+    });
+    expect(judgeCache([miss, miss, miss, miss])).toMatchObject({ status: 'warn', detail: 'no follow-up of 3 read cached tokens (first read 0)' });
+    expect(judgeCache([miss, miss]).status).toBe('warn');
+    expect(judgeCache([miss]).status).toBe('warn');
+    expect(judgeCache([bad('x')])).toMatchObject({ status: 'fail', detail: 'first request: x' });
+    expect(judgeCache([miss, miss, bad('y')])).toMatchObject({ status: 'fail', detail: 'third request: y' });
   });
 
   test('image', () => {

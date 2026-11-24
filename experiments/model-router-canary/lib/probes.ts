@@ -535,11 +535,29 @@ export function judgeToolAddition(r: Reply): Result {
 
 export const cacheRead = (m?: Message): number => Number(m?.usage?.cache_read_input_tokens ?? 0) || 0;
 
-export function judgeCache(first: Reply, second: Reply): Result {
-  for (const [label, r] of [['first', first], ['second', second]] as const) if (r.error) return { status: 'fail', detail: `${label} request: ${r.error}` };
-  const metrics = { cache_read: cacheRead(second.message), cache_read_first: cacheRead(first.message), input_tokens: Number(second.message?.usage?.input_tokens ?? 0) };
-  if (metrics.cache_read > 0) return { status: 'pass', detail: `second request read ${metrics.cache_read} cached tokens`, metrics };
-  return { status: 'warn', detail: `second request read no cached tokens (first read ${metrics.cache_read_first})`, metrics };
+const ORDINAL = ['first', 'second', 'third', 'fourth', 'fifth'];
+export const CACHE_RETRY_MS = 10_000;
+
+/**
+ * `replies` are the seeding request and its follow-ups, which stop at the first that reads the cache. A follow-up
+ * after a miss is sent CACHE_RETRY_MS later: the provider's cache write can lag a back-to-back request by several
+ * seconds (live 2026-11-24: misses at 0 s and 5 s, a hit after the next turn), so only a miss on every one warns.
+ */
+export function judgeCache(replies: Array<Reply>): Result {
+  for (const [i, r] of replies.entries()) if (r.error) return { status: 'fail', detail: `${ORDINAL[i] ?? `#${i + 1}`} request: ${r.error}` };
+  const last = replies[replies.length - 1];
+  const metrics = {
+    cache_read: cacheRead(last?.message),
+    cache_read_first: cacheRead(replies[0]?.message),
+    input_tokens: Number(last?.message?.usage?.input_tokens ?? 0),
+    cache_requests: replies.length,
+  };
+  if (replies.length > 1 && metrics.cache_read > 0) {
+    const misses = replies.length - 2;
+    const late = misses > 0 ? ` after ${misses} follow-up${misses > 1 ? 's' : ''} missed (the cache warmed late)` : '';
+    return { status: 'pass', detail: `${ORDINAL[replies.length - 1]} request read ${metrics.cache_read} cached tokens${late}`, metrics };
+  }
+  return { status: 'warn', detail: `no follow-up of ${replies.length - 1} read cached tokens (first read ${metrics.cache_read_first})`, metrics };
 }
 
 export function judgeImage(r: Reply): Result {
@@ -727,8 +745,13 @@ async function probePromptCache(t: RouterTarget, model: string): Promise<Result>
   // requests sharing the system prompt share a cache identity without any session header.
   const system = cacheSystemPrompt(`${t.label}-${Date.now()}`);
   const first = await send(t, messagesBody(model, [{ role: 'user', content: 'Reply with the single word: one' }], { system }));
-  const second = await send(t, messagesBody(model, [{ role: 'user', content: 'Reply with the single word: two' }], { system }));
-  return judgeCache(first, second);
+  const replies = [first];
+  for (const [i, word] of ['two', 'three', 'four'].entries()) {
+    if (replies.some((r) => r.error || (r !== first && cacheRead(r.message) > 0))) break;
+    if (i > 0) await sleep(CACHE_RETRY_MS);
+    replies.push(await send(t, messagesBody(model, [{ role: 'user', content: `Reply with the single word: ${word}` }], { system })));
+  }
+  return judgeCache(replies);
 }
 
 async function probeImage(t: RouterTarget, model: string): Promise<Result> {
