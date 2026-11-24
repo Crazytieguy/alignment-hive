@@ -180,6 +180,27 @@ export default defineSchema({
     venue: v.optional(v.string()),
   }).index("by_day", ["day"]),
 
+  // GitHub repo traffic, saved daily past GitHub's 14-day window (convex/githubTraffic.ts).
+  githubTrafficDaily: defineTable({
+    kind: v.union(v.literal("views"), v.literal("clones")),
+    day: v.string(), // UTC "YYYY-MM-DD"
+    count: v.number(),
+    uniques: v.number(),
+  }).index("by_kind_day", ["kind", "day"]),
+
+  githubTrafficSnapshots: defineTable({
+    kind: v.union(v.literal("referrers"), v.literal("paths")),
+    fetchedDay: v.string(),
+    items: v.array(
+      v.object({
+        name: v.string(),
+        title: v.optional(v.string()),
+        count: v.number(),
+        uniques: v.number(),
+      }),
+    ),
+  }).index("by_kind_day", ["kind", "fetchedDay"]),
+
   linkedRepos: defineTable({
     installationId: v.number(),
     gitRemote: v.string(), // "github.com/owner/repo"
