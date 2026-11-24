@@ -4,11 +4,11 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-/** The files whose text decides what an upload's sanitizer redacts. */
-const RULE_SOURCES = ['sanitize.ts', 'secret-rules.ts'];
+/** The files whose text decides what an upload's sanitizer redacts: the rules, and which fields they're run over. */
+const RULE_SOURCES = ['sanitize.ts', 'secret-rules.ts', 'upload-session.ts'];
 
 /**
- * `gitleaks@<commit>+<hash of the rule source>`. Any edit to either file changes the hash, even a comment: a
+ * `gitleaks@<commit>+<hash of the rule source>`. Any edit to these files changes the hash, even a comment: a
  * needless re-sanitize is harmless, a missed one is not. It hashes code only, never the user's env values.
  */
 export function sanitizerStamp(): string {
