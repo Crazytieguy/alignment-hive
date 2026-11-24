@@ -195,6 +195,7 @@ describe('readAndSanitizeSession', () => {
         messageCount: sanitizedEntries.length,
       });
       expect(SessionMetaSchema.safeParse(meta).success).toBe(true);
+      expect(meta.sanitizer).toMatch(/^gitleaks@[0-9a-f]{12}\+[0-9a-f]{12}$/);
       expect(sanitizedEntries.map((entry) => entry.type)).toEqual([
         'user',
         'system',
