@@ -18,6 +18,7 @@ import { computeSessionStatus } from '../lib/session-state';
 import { clearUploadScheduled } from '../lib/sharing';
 import { getSnoozeUntil } from '../lib/snooze';
 import { loadConsentWindows, loadSessionStateWithMigrations, uploadOneSession } from '../lib/upload-session';
+import { KnownValues } from '../lib/known-values';
 
 const UPLOAD_CONCURRENCY = 5;
 
@@ -106,8 +107,10 @@ async function doUploadWork(
   const { parentSessions } = state;
   // A manual `hive upload send` ignores a snooze; the background job checked it before starting.
   const statusCtx = { ...state, consentMtime, snoozeUntil: null, consentWindows };
+  // One read of the known secret values for the run; each session adds its cwds' files.
+  const known = new KnownValues();
   const upload = (session: (typeof parentSessions)[number]) =>
-    uploadOneSession({ session, state, statusCtx, transcriptsDirs, checkoutId, ids, stateDir });
+    uploadOneSession({ session, state, statusCtx, transcriptsDirs, checkoutId, ids, stateDir, known });
 
   // Single session mode
   if (sessionPrefix !== undefined) {

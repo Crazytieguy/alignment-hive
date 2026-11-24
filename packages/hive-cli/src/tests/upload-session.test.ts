@@ -14,6 +14,7 @@ import {
   summarizeSessions,
   uploadOneSession,
 } from '../lib/upload-session';
+import { KnownValues } from '../lib/known-values';
 import type { DiscoveredSession } from '../lib/session-state';
 import type { SummaryCache } from '../lib/upload-session';
 
@@ -354,6 +355,70 @@ describe('readSessionSummary', () => {
       const later = new Date(Date.now() + 60_000);
       await utimes(path, later, later);
       expect((await summarizeSessions(state, ctx, cache))[0].summary).toBe('after');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('known values around a session', () => {
+  // Low entropy and no digits: only the known-value rule can catch them.
+  const DOTENV = 'qqqqrrrrssssttttuuuu';
+  const PARENT_DOTENV = 'aaaassssddddffffgggg';
+  const MCP_HEADER = 'zzzzxxxxccccvvvvbbbb';
+  const SHORT = 'shortvalue';
+  const session = (dir: string, cwd: string, content: string) => {
+    const path = join(dir, `${cwd.length}.jsonl`);
+    return writeFile(
+      path,
+      JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: 't',
+        cwd,
+        message: { role: 'user', content },
+      }),
+    ).then(() => ({ sessionId: 's', path }));
+  };
+
+  test(".env and MCP config values are redacted from the entries and summary; short ones and a malformed .mcp.json don't matter", async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hive-known-upload-'));
+    try {
+      const cwd = join(dir, 'proj');
+      await mkdir(cwd);
+      await writeFile(join(cwd, '.env'), `SOME_CONFIG=${DOTENV}\nTINY=${SHORT}\n`);
+      await writeFile(join(cwd, '.mcp.json'), '{ broken');
+      const claudeConfig = join(dir, '.claude.json');
+      await writeFile(claudeConfig, JSON.stringify({ mcpServers: { a: { headers: { 'X-Api-Key': MCP_HEADER } } } }));
+      const known = new KnownValues({ env: {}, claudeConfig });
+      const s = await session(dir, cwd, `cat .env: ${DOTENV} ${SHORT}; header ${MCP_HEADER}`);
+      const r = await readAndSanitizeSession(s, new Set(), known);
+      const text = JSON.stringify(r.sanitizedEntries) + (r.summary ?? '');
+      expect(text).not.toContain(DOTENV);
+      expect(text).not.toContain(MCP_HEADER);
+      expect(text).toContain(SHORT);
+      expect(text).toContain('[REDACTED:known-value]');
+      expect(r.summary).toBe(`cat .env: [REDACTED:known-value] ${SHORT}; header [REDACTED:known-value]`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an agent's read also redacts its parent's cwd values (a worktree lacks the main checkout's .env)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'hive-known-agent-'));
+    try {
+      const main = join(dir, 'main');
+      const worktree = join(dir, 'worktree');
+      await mkdir(main);
+      await mkdir(worktree);
+      await writeFile(join(main, '.env'), `SOME_CONFIG=${PARENT_DOTENV}\n`);
+      const known = new KnownValues({ env: {}, claudeConfig: join(dir, 'none.json') });
+      const agent = await session(dir, worktree, `saw ${PARENT_DOTENV}`);
+      const alone = await readAndSanitizeSession(agent, new Set(), known);
+      expect(JSON.stringify(alone.sanitizedEntries)).toContain(PARENT_DOTENV);
+      const withParent = await readAndSanitizeSession(agent, new Set(), known, [main]);
+      expect(JSON.stringify(withParent.sanitizedEntries)).not.toContain(PARENT_DOTENV);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
