@@ -1,8 +1,8 @@
-// Secret redaction. Uploads replace each span detectSecrets finds with `[REDACTED:<rule>]`: gitleaks'
-// rules (secret-rules.ts, generated), SECRET_SHAPES for secrets no rule names, a high-entropy
-// safety net, and the literal values of this process's credential env vars (withEnvValues). A
-// value under a SAFE_KEYS name gets a narrower list (sanitizeDeep). The debrief page marks spans
-// from a narrower list through secretSpans.
+// Secret redaction. Uploads replace each span detectSecrets finds with `[REDACTED:<rule>]`: KEY_RULES
+// (gitleaks' rules, generated into secret-rules.ts, plus keys it has no rule for), SECRET_SHAPES for
+// secrets no rule names, a high-entropy safety net, and the literal values of this process's
+// credential env vars (withEnvValues). A value under a SAFE_KEYS name gets a narrower list
+// (sanitizeDeep). The debrief page marks spans from a narrower list through secretSpans.
 
 import { SECRET_RULES } from './secret-rules';
 import type { SecretRule } from './secret-rules';
@@ -81,6 +81,14 @@ export const SECRET_SHAPES: Array<SecretRule & { id: ShapeId }> = [
   { id: 'value', keywords: NAME_KEYWORDS, regex: new RegExp(named((pass) => `(?:^|[\\s{,])${pass ? PASS_NAME : NAME}\\s*:\\s*["']?`, { pass: BARE(8, false, 1), other: BARE(16, true, 2) }), 'gim') },
 ];
 
+/** Every rule that names a key: gitleaks' (secret-rules.ts is generated) and, after them, keys it has no rule for. */
+export const KEY_RULES: Array<SecretRule> = [
+  ...SECRET_RULES,
+  // Claude OAuth access and refresh tokens (`sk-ant-oat01-…`, `sk-ant-oat02-…`, `sk-ant-ort01-…`), whole, prefix included:
+  // any two-digit version, 20+ characters. No leading `\b`: in JSON-escaped output a token can follow `\n`.
+  { id: 'anthropic-oauth-token', keywords: ['sk-ant-oat', 'sk-ant-ort'], regex: new RegExp(`sk-ant-o(?:at|rt)\\d{2}-${RANDOM('[A-Za-z0-9_-]')}[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])`, 'g') },
+];
+
 /** Header names whose values the header shapes recognize by their name: a structured value under one is scanned as that header's line. */
 const HEADER_NAME = /^(?:(?:set-)?cookie|(?:proxy-)?authorization)$/i;
 /**
@@ -129,12 +137,12 @@ const HIGH_ENTROPY_RULE: SecretRule = {
   entropy: 4.0,
 };
 
-const ALL_RULES: Array<SecretRule> = [...SECRET_SHAPES, ...SECRET_RULES, HIGH_ENTROPY_RULE];
+const ALL_RULES: Array<SecretRule> = [...SECRET_SHAPES, ...KEY_RULES, HIGH_ENTROPY_RULE];
 /**
  * What a SAFE_KEYS value is still scanned with: every rule that names a secret, except the link shape, whose
  * `/auth/<segment>` match misfires on the paths and branch names these keys hold (`packages/auth/oauth2-module`).
  */
-const SAFE_KEY_RULES: Array<SecretRule> = [...SECRET_SHAPES.filter((shape) => shape.id !== 'link'), ...SECRET_RULES];
+const SAFE_KEY_RULES: Array<SecretRule> = [...SECRET_SHAPES.filter((shape) => shape.id !== 'link'), ...KEY_RULES];
 /** A record or tool id. Under a SAFE_KEYS name it is checked against credential env values only: gitleaks' `EAAA` prefix rule would take about 1 random uuid in 30,000. */
 const UUID_VALUE = new RegExp(`^${UUID}$`, 'i');
 

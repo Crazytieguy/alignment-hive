@@ -31,6 +31,13 @@ describe('sanitizeString', () => {
     expect(sanitized).not.toContain('ghp_');
   });
 
+  test('a Claude OAuth token is masked whole, prefix included', () => {
+    const token = 'sk-ant-oat02-Xq7vR2mK9pL4sT8wB3nF6hJ1cY5dG0aZ-e_uVt4rNx8QkW2pLm7sHj3dFg9bC1vX6zA5yE0oI4uT7rW2qP9lK3mN8bV5cAA';
+    expect(sanitizeString(`setup-token printed ${token}\nStore it safely.`)).toBe(
+      'setup-token printed [REDACTED:anthropic-oauth-token]\nStore it safely.',
+    );
+  });
+
   test("overlapping matches merge, so a longer match's tail past a narrower rule is redacted too", () => {
     // slack-bot-token matches up to the dot; the entropy net matches the whole run.
     const token = 'xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx.extraTail9Zz8Yy7';

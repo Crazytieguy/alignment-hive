@@ -21,6 +21,9 @@ const positives: Array<[SecretKind, string, string]> = [
   ['jwt', `jwt ${['eyJ' + random(20, 6), 'eyJ' + random(20, 7), random(20, 8)].join('.')} end`, 'jwt [token] end'],
   ['key', `ANTHROPIC=${'sk-ant-api03-' + random(93, 9)}AA`, 'ANTHROPIC=[key]'],
   ['key', `token ${'ghp_' + random(36, 10)}`, 'token [key]'],
+  ['key', `echo ${'sk-ant-oat02-' + random(93, 93)}AA`, 'echo [key]'],
+  // A command's output as a tool result's JSON: the token follows an escaped newline.
+  ['key', `{"stdout":"Your token:\\n${'sk-ant-oat02-' + random(93, 94)}AA\\n"}`, '{"stdout":"Your token:\\n[key]\\n"}'],
   ['value', `export OPENAI_API_KEY="${random(24, 11)}"`, 'export OPENAI_API_KEY="[token]"'],
   ['value', `{"client_secret": "${random(24, 12)}"}`, '{"client_secret": "[token]"}'],
   ['value', `{ _id: "k1", inviteToken: "${random(24, 15)}" }`, '{ _id: "k1", inviteToken: "[token]" }'],

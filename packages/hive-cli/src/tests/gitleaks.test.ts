@@ -21,6 +21,20 @@ const CASES: Record<string, { detect: Array<string>; reject?: Array<string>; via
       'sk-ant-api03-abc123xyz-456def789ghij-klmnopqrstuvwx-3456yza789bcde-1234fghijklmnopby56aaaogaopaaaabc123xyzBB', // wrong suffix
     ],
   },
+  // Not a gitleaks rule: added to KEY_RULES in sanitize.ts.
+  'anthropic-oauth-token': {
+    detect: [
+      'sk-ant-oat01-Xq7vR2mK9pL4sT8wB3nF6hJ1cY5dG0aZ-e_uVt4rNx8QkW2pLm7sHj3dFg9bC1vX6zA5yE0oI4uT7rW2qP9lK3mN8bV5cAA',
+      'sk-ant-oat02-Xq7vR2mK9pL4sT8wB3nF6hJ1cY5dG0aZ-e_uVt4rNx8QkW2pLm7sHj3dFg9bC1vX6zA5yE0oI4uT7rW2qP9lK3mN8bV5cAA',
+      'sk-ant-ort01-Xq7vR2mK9pL4sT8wB3nF6hJ1cY5dG0aZ-e_uVt4rNx8QkW2pLm7sHj3dFg9bC1vX6zA5yE0oI4uT7rW2qP9lK3mN8bV5cAA',
+      'claude ran with sk-ant-oat02-Xq7vR2mK9pL4sT8wB3nF6hJ1cY5dG0aZ in its env', // shorter, inside prose
+    ],
+    reject: [
+      'sk-ant-oat01-…', // a prefix in prose
+      'sk-ant-oat02-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', // a placeholder: no digit
+      'sk-ant-oat02-Xq7vR2mK9pL4', // too short
+    ],
+  },
   'openai-api-key': {
     detect: [
       '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',

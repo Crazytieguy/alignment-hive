@@ -1,14 +1,13 @@
 /**
- * What the review page treats as a secret: the repository's gitleaks rules (the upload
- * sanitizer's list), minus its fuzzy ones, plus the shapes gitleaks has no rule for and
+ * What the review page treats as a secret: the upload sanitizer's key rules (KEY_RULES),
+ * minus its fuzzy ones, plus the shapes gitleaks has no rule for and
  * the literal values of the credential env vars `hive` runs with (withEnvValues).
  * Evidence is redacted with these before it is hashed; authored text and the finished page
  * are checked with the same rules and refused.
  */
 import { createHash } from 'node:crypto';
 import { parse } from 'parse5';
-import { SECRET_NAME, SECRET_SHAPES, namedScan, secretSpans, withEnvValues } from '../lib/sanitize';
-import { SECRET_RULES } from '../lib/secret-rules';
+import { KEY_RULES, SECRET_NAME, SECRET_SHAPES, namedScan, secretSpans, withEnvValues } from '../lib/sanitize';
 import type { ShapeId } from '../lib/sanitize';
 import type { SecretRule } from '../lib/secret-rules';
 import type { DefaultTreeAdapterMap } from 'parse5';
@@ -19,7 +18,7 @@ export interface SecretFound { kind: SecretKind; start: number; end: number; mat
 
 /** The upload sanitizer's entropy net and `generic-api-key` fire on ordinary code and ids (a WorkOS client id, env names, a fonts URL). */
 const FUZZY = new Set(['generic-api-key']);
-const RULES: Array<SecretRule> = [...SECRET_SHAPES, ...SECRET_RULES.filter((rule) => !FUZZY.has(rule.id))];
+const RULES: Array<SecretRule> = [...SECRET_SHAPES, ...KEY_RULES.filter((rule) => !FUZZY.has(rule.id))];
 function kindOf(ruleId: string): SecretKind {
   if (SECRET_SHAPES.some((shape) => shape.id === ruleId)) return ruleId as SecretKind;
   return ruleId === 'jwt' ? 'jwt' : ruleId === 'private-key' ? 'privateKey' : 'key';
