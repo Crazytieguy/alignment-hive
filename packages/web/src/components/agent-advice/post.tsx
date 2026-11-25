@@ -6,18 +6,17 @@ import { threads } from "./threads";
 export function PostBody({ email }: { email: string }) {
   return (
     <>
-      <p>I've spent most of this year helping AI safety researchers use coding agents, at <a href="https://www.matsprogram.org/" data-track="link:mats" target="_blank" rel="noopener">MATS</a> and other places. I end up giving mostly the same advice, so I wrote it down here. I'll keep updating it as I find better ways to use agents, so check back every so often.</p>
-      <p>My goal is to help you hand harder tasks to your agent and trust the result, without having to throw it away or find out weeks later that it was wrong.</p>
-      <p>For some of the problems below, I <a href="https://github.com/Crazytieguy/alignment-hive" data-track="link:github" target="_blank" rel="noopener">built tools</a> to help:</p>
+      <p>I've spent most of this year helping AI safety researchers use coding agents, at <a href="https://www.matsprogram.org/" data-track="link:mats" target="_blank" rel="noopener">MATS</a> and other places. This post collects the advice I find myself repeating most often, and I'll keep it updated over time. My goal is to help you get better results while spending less time and mental resources.</p>
+      <p>Much of my advice is easier to follow with <a href="https://github.com/Crazytieguy/alignment-hive" data-track="link:github" target="_blank" rel="noopener">my tools</a> installed, though they're by no means mandatory:</p>
       <InstallCommand />
       <p>Most of the examples in this post come from building one of those tools, tldr: a small plugin that collapses each long agent reply to a one-sentence summary, with <code>[ more ]</code> to open the full reply. Messages are verbatim unless labelled made up, and [...] marks text I left out.</p>
       <Visual name="tldr" />
       <Heading level={2} id="stop-doing-things-for-your-agent">Stop doing things for your agent</Heading>
-      <p>Doing something your agent could have done costs you a context switch. It adds up to a lot of attention and fatigue.</p>
-      <p>So whenever I notice myself doing something on behalf of an agent, I ask whether I can connect it instead. For example:</p>
+      <p>If your agent has limited permissions and access it'll stop early, and you'll find yourself context switching more often in order to unblock it. Whenever this happens, I check if there's a way to give my agent permanent access. For example:</p>
       <ul><li><strong>Auto mode.</strong> Now Claude Code's default: a classifier checks each command for you. <code>/auto-mode-setup</code> helps you configure its permissions.</li><li><strong>Your data sources.</strong> Email, Slack, docs, cloud storage, etc.</li><li><strong>Your compute provider</strong>, like RunPod or Vast.ai.</li><li><strong>Computer use</strong>, for whatever has no connector.</li><li><strong>A way to check its own work</strong>, so it can catch mistakes and iterate itself.</li></ul>
       <Thread messages={threads[0]} />
       <Visual name="terminal-check" />
+      <p>Paste this prompt into your agent for some easy wins:</p>
       <PromptCard text="Look through my recent sessions in this project for things I did by hand that you could have done yourself with the right access: text I pasted in from Slack, email or docs, commands I ran for you, results I copied back. For each one, tell me which connector, CLI or permission would let you do it next time, and set up the ones you can."><p>Look through my recent sessions in this project for things I did by hand that you could have done yourself with the right access: text I pasted in from Slack, email or docs, commands I ran for you, results I copied back. For each one, tell me which connector, CLI or permission would let you do it next time, and set up the ones you can.</p></PromptCard>
       <Aside summary={<>Where should my agents run?</>} track="aside:gpu">
       <p>A common setup is to install Claude Code on every GPU machine you rent, but that agent can't add GPUs or stop using the one it's sitting on, so managing compute stays your job.</p>
@@ -30,8 +29,8 @@ export function PostBody({ email }: { email: string }) {
       <p>Your agent will install a lot of software, so this also protects you from supply chain attacks, which are probably at least as big a risk as misaligned actions. As for prompt injection, Anthropic staff have <a href="https://x.com/bcherny/status/2097557079762624563" data-track="link:bcherny-tweet" target="_blank" rel="noopener">said publicly</a> that their built-in mitigations essentially solve it in practice.</p>
       </Aside>
       <Heading level={2} id="fully-in-the-loop-or-fully-out">Fully in the loop, or fully out</Heading>
-      <p>A lot of fatigue comes from checking on an agent every so often: giving it an answer, getting it unstuck. Instead, at any point in a session, I'm in one of two modes, and I tell the agent which one.</p>
-      <p>In the loop, I focus on this one session and nothing else, letting me stay calm and in flow instead of bouncing between sessions. Once I've said what I need to, I send it off and leave the loop. I don't look again until it can't make progress without me.</p>
+      <p>A lot of fatigue comes from checking on an agent every so often to unblock it. Instead, at any point in a session, I'm in one of two modes, and I tell the agent which one.</p>
+      <p>In the loop, I focus on this one session and nothing else, letting me stay calm and in flow instead of bouncing between sessions. Once I'm done communicating, I send it off and leave the loop. I don't look again until it can't make progress without me.</p>
       <p>The most common pattern is a spec phase, an execution phase and a review phase, but it isn't a rule. In-the-loop phases are for communicating intent, whenever they happen.</p>
       <Heading level={3} id="make-the-conversation-the-spec">Make the conversation the spec</Heading>
       <blockquote className="pull"><p>Instructing Claude is a delicate balance. If you are too specific, Claude will follow your instructions even when a pivot may be more appropriate. If you are too vague, Claude will often make choices and assumptions based on industry best practices that may not be a fit for your task.</p><cite>Thariq Shihipar, <a href="https://claude.com/resources/articles/a-field-guide-to-claude-fable-finding-your-unknowns" data-track="link:field-guide" target="_blank" rel="noopener">A field guide to Claude Fable: finding your unknowns</a></cite></blockquote>

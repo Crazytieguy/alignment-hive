@@ -94,16 +94,12 @@ function CopyButton({ label, track }: { label: string; track: string }) {
 
 export function PromptCard({ text, children }: { text: string; children: ReactNode }) {
   return (
-    <div className="paste" role="group" aria-label="Prompt to paste">
-      <div className="ph">
-        <span className="ptw">
-          <span className="pt">Prompt to paste</span>
-          <span className="psub">into your own agent</span>
-        </span>
-        <CopyButton label="Copy this prompt" track="copy-prompt" />
-      </div>
+    <div className="paste prompt" role="group" aria-label="Prompt to paste">
       <div className="pb" data-copy={text}>
         {children}
+      </div>
+      <div className="pf">
+        <CopyButton label="Copy this prompt" track="copy-prompt" />
       </div>
       <span className="sr" aria-live="polite" />
     </div>

@@ -79,9 +79,6 @@
 .aa .pair>.m-better+.m{border-top-color:var(--good-line)}
 .aa .paste{margin:26px 0 30px;border:1px solid var(--line2);border-radius:8px;background:var(--card)}
 .aa .ph{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 8px 8px 16px;border-bottom:1px solid var(--line)}
-.aa .ptw{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 8px;min-width:0}
-.aa .pt{font:600 14.5px/1.3 Fraunces,Georgia,serif;color:var(--fg)}
-.aa .psub{font-size:12.5px;line-height:1.3;color:var(--mute)}
 .aa .copy{flex:none;display:inline-flex;align-items:center;gap:6px;min-height:38px;padding:6px 14px 6px 11px;border:1px solid var(--line2);border-radius:7px;background:var(--bg);color:var(--fg);font:600 13.5px/1.2 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;cursor:pointer;text-align:left}
 .aa .copy:hover{border-color:var(--acc);color:var(--acc)}
 .aa .copy:active{transform:translate(1px,1px)}
@@ -503,3 +500,5 @@
 .aa .thread .m-recall .mb>div>:last-child{margin-bottom:0}
 /* the CLI's "⏺", drawn: the character itself turns into an emoji on Android */
 .aa .dot{display:block;align-self:start;width:.5em;height:.5em;margin:calc((1lh - .5em) / 2) 0 0 .1ch;border-radius:50%;background:currentColor}
+.aa .paste.prompt .pb{padding-bottom:4px}
+.aa .paste.prompt .pf{display:flex;justify-content:flex-end;padding:0 8px 8px}

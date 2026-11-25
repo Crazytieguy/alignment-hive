@@ -117,7 +117,7 @@ export const threads: Message[][] = [
       "speaker": "Agent",
       "when": "Oct 8",
       "tags": [],
-      "html": "<p>Both judges are done, and they agree that the summaries invent asks. GPT-6.1 Sol rated 20 of 30 faithful and Opus 22. <span class=\"cutin\" title=\"Words left out here\"><span aria-hidden=\"true\">[…]</span><span class=\"sr\"> (words left out) </span></span></p><p>Ways to address it in the prompt.</p><div class=\"trim trim-mid\" role=\"note\"><span class=\"sr\">lines left out</span><span aria-hidden=\"true\">[…]</span></div><p>Whichever you pick, I can re-run the same 30 replies with both judges to check it actually helps. That's about 90 calls and roughly 15 minutes.</p><div class=\"trim trim-end\" role=\"note\"><span class=\"sr\">lines left out</span><span aria-hidden=\"true\">[…]</span></div>"
+      "html": "<p>Both judges are done, and they agree that the summaries invent asks. GPT-6.1 Sol rated 20 of 30 faithful and Opus 22. <span class=\"cutin\" title=\"Words left out here\"><span aria-hidden=\"true\">[…]</span><span class=\"sr\"> (words left out) </span></span></p><p>Ways to address it in the prompt:</p><div class=\"trim trim-mid\" role=\"note\"><span class=\"sr\">lines left out</span><span aria-hidden=\"true\">[…]</span></div><p>Whichever you pick, I can re-run the same 30 replies with both judges to check it actually helps. That's about 90 calls and roughly 15 minutes.</p><div class=\"trim trim-end\" role=\"note\"><span class=\"sr\">lines left out</span><span aria-hidden=\"true\">[…]</span></div>"
     },
     {
       "kind": "none",
