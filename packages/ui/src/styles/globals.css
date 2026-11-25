@@ -51,8 +51,12 @@
   --sidebar-ring: #b07a10;
 }
 
+/* Body face: Seravek (macOS), then the "humanist" stack from
+ * modernfontstacks.com — Calibri on Windows, Ubuntu / DejaVu Sans on Linux,
+ * the system sans elsewhere — rather than Gill Sans / Trebuchet MS, which
+ * read dated next to the Fraunces display face. Keep body's stack in sync. */
 @theme inline {
-  --font-sans: "Seravek", "Gill Sans", "Trebuchet MS", "Segoe UI", sans-serif;
+  --font-sans: Seravek, "Gill Sans Nova", Ubuntu, Calibri, "DejaVu Sans", source-sans-pro, sans-serif;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-sidebar-ring: var(--sidebar-ring);
@@ -110,7 +114,7 @@
     --accent: #1f2027;
     --accent-foreground: #ede7d8;
     --destructive: oklch(0.704 0.191 22.216);
-    --border: #2b2c34;
+    --border: #31323b;
     --input: #383841;
     --ring: #c68f2a;
     --chart-1: #e3a63c;
@@ -124,7 +128,7 @@
     --sidebar-primary-foreground: #0e0e13;
     --sidebar-accent: #1f2027;
     --sidebar-accent-foreground: #ede7d8;
-    --sidebar-border: #2b2c34;
+    --sidebar-border: #31323b;
     --sidebar-ring: #c68f2a;
   }
 }
@@ -137,7 +141,7 @@
  * Dark ground is "Dusk": oklch(0.165 0.012 285), a near-black with a hint
  * of violet, chosen 2026-09-01 so the warm amber and cream sit on a cool
  * ground instead of a brown one. Surfaces step up in lightness on the same
- * hue (+0.04 card, +0.08 accent, +0.13 border, +0.18 input). */
+ * hue (+0.04 card, +0.08 accent, +0.15 border, +0.18 input). */
 .theme-dark {
   color-scheme: dark;
   --background: #0e0e13;
@@ -155,7 +159,7 @@
   --accent: #1f2027;
   --accent-foreground: #ede7d8;
   --destructive: oklch(0.704 0.191 22.216);
-  --border: #2b2c34;
+  --border: #31323b;
   --input: #383841;
   --ring: #c68f2a;
   --chart-1: #e3a63c;
@@ -169,7 +173,7 @@
   --sidebar-primary-foreground: #0e0e13;
   --sidebar-accent: #1f2027;
   --sidebar-accent-foreground: #ede7d8;
-  --sidebar-border: #2b2c34;
+  --sidebar-border: #31323b;
   --sidebar-ring: #c68f2a;
 }
 
@@ -182,11 +186,15 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: "Seravek", "Gill Sans", "Trebuchet MS", "Segoe UI", sans-serif;
+    font-family: Seravek, "Gill Sans Nova", Ubuntu, Calibri, "DejaVu Sans", source-sans-pro, sans-serif;
   }
   /* Tailwind v4's preflight leaves buttons with the default cursor; both apps want the pointer. */
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;
+  }
+  /* text selection in the amber family instead of the browser's blue */
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 32%, transparent);
   }
 }

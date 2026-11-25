@@ -13,6 +13,7 @@ import {
   createHeroState,
   paint,
   positions,
+  skipReveal,
   still,
   targets,
 } from "./kintsugi-field";
@@ -31,6 +32,9 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
     const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     const st = createHeroState(ctx);
+    // the stars come out gradually on first load (kintsugi-field.ts); under
+    // reduced motion the field is simply there
+    if (reduced) skipReveal(st);
 
     // Re-center the painted band over the viewport. The canvas is absolute
     // in the stage (document top = heroTop), so the compositor scrolls it
@@ -58,9 +62,7 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
       // Document height is the body's own box, not scrollHeight: the parked
       // canvas (absolute + translate3d, clamped to the previous docH) sits
       // in scrollHeight, which would ratchet docH — it could grow but never
-      // shrink after a reflow. (Hiding the canvas for the measurement
-      // instead passes it through display:none, which restarts its fade-in
-      // animation — visibly, on every mobile URL-bar resize.)
+      // shrink after a reflow.
       const docH = Math.max(
         vh,
         document.body.getBoundingClientRect().bottom + scY,
@@ -135,8 +137,6 @@ export function KintsugiHero({ children }: { children: ReactNode }) {
     }
 
     resize();
-    // first frame is on the canvas: fade it up (see .kintsugi-canvas in the css)
-    canvas.classList.add("is-lit");
 
     let pendingResize = 0;
     const queueResize = (): void => {

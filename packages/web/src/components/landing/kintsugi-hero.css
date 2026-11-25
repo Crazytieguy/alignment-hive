@@ -14,6 +14,9 @@
   width: 100%;
   aspect-ratio: 1440 / 600;
   min-height: 30rem;
+  /* stop growing with the window past ~1500px wide, so on a large display
+     the first testimonial still lands in the first screen */
+  max-height: 39rem;
 }
 
 .kintsugi-canvas {
@@ -25,39 +28,22 @@
   display: block;
   pointer-events: none;
   will-change: transform;
-  /* the field is painted by JS after hydration; rather than popping in once
-     the bundle lands, it fades up from black (.is-lit is added right after
-     the first paint). An animation rather than a transition: it runs from
-     whenever the class lands, even if the stylesheet arrived that same frame. */
-  opacity: 0;
+  /* no CSS fade: the stars come out one by one on the canvas itself
+     (the reveal in kintsugi-field.ts) */
 }
 
-.kintsugi-canvas.is-lit {
-  opacity: 1;
-  /* ease-in-out cubic: a slow start so the field emerges, then settles */
-  animation: kintsugi-lit 8s cubic-bezier(0.65, 0, 0.35, 1);
-}
-
-@keyframes kintsugi-lit {
-  from {
-    opacity: 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .kintsugi-canvas.is-lit {
-    animation: none;
-  }
-}
-
+/* A calm clearing behind the copy: the field thins toward the text instead
+ * of sparkling between its lines, and is back to full strength well before
+ * the stage's edges. Sized in rem/vw so it tracks the copy block. */
 .kintsugi-scrim {
   position: absolute;
   inset: 0;
   pointer-events: none;
   background: radial-gradient(
-    620px 250px at 50% 46%,
-    color-mix(in srgb, var(--background) 45%, transparent),
-    transparent 72%
+    ellipse min(30rem, 62vw) 12.5rem at 50% 50%,
+    color-mix(in srgb, var(--background) 78%, transparent),
+    color-mix(in srgb, var(--background) 62%, transparent) 45%,
+    transparent 100%
   );
 }
 
@@ -69,17 +55,18 @@
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 0 8%;
+  padding: 0 6%;
   pointer-events: none;
 }
 
 .kintsugi-h {
-  font-size: clamp(1.85rem, 3.3vw, 3rem);
+  font-size: clamp(1.95rem, 4.5vw, 4.25rem);
   font-weight: 600;
   letter-spacing: -0.012em;
-  line-height: 1.14;
-  margin: 0 0 1rem;
+  line-height: 1.08;
+  margin: 0 0 clamp(1rem, 1.8vw, 1.5rem);
   max-width: 22ch;
+  text-wrap: balance;
   color: var(--foreground);
   text-shadow:
     0 0 18px var(--background),
@@ -87,13 +74,75 @@
 }
 
 .kintsugi-s {
-  font-size: clamp(0.94rem, 1.15vw, 1.09rem);
-  line-height: 1.58;
-  max-width: 64ch;
+  font-size: clamp(1rem, 1.33vw, 1.1875rem);
+  line-height: 1.6;
+  max-width: 60ch;
+  text-wrap: balance;
   margin: 0;
   font-weight: 400;
   color: color-mix(in srgb, var(--foreground) 85%, transparent);
   text-shadow:
     0 0 14px var(--background),
     0 0 5px var(--background);
+}
+
+/* One focus treatment for every link and button on the landing page: an
+ * amber outline offset from the element, instead of a mix of the browser's
+ * default outline (links) and shadcn's translucent ring (buttons), which
+ * reads as a muddy brown halo on the dark ground. */
+.landing-root :is(a, button):focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+  box-shadow: none;
+}
+.landing-root a:focus-visible {
+  border-radius: 3px;
+}
+/* nav and footer links carry tap-target padding already; hug that box */
+.landing-root nav span a:focus-visible,
+.landing-root footer a:focus-visible {
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
+/* Install command (routes/index.tsx): fade whichever edge is clipped when the
+ * command overflows its card, and hide the scrollbar it would otherwise grow. */
+.install-code {
+  scrollbar-width: none;
+  --fade: 1.75rem;
+}
+.install-code::-webkit-scrollbar {
+  display: none;
+}
+.install-code[data-fade="end"] {
+  mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - var(--fade)),
+    transparent
+  );
+}
+.install-code[data-fade="start"] {
+  mask-image: linear-gradient(
+    to left,
+    #000 calc(100% - var(--fade)),
+    transparent
+  );
+}
+.install-code[data-fade="both"] {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 var(--fade),
+    #000 calc(100% - var(--fade)),
+    transparent
+  );
+}
+
+/* Nav: a short veil so the links read cleanly over the densest stars. */
+.landing-nav-veil {
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--background) 70%, transparent),
+    transparent
+  );
 }

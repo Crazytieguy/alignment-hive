@@ -320,6 +320,13 @@ export interface HeroState {
   lockSpr: HTMLCanvasElement[][]; // short-arm brighten pass, same colors
   haloSpr: HTMLCanvasElement[][]; // soft same-hue halos
   pi: Uint8Array; // per bead star: palette index (section * NCOL + slot)
+  // first-load reveal (see REVEAL_* below): per-star birth time and fade
+  // length (s), and how far the star overshoots its brightness as it kindles
+  rb: Float32Array;
+  rd: Float32Array;
+  rk: Float32Array;
+  revealT0: number | null; // performance.now() of the first painted frame
+  revealing: boolean; // false once every star has reached its final brightness
 }
 
 /** A blank state for KintsugiHero; its first resize() measures the page and calls build(). */
@@ -374,6 +381,11 @@ export function createHeroState(ctx: CanvasRenderingContext2D): HeroState {
     lockSpr: [],
     haloSpr: [],
     pi: new Uint8Array(0),
+    rb: new Float32Array(0),
+    rd: new Float32Array(0),
+    rk: new Float32Array(0),
+    revealT0: null,
+    revealing: true,
   };
 }
 
@@ -513,6 +525,83 @@ function mapPoint(st: HeroState, u: number, v: number): void {
     mapPt.x = st.w * 0.5 + rho * Math.sin(th);
     mapPt.y = yc - 2 * rho * sh * sh; // = yc - rho·(1 - cos th), stable form
   }
+}
+
+// ---------- first-load reveal ----------
+// Rather than the whole field fading up at once, stars come out the way they
+// do as eyes adjust to the dark: a few of the brightest first, then more and
+// fainter ones filling in over a few seconds. Birth order leans on final
+// brightness with a random share, each star kindles over its own short fade
+// (briefly overshooting its brightness, a soft twinkle), and every star ends
+// at exactly the brightness it has afterwards — the final field is unchanged.
+// Seam beads (the stars that condense into hexagons) come out late and
+// without the overshoot, so formations emerge only once the sky has mostly
+// filled rather than announcing themselves in a half-empty field.
+const REVEAL_START = 0.15; // s before the first stars begin to kindle
+const REVEAL_SPAN = 5.2; // s over which births are spread
+const REVEAL_FADE = [0.7, 1.5] as const; // per-star fade length range, s
+// the last star is fully lit by then
+const REVEAL_END = REVEAL_START + REVEAL_SPAN + REVEAL_FADE[1];
+
+function makeReveal(
+  st: HeroState,
+  br: Float32Array,
+  ci: Int32Array,
+  n: number,
+): void {
+  // its own RNG stream, so the field's composition (build's rnd sequence)
+  // is untouched by the reveal
+  let r = SEED * 7 + 3;
+  const rnd = (): number => {
+    r = (r * 1103515245 + 12345) & 0x7fffffff;
+    return r / 0x7fffffff;
+  };
+  const rb = new Float32Array(n);
+  const rd = new Float32Array(n);
+  const rk = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const dim = 1 - (br[i] - 0.4) / 0.6; // 0 = brightest, 1 = faintest
+    const bead = ci[i] >= 0;
+    let key = 0.55 * dim + 0.45 * rnd();
+    if (bead) key = 0.55 + 0.45 * key;
+    // power > 1: births thin at the start and crowd in later, so a sparse
+    // handful leads and the bulk fills in behind it
+    rb[i] = REVEAL_START + REVEAL_SPAN * Math.pow(key, 1.6);
+    rd[i] = REVEAL_FADE[0] + (REVEAL_FADE[1] - REVEAL_FADE[0]) * rnd();
+    rk[i] = bead ? 0 : 0.15 + 0.45 * rnd();
+  }
+  st.rb = rb;
+  st.rd = rd;
+  st.rk = rk;
+}
+
+/** Brightness factor of star i, `el` seconds into the reveal (1 once lit). */
+function revealAt(st: HeroState, i: number, el: number): number {
+  const u = (el - st.rb[i]) / st.rd[i];
+  if (u <= 0) return 0;
+  if (u >= 1) return 1;
+  const e = u * u * (3 - 2 * u);
+  return e * (1 + st.rk[i] * Math.sin(Math.PI * u));
+}
+
+/** Seconds into the reveal for this paint, or -1 when it is over. */
+function revealClock(st: HeroState): number {
+  if (!st.revealing) return -1;
+  // a page opened in a background tab starts its reveal when first seen
+  if (st.revealT0 === null && document.hidden) return 0;
+  const now = performance.now();
+  if (st.revealT0 === null) st.revealT0 = now;
+  const el = (now - st.revealT0) / 1000;
+  if (el >= REVEAL_END) {
+    st.revealing = false;
+    return -1;
+  }
+  return el;
+}
+
+/** Skip the reveal (reduced motion): the field shows at its final brightness. */
+export function skipReveal(st: HeroState): void {
+  st.revealing = false;
 }
 
 // ---------- build: conformal hex lattice + point cloud ----------
@@ -756,6 +845,7 @@ export function build(st: HeroState): void {
     got++;
   }
 
+  makeReveal(st, br, ci, n);
   st.N = n;
   st.bx = bx;
   st.by = by;
@@ -909,6 +999,7 @@ export function paint(st: HeroState): void {
   ctx.clearRect(0, ct, st.w, st.canvasH);
   const ymin = ct - 40;
   const ymax = ct + st.canvasH + 40;
+  const el = revealClock(st);
   for (let s = 0; s < NSEC; s++) {
     for (let c = 0; c < NCOL; c++) {
       const spr = st.sprites[s][c];
@@ -917,8 +1008,13 @@ export function paint(st: HeroState): void {
         const i = bk[k2];
         const y = py[i];
         if (y < ymin || y > ymax) continue;
+        let a = br[i];
+        if (el >= 0) {
+          a *= revealAt(st, i, el);
+          if (a <= 0.004) continue;
+        }
         const d = dsz[i];
-        ctx.globalAlpha = br[i];
+        ctx.globalAlpha = Math.min(1, a);
         ctx.drawImage(spr, px[i] - d * 0.5, y - d * 0.5, d, d);
       }
     }
@@ -947,7 +1043,8 @@ export function paint(st: HeroState): void {
       const y = py[j];
       if (y < ymin || y > ymax) continue;
       const d = dsz[j];
-      const g = 0.72 * glow * ss(0.22, 0.85, m) * dim; // softened ~30%: quieter formations
+      let g = 0.72 * glow * ss(0.22, 0.85, m) * dim; // softened ~30%: quieter formations
+      if (el >= 0) g *= Math.min(1, revealAt(st, j, el)); // no glow before its star
       if (g <= 0.004) continue;
       const ps = (pi[j] / NCOL) | 0;
       const pc = pi[j] % NCOL;

@@ -18,9 +18,8 @@ function dwellMs(quote: string): number {
 }
 
 /**
- * One centered quote at a time, sliding horizontally. Beneath it, a control
- * row the same width as the quote: prev arrow at the left edge, dots in the
- * middle, next arrow at the right edge.
+ * One centered quote at a time, sliding horizontally. Beneath it, one
+ * centered control cluster: prev arrow, dots, next arrow.
  * Auto-advances after a per-quote dwell with the active dot filling as a
  * progress bar; pauses while hovered, focused, or scrolled out of view, and
  * stops entirely under prefers-reduced-motion. Every slide stays in the flex
@@ -113,6 +112,9 @@ export function TestimonialCarousel({
     <Button
       variant="outline"
       size="icon-lg"
+      // round and quieter than the default square outline: a hairline ring
+      // that warms to amber on hover, so the arrows don't compete with the quote
+      className="rounded-full border-border bg-transparent text-foreground/75 shadow-none hover:border-primary/50 hover:bg-primary/10 hover:text-primary dark:border-border dark:bg-transparent dark:hover:bg-primary/10"
       aria-label={dir < 0 ? "Previous testimonial" : "Next testimonial"}
       onClick={() => go(current + dir)}
     >
@@ -142,9 +144,9 @@ export function TestimonialCarousel({
           focusedRef.current = false;
       }}
     >
-      {/* The quote block and the control row share one centered 40rem measure,
-          so the arrows sit flush with the quote's edges at every width. */}
-      <div className="mx-auto max-w-[40rem]">
+      {/* A centered pull quote on a 42rem measure, with one compact control
+          cluster (arrow, dots, arrow) centered beneath it. */}
+      <div className="mx-auto max-w-[42rem]">
         {/* Slides carry a little side padding that the track cancels, so the
             quote mark's slight overhang isn't clipped and a page is still
             exactly one track width. data-star-column tells the starfield where
@@ -160,7 +162,15 @@ export function TestimonialCarousel({
                 role="group"
                 aria-label={`${i + 1} of ${count}`}
                 inert={i !== current}
-                className="w-full shrink-0 px-2"
+                // the outgoing slide fades quickly and the incoming one only
+                // after most of its (front-loaded) slide, so neither shows a
+                // hard-clipped edge mid-transition
+                className={cn(
+                  "w-full shrink-0 px-2 transition-opacity motion-reduce:transition-none",
+                  i === current
+                    ? "delay-[450ms] duration-[700ms]"
+                    : "opacity-0 duration-[350ms]",
+                )}
               >
                 <Testimonial {...t} />
               </div>
@@ -169,11 +179,13 @@ export function TestimonialCarousel({
         </div>
 
         {count > 1 && (
-          <div className="mt-7 flex items-center justify-between gap-5">
+          <div className="mt-6 flex items-center justify-center gap-3">
             {arrow(-1)}
             {/* plain buttons (APG basic carousel), not a tablist: no roving
                 focus or panel pairing to keep honest */}
-            <div className="flex items-center gap-2">
+            {/* each dot is a 6px pill inside a taller button, so it can be
+                tapped; the button padding makes the visible 8px gaps */}
+            <div className="flex items-center">
               {items.map((t, i) => {
                 const active = i === current;
                 return (
@@ -183,20 +195,24 @@ export function TestimonialCarousel({
                     aria-current={active}
                     aria-label={`Testimonial ${i + 1} of ${count}`}
                     onClick={() => go(i)}
-                    className={cn(
-                      "relative h-1.5 overflow-hidden rounded-full outline-none transition-[width,background-color] duration-300 focus-visible:ring-[3px] focus-visible:ring-ring/50 motion-reduce:transition-none",
-                      active
-                        ? "w-7 bg-border"
-                        : "w-1.5 bg-muted-foreground/40 hover:bg-muted-foreground/70",
-                    )}
+                    className="group flex h-8 items-center rounded-full px-1"
                   >
-                    {active && (
-                      <span
-                        ref={fillRef}
-                        aria-hidden="true"
-                        className="absolute inset-y-0 left-0 w-[calc(var(--p,0)*100%)] rounded-full bg-primary motion-reduce:w-full"
-                      />
-                    )}
+                    <span
+                      className={cn(
+                        "relative block h-1.5 overflow-hidden rounded-full transition-[width,background-color] duration-300 motion-reduce:transition-none",
+                        active
+                          ? "w-7 bg-primary/30"
+                          : "w-1.5 bg-muted-foreground/60 group-hover:bg-muted-foreground",
+                      )}
+                    >
+                      {active && (
+                        <span
+                          ref={fillRef}
+                          aria-hidden="true"
+                          className="absolute inset-y-0 left-0 w-[calc(var(--p,0)*100%)] rounded-full bg-primary motion-reduce:w-full"
+                        />
+                      )}
+                    </span>
                   </button>
                 );
               })}
@@ -214,21 +230,21 @@ export function TestimonialCarousel({
 
 function Testimonial({ attribution, quote }: TestimonialItem) {
   return (
-    <blockquote className="relative pt-3 [text-wrap:pretty]">
-      {/* Sits at the block's top-left, tight to the first line. The glyph's
-          ink starts ~3px into its box and the text's first glyph ~0.5px into
-          the paragraph, so -2.5px lines the two inks up. */}
+    <blockquote className="text-center [text-wrap:balance]">
+      {/* the mark's ink sits in the top half of its line box; the fixed
+          height trims the empty lower half so it rests just above the text */}
       <span
         aria-hidden="true"
-        className="absolute -top-3 -left-[2.5px] text-[3.2rem] leading-none text-primary/85"
+        className="block h-8 text-[3.4rem] leading-none text-primary/85"
       >
         &ldquo;
       </span>
-      {/* justified; hyphenate only on narrow screens, where word gaps open up */}
-      <p className="text-justify italic leading-relaxed hyphens-auto md:hyphens-none">
+      {/* a centered, balanced pull quote, never justified: no stretched
+          word gaps */}
+      <p className="text-[1.0625rem] italic leading-[1.6] md:text-[1.1875rem]">
         {quote}
       </p>
-      <footer className="mt-3 text-[0.85rem] tracking-[0.04em] text-muted-foreground">
+      <footer className="mt-4 text-[0.85rem] tracking-[0.04em] text-muted-foreground">
         &mdash; {attribution}
       </footer>
     </blockquote>
