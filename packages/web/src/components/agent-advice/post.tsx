@@ -7,7 +7,7 @@ export function PostBody({ email }: { email: string }) {
   return (
     <>
       <p>I've spent most of this year helping AI safety researchers use coding agents, at <a href="https://www.matsprogram.org/" data-track="link:mats" target="_blank" rel="noopener">MATS</a> and other places. This post collects the advice I find myself repeating most often, and I'll keep it updated over time. My goal is to help you get better results while spending less time and mental resources.</p>
-      <p>Much of my advice is easier to follow with <a href="https://github.com/Crazytieguy/alignment-hive" data-track="link:github" target="_blank" rel="noopener">my tools</a> installed, though they're by no means mandatory:</p>
+      <p>Much of the advice is easier to follow with <a href="https://github.com/Crazytieguy/alignment-hive" data-track="link:github" target="_blank" rel="noopener">my tools</a> installed, though they're by no means mandatory:</p>
       <InstallCommand />
       <p>Most of the examples in this post come from building one of those tools, tldr: a small plugin that collapses each long agent reply to a one-sentence summary, with <code>[ more ]</code> to open the full reply. Messages are verbatim unless labelled made up, and [...] marks text I left out.</p>
       <Visual name="tldr" />
