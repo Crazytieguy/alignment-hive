@@ -142,7 +142,7 @@ const ROLE_LABEL = { avoid: "Weaker prompt", better: "What I sent" } as const;
 const DATE = /,?\s*\b([A-Z][a-z]{2} \d{1,2})$/;
 const ELAPSED = /^(\d+) (minute|second)s? later$/;
 
-// Drawn like the Claude Code CLI: ">" on a shaded band for my prompts, "⏺" for replies, and a "✻" status line for
+// Drawn like the Claude Code CLI: ">" on a shaded band for my prompts, "⏺" (drawn as a dot) for replies, and a "✻" status line for
 // how long after the prompt a reply came.
 function MessageView({ m }: { m: Message }) {
   const recall = m.kind === "recall";
@@ -161,7 +161,7 @@ function MessageView({ m }: { m: Message }) {
       <div className="mh">
         {recall && (
           <>
-            <span className="recall-dot" aria-hidden="true">⏺</span>
+            <span className="recall-dot" aria-hidden="true" />
             <span className="sp">hive - recall (MCP)</span>
           </>
         )}
