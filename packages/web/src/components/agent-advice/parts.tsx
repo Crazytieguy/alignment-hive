@@ -143,7 +143,7 @@ const DATE = /,?\s*\b([A-Z][a-z]{2} \d{1,2})$/;
 const ELAPSED = /^(\d+) (minute|second)s? later$/;
 
 // Drawn like the Claude Code CLI: ">" on a shaded band for my prompts, "⏺" for replies, and a "✻" status line for
-// how long the agent worked before replying (rounded, from the gap between the two messages).
+// how long after the prompt a reply came.
 function MessageView({ m }: { m: Message }) {
   const recall = m.kind === "recall";
   const cls = ["m", `m-${m.kind}`, MONO.has(m.kind) ? "mono" : "sans"];
@@ -153,6 +153,11 @@ function MessageView({ m }: { m: Message }) {
   if (elapsed) when = "";
   return (
     <div className={cls.join(" ")}>
+      {elapsed && m.kind === "agent" && (
+        <div className="gap">
+          <span>{m.when}</span>
+        </div>
+      )}
       <div className="mh">
         {recall && (
           <>
@@ -183,11 +188,6 @@ function MessageView({ m }: { m: Message }) {
         </div>
       ) : (
         <div className="mb" dangerouslySetInnerHTML={{ __html: m.html }} />
-      )}
-      {elapsed && m.kind === "agent" && (
-        <div className="gap">
-          <span>{`Cogitated for ~${elapsed[1]}${elapsed[2] === "minute" ? "m" : "s"}`}</span>
-        </div>
       )}
     </div>
   );

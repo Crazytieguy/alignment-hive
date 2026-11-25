@@ -2,7 +2,7 @@
 .aa{--bg:#fcf8ec;--fg:#302711;--mute:#6e5f3c;--line:#e2d7b4;--line2:#d3c59a;--card:#f4ecd5;--ink2:#4a3f22;--acc:#8c5a00;
 --raise:#fffdf4;--good:#2a6b47;--good-bg:#e9f1e4;--good-line:#b5cfb4;--acc-soft:#e8d29f;--shadow:#e2c98a;--on-acc:#fcf8ec;--open:#f7f1e0;--rc:#2f5f8a;--rc-bg:#ecf2f8;--rc-line:#c3d4e5;--tip:#2a2925;--tip-fg:#f6f3ec}
 @media (prefers-color-scheme:dark){.aa{--bg:#0e0e13;--fg:#ede7d8;--mute:#b0a996;--line:#2b2c34;--line2:#383841;--card:#16161d;--ink2:#d9d2c1;--acc:#e3a63c;
---raise:#1b1b23;--good:#8cc79f;--good-bg:#1a2a20;--good-line:#38563f;--acc-soft:#5a4318;--shadow:#6b4e14;--on-acc:#0e0e13;--open:#13131a;--rc:#9cc4e8;--rc-bg:#18212b;--rc-line:#2f455b;--tip:#ece8df;--tip-fg:#1d1c1a;color-scheme:dark}}
+--raise:#1b1b23;--good:#8cc79f;--good-bg:#1a2a20;--good-line:#38563f;--acc-soft:#5a4318;--shadow:#6b4e14;--on-acc:#0e0e13;--open:#13131a;--rc:#9cc4e8;--rc-bg:#18212b;--rc-line:#2f455b;--tip:#2a2a33;--tip-fg:#ede7d8;color-scheme:dark}}
 .aa{background:var(--bg);color:var(--fg);font:17px/1.62 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;min-height:100vh}
 .aa::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
 .aa .wrap{max-width:680px;margin:0 auto;padding-block:0 96px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
@@ -77,12 +77,13 @@
 .aa .role+.sp+.when::before{content:"\00b7";margin-right:8px}
 .aa .m.m-better{background:var(--good-bg);border-top-color:var(--good-line)}
 .aa .pair>.m-better+.m{border-top-color:var(--good-line)}
-.aa .paste{margin:26px 4px 30px 0;border:1.5px solid var(--acc);border-radius:10px;background:var(--raise);box-shadow:4px 4px 0 var(--shadow)}
-.aa .ph{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 8px 8px 16px;border-bottom:1px solid var(--acc-soft)}
+.aa .paste{margin:26px 0 30px;border:1px solid var(--line2);border-radius:8px;background:var(--card)}
+.aa .ph{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 8px 8px 16px;border-bottom:1px solid var(--line)}
 .aa .ptw{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 8px;min-width:0}
-.aa .pt{font:600 14.5px/1.3 Fraunces,Georgia,serif;color:var(--acc)}
+.aa .pt{font:600 14.5px/1.3 Fraunces,Georgia,serif;color:var(--fg)}
 .aa .psub{font-size:12.5px;line-height:1.3;color:var(--mute)}
-.aa .copy{flex:none;display:inline-flex;align-items:center;gap:6px;min-height:38px;padding:6px 14px 6px 11px;border:0;border-radius:7px;background:var(--acc);color:var(--on-acc);font:600 13.5px/1.2 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;cursor:pointer;text-align:left}
+.aa .copy{flex:none;display:inline-flex;align-items:center;gap:6px;min-height:38px;padding:6px 14px 6px 11px;border:1px solid var(--line2);border-radius:7px;background:var(--bg);color:var(--fg);font:600 13.5px/1.2 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;cursor:pointer;text-align:left}
+.aa .copy:hover{border-color:var(--acc);color:var(--acc)}
 .aa .copy:active{transform:translate(1px,1px)}
 .aa .copy .ic+.ic,.aa .copy.ok .ic:first-child{display:none}
 .aa .copy.ok .ic+.ic{display:block}
@@ -108,7 +109,7 @@
 .aa .tt-t{text-decoration:underline dotted;text-decoration-color:var(--mute);text-decoration-thickness:1.5px;text-underline-offset:3px;cursor:help;border-radius:3px}
 .aa .tt-t:hover,.aa .tt.on .tt-t{text-decoration-color:currentColor}
 .aa .tt-t:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
-.aa .tt-b{display:none;position:fixed;z-index:20;left:0;top:0;box-sizing:border-box;width:max-content;max-width:min(300px,calc(100vw - 32px));padding:7px 10px;border-radius:7px;background:var(--tip);color:var(--tip-fg);font:400 13px/1.45 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;font-style:normal;letter-spacing:0;text-align:left;white-space:normal;overflow-wrap:break-word;box-shadow:0 4px 14px rgba(0,0,0,.18);pointer-events:none}
+.aa .tt-b{display:none;position:fixed;z-index:20;left:0;top:0;box-sizing:border-box;width:max-content;max-width:min(300px,calc(100vw - 32px));padding:7px 10px;border-radius:7px;background:var(--tip);color:var(--tip-fg);font:400 13px/1.45 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;font-style:normal;letter-spacing:0;text-align:left;white-space:normal;overflow-wrap:break-word;border:1px solid var(--line2);box-shadow:0 4px 14px rgba(0,0,0,.18);pointer-events:none}
 .aa .tt.on .tt-b{display:block}
 .aa .tt-b code{font:12px "JetBrains Mono",ui-monospace,monospace;background:transparent;padding:0;color:inherit}
 .aa .more h2,.aa .more h3{font:600 15px/1.3 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;margin:14px 0 4px}
@@ -135,11 +136,11 @@
 .aa .copy{min-height:44px}
 .aa .db{padding-left:16px;padding-right:14px}}
 @media (prefers-reduced-motion:reduce){.aa .chev{transition:none}}
-.aa .paste.cmd{margin:14px 4px 20px 0;box-shadow:2px 2px 0 var(--shadow)}
+.aa .paste.cmd{margin:14px 0 20px}
 .aa .cmd .ph{border-bottom:0;padding:6px 6px 6px 14px}
 .aa .cmd .pb{flex:1;background:transparent;border:0;min-width:0;padding:0;font-size:13.5px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
 .aa .v-tldr{margin:30px 0;padding:0}
-.aa .v-tldr .term{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 16px 10px;font:13px/1.6 "JetBrains Mono",ui-monospace,Menlo,monospace;color:var(--fg);overflow-wrap:anywhere}
+.aa .v-tldr .term{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px 4px;font:13px/1.6 "JetBrains Mono",ui-monospace,Menlo,monospace;color:var(--fg);overflow-wrap:anywhere}
 .aa .v-tldr .who{font:500 12px/1.4 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;color:var(--mute);margin:14px 0 8px}
 .aa .v-tldr .row{display:grid;grid-template-columns:2ch minmax(0,1fr);margin:0}
 .aa .v-tldr .dim{color:var(--mute)}
@@ -163,7 +164,7 @@
 .aa .v-tldr .trim{display:flex;align-items:center;justify-content:center;height:30px;margin:4px 0 13px;border-block:1px dashed var(--line);background:var(--bg);font:500 11.5px/1 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;letter-spacing:.03em;color:var(--mute);user-select:none}
 .aa .v-tldr figcaption{font:14px/1.5 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;color:var(--mute);margin:10px 0 0}
 .aa .v-tldr figcaption .k{font:13px "JetBrains Mono",ui-monospace,Menlo,monospace;white-space:nowrap}
-@media (max-width:480px){.aa .v-tldr .term{font-size:12.5px;padding:2px 12px 8px}}
+@media (max-width:480px){.aa .v-tldr .term{font-size:12.5px;padding:12px 12px 2px}}
 .aa .v-terminal-check{margin:30px 0;padding:0}
 .aa .v-terminal-check .tc-term{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 16px 16px;font:13px/1.6 "JetBrains Mono",ui-monospace,Menlo,monospace;color:var(--fg);font-variant-ligatures:none}
 .aa .v-terminal-check .tc-who{font:500 12px/1.4 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;color:var(--mute);margin:14px 0 0}
@@ -454,7 +455,7 @@
 .aa .thread-caption{margin:5px 0 24px;text-align:right;color:var(--mute);font:italic 12px/1.45 "JetBrains Mono",ui-monospace,monospace}
 .aa .thread .rdate{font:inherit;margin-left:0}
 .aa .thread>.m:not(:has(>.mh:not(:empty))){padding-top:14px}
-.aa .thread .gap{margin:6px 0 0}
+.aa .thread .gap{margin:0 0 8px}
 .aa .thread .gap span{font:inherit;font-variant-ligatures:none}
 .aa .thread .gap span::before{width:var(--tg)}
 
@@ -484,9 +485,9 @@
 .aa .thread>.m.m-recall>.mb::before{content:none}
 .aa .thread .recall-branch{position:absolute;left:var(--tg);top:0;color:var(--mute)}
 .aa .thread .recall-role{color:var(--rc)}
-.aa .thread:has(>.m:first-child>.mh:empty),
-.aa .thread>.m:first-child:has(>.mh:empty){padding-top:0}
-.aa .thread>.m:first-child:has(>.mh:empty)>.mb{border-radius:7px 7px 0 0}
+.aa .thread:has(>.m:first-child:is(.m-me,.m-none)>.mh:empty),
+.aa .thread>.m:first-child:is(.m-me,.m-none):has(>.mh:empty){padding-top:0}
+.aa .thread>.m:first-child:is(.m-me,.m-none):has(>.mh:empty)>.mb{border-radius:7px 7px 0 0}
 .aa .thread>.m:is(.m-avoid,.m-better)::after{content:none}
 .aa .thread .role .badge{width:calc(var(--tg) - 6px)}
 .aa .thread>.m:is(.m-avoid,.m-better){--example-ink:color-mix(in oklab,var(--example-hue) 68%,var(--fg))}
