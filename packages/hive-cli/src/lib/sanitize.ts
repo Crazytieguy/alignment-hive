@@ -1,8 +1,9 @@
 // Secret redaction. Uploads replace each span detectSecrets finds with `[REDACTED:<rule>]`: gitleaks'
 // rules (secret-rules.ts, generated), SECRET_SHAPES for secrets no rule names, a high-entropy
-// safety net, and the literal values of this process's credential env vars (withEnvValues). A
-// value under a SAFE_KEYS name gets a narrower list (sanitizeDeep). The debrief page marks spans
-// from a narrower list through secretSpans.
+// safety net, and the literal values of known secrets: this process's credential env vars, and the
+// .env files and MCP configs around the session (withKnownValues, known-values.ts). A value under a
+// SAFE_KEYS name gets a narrower list (sanitizeDeep). The debrief page marks spans from a narrower
+// list through secretSpans.
 
 import { SECRET_RULES } from './secret-rules';
 import type { SecretRule } from './secret-rules';
@@ -138,37 +139,49 @@ const SAFE_KEY_RULES: Array<SecretRule> = [...SECRET_SHAPES.filter((shape) => sh
 /** A record or tool id. Under a SAFE_KEYS name it is checked against credential env values only: gitleaks' `EAAA` prefix rule would take about 1 random uuid in 30,000. */
 const UUID_VALUE = new RegExp(`^${UUID}$`, 'i');
 
-const ENV_VALUE_ID = 'env-value';
+const KNOWN_VALUE_ID = 'known-value';
 /** Shorter values are too likely to be test stubs or ordinary words to redact everywhere they appear. */
-const MIN_ENV_SECRET_LENGTH = 16;
+const MIN_KNOWN_VALUE_LENGTH = 16;
 /** The values of `env`'s credential vars, 16 characters or longer, longest first. */
 export function envSecretValues(env: Record<string, string | undefined>): Array<string> {
   const values = new Set<string>();
   for (const [name, value] of Object.entries(env)) {
-    if (value !== undefined && value.length >= MIN_ENV_SECRET_LENGTH && ENV_SECRET_NAME.test(name)) values.add(value);
+    if (value !== undefined && value.length >= MIN_KNOWN_VALUE_LENGTH && ENV_SECRET_NAME.test(name)) values.add(value);
   }
   return [...values].sort((a, b) => b.length - a.length);
 }
-/** Built on first use from process.env; null when no var qualifies. The values never leave the process and are never logged. */
+/**
+ * An exact match for each of `values` 16 characters or longer (longest first, so a value that contains another is
+ * taken whole), or null when none is. Its regex is the only place the values live: never log or persist it.
+ */
+export function knownValueRule(values: Iterable<string>): SecretRule | null {
+  const kept = [...new Set(values)].filter((v) => v.length >= MIN_KNOWN_VALUE_LENGTH).sort((a, b) => b.length - a.length);
+  if (kept.length === 0) return null;
+  const source = kept.map((v) => v.replace(/[\\^$.*+?()[\]{}|/-]/g, '\\$&')).join('|');
+  try {
+    return { id: KNOWN_VALUE_ID, regex: new RegExp(source, 'g') };
+  } catch {
+    // The engine's message quotes the pattern, which is the values themselves.
+    throw new Error('Could not build the known-secret-value rule');
+  }
+}
+/** Built on first use from process.env's credential vars: the known values when a caller passes none. */
 let envValueRule: SecretRule | null | undefined;
 function envRule(): SecretRule | null {
-  if (envValueRule === undefined) {
-    const values = envSecretValues(process.env);
-    envValueRule = values.length === 0 ? null : { id: ENV_VALUE_ID, regex: new RegExp(values.map((v) => v.replace(/[\\^$.*+?()[\]{}|/-]/g, '\\$&')).join('|'), 'g') };
-  }
+  if (envValueRule === undefined) envValueRule = knownValueRule(envSecretValues(process.env));
   return envValueRule;
 }
-/** For tests: the next scan reads process.env again. */
+/** For tests: the next scan reads process.env again (resetKnownValues in known-values.ts also clears its own cache). */
 export function resetEnvSecretValues(): void {
   envValueRule = undefined;
 }
 /**
- * `rules` plus an exact match for each credential env var's value, when there is one. Additive: the env at scan time
- * may not be the one the session ran under, so the other rules still carry the load.
+ * `rules` plus `known`, the exact match for secret values read from the session's surroundings (known-values.ts),
+ * when there is one; omitted, process.env's credential values. Additive: the values at scan time may not be the
+ * ones the session saw, so the other rules still carry the load.
  */
-export function withEnvValues(rules: Array<SecretRule>): Array<SecretRule> {
-  const rule = envRule();
-  return rule ? [...rules, rule] : rules;
+export function withKnownValues(rules: Array<SecretRule>, known: SecretRule | null = envRule()): Array<SecretRule> {
+  return known ? [...rules, known] : rules;
 }
 
 export interface SecretMatch {
@@ -247,8 +260,8 @@ function looksLikeNonSecret(s: string): boolean {
 }
 
 /** Non-overlapping secret spans in content, earliest first; overlapping matches merge into one span. */
-export function detectSecrets(content: string): Array<SecretMatch> {
-  return secretSpans(content, withEnvValues(ALL_RULES));
+export function detectSecrets(content: string, known?: SecretRule | null): Array<SecretMatch> {
+  return secretSpans(content, withKnownValues(ALL_RULES, known));
 }
 
 /** `detectSecrets` over a chosen rule list; the review page drops the entropy net and the fuzzy gitleaks rule. */
@@ -300,12 +313,13 @@ export function secretSpans(content: string, rules: Array<SecretRule>): Array<Se
   return merged;
 }
 
-export function sanitizeString(content: string): string {
-  return redact(content, ALL_RULES);
+/** `known`: see withKnownValues. */
+export function sanitizeString(content: string, known?: SecretRule | null): string {
+  return redact(content, ALL_RULES, known);
 }
 
-function redact(content: string, rules: Array<SecretRule>): string {
-  const secrets = secretSpans(content, withEnvValues(rules));
+function redact(content: string, rules: Array<SecretRule>, known: SecretRule | null | undefined): string {
+  const secrets = secretSpans(content, withKnownValues(rules, known));
   if (secrets.length === 0) return content;
 
   let result = content;
@@ -324,8 +338,8 @@ const BETA_FLAG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
  * whole when every entry is a flag name: the high-entropy rule takes the longer flags for secrets.
  * Only that path of a top-level `api-request` record; a `betas` anywhere else is scanned as usual.
  */
-export function sanitizeRecord(record: Record<string, unknown>): Record<string, unknown> {
-  const sanitized = sanitizeDeep(record);
+export function sanitizeRecord(record: Record<string, unknown>, known?: SecretRule | null): Record<string, unknown> {
+  const sanitized = sanitizeDeep(record, { known });
   const params = record.type === 'api-request' ? record.params : undefined;
   const betas = params !== null && typeof params === 'object' ? (params as Record<string, unknown>).betas : undefined;
   if (!Array.isArray(betas) || !betas.every((b) => typeof b === 'string' && BETA_FLAG.test(b))) return sanitized;
@@ -338,28 +352,30 @@ export function sanitizeRecord(record: Record<string, unknown>): Record<string, 
  * SAFE_KEYS values with SAFE_KEY_RULES only, sparing them the high-entropy net: the same names occur
  * inside tool inputs and results, which carry arbitrary values. `strict` also scans keys and gives SAFE_KEYS values the entropy
  * net: arbitrary script-built structures like workflow run blobs can carry a secret in either.
- * Subtrees below MAX_SANITIZE_DEPTH are dropped, not passed through.
+ * Subtrees below MAX_SANITIZE_DEPTH are dropped, not passed through. `known`: see withKnownValues.
  */
-export function sanitizeDeep<T>(value: T, strict = false, depth = 0): T {
+export function sanitizeDeep<T>(value: T, opts: { strict?: boolean; known?: SecretRule | null } = {}, depth = 0): T {
+  const { strict = false, known } = opts;
+  const redactText = (content: string) => redact(content, ALL_RULES, known);
   if (depth > MAX_SANITIZE_DEPTH) return TRUNCATED_PLACEHOLDER as T;
   if (value === null || value === undefined) return value;
-  if (typeof value === 'string') return sanitizeString(value) as T;
-  if (Array.isArray(value)) return value.map((item) => sanitizeDeep(item, strict, depth + 1)) as T;
+  if (typeof value === 'string') return redactText(value) as T;
+  if (Array.isArray(value)) return value.map((item) => sanitizeDeep(item, opts, depth + 1)) as T;
 
   if (typeof value === 'object') {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
       if (!strict && SAFE_KEYS.has(key) && typeof val === 'string') {
-        result[key] = redact(val, UUID_VALUE.test(val) ? [] : SAFE_KEY_RULES);
+        result[key] = redact(val, UUID_VALUE.test(val) ? [] : SAFE_KEY_RULES, known);
         continue;
       }
       const scan = typeof val === 'string' ? namedScan(key, val) : undefined;
       if (typeof val === 'string' && scan !== undefined && scan.kind !== 'text') {
-        result[strict ? sanitizeString(key) : key] = scan.kind === 'whole' ? '[REDACTED:secret-value]' : sanitizeString(scan.prefix + val).slice(scan.prefix.length);
+        result[strict ? redactText(key) : key] = scan.kind === 'whole' ? '[REDACTED:secret-value]' : redactText(scan.prefix + val).slice(scan.prefix.length);
       } else {
         // In strict mode two keys redacting to the same placeholder collide (last one wins) —
         // acceptable: secrets must not survive as keys in the first place.
-        result[strict ? sanitizeString(key) : key] = sanitizeDeep(val, strict, depth + 1);
+        result[strict ? redactText(key) : key] = sanitizeDeep(val, opts, depth + 1);
       }
     }
     return result as T;

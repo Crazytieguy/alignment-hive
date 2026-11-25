@@ -1,4 +1,8 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
+import { KnownValues, plainValue, processKnownRule, resetKnownValues } from '../lib/known-values';
 import { detectSecrets, envSecretValues, resetEnvSecretValues, sanitizeDeep, sanitizeRecord, sanitizeString } from '../lib/sanitize';
 
 // High-entropy test tokens (repeated characters fail entropy checks); GitHub PATs are ghp_ + 36 alphanumerics.
@@ -200,7 +204,7 @@ describe('SAFE_KEYS', () => {
       cwd: '/home/user/project',
     };
 
-    const sanitized = sanitizeDeep(input, true);
+    const sanitized = sanitizeDeep(input, { strict: true });
 
     expect(sanitized.name).toContain('[REDACTED:');
     expect(sanitized.name).not.toContain('ghp_');
@@ -210,7 +214,7 @@ describe('SAFE_KEYS', () => {
   test('strict mode sanitizes object keys; the default walk leaves them untouched', () => {
     const input = { [TEST_GITHUB_TOKEN]: 'value', normalKey: 'other' };
 
-    const strict = sanitizeDeep(input, true);
+    const strict = sanitizeDeep(input, { strict: true });
     const strictKeys = Object.keys(strict);
     expect(strictKeys.some((k) => k.includes('[REDACTED:'))).toBe(true);
     expect(strictKeys.some((k) => k.includes('ghp_'))).toBe(false);
@@ -223,7 +227,7 @@ describe('SAFE_KEYS', () => {
   test('strict mode sanitizes keys in nested structures', () => {
     const input = { result: { items: [{ [TEST_GITHUB_TOKEN]: 'nested' }] } };
 
-    const sanitized = sanitizeDeep(input, true);
+    const sanitized = sanitizeDeep(input, { strict: true });
 
     const nestedKeys = Object.keys(sanitized.result.items[0]);
     expect(nestedKeys.some((k) => k.includes('[REDACTED:'))).toBe(true);
@@ -353,7 +357,7 @@ describe('high-entropy safety net', () => {
 });
 
 describe('credential env var values', () => {
-  // Low entropy and no digits, so only the env-value rule can catch them.
+  // Low entropy and no digits, so only the known-value rule can catch them.
   const KEY = 'aaaabbbbccccddddeeee';
   const vars: Record<string, string> = {
     FOO_API_KEY: KEY,
@@ -372,8 +376,8 @@ describe('credential env var values', () => {
 
   test("a credential var's value is redacted wherever it appears", () => {
     withEnv(vars);
-    expect(sanitizeString(`using ${KEY} now`)).toBe('using [REDACTED:env-value] now');
-    expect(JSON.stringify(sanitizeDeep({ note: `x${KEY}y` }))).toBe('{"note":"x[REDACTED:env-value]y"}');
+    expect(sanitizeString(`using ${KEY} now`)).toBe('using [REDACTED:known-value] now');
+    expect(JSON.stringify(sanitizeDeep({ note: `x${KEY}y` }))).toBe('{"note":"x[REDACTED:known-value]y"}');
   });
 
   test('values under 16 characters and non-credential names are left alone', () => {
@@ -402,11 +406,116 @@ describe('credential env var values', () => {
   test("a credential var's value is redacted under a safe key, even when uuid-shaped", () => {
     const uuidKey = '0f8e2c1a-5b7d-4e3f-9a6b-2c4d8e0f1a3b';
     withEnv({ ...vars, FOO_DB_PASSWORD: uuidKey });
-    expect(sanitizeDeep({ name: KEY, id: uuidKey })).toEqual({ name: '[REDACTED:env-value]', id: '[REDACTED:env-value]' });
+    expect(sanitizeDeep({ name: KEY, id: uuidKey })).toEqual({ name: '[REDACTED:known-value]', id: '[REDACTED:known-value]' });
   });
 
   test('without credential vars nothing changes', () => {
     resetEnvSecretValues();
     expect(sanitizeString(`using ${KEY} now`)).toBe(`using ${KEY} now`);
+  });
+});
+
+describe('known values from .env files and MCP configs', () => {
+  // Low entropy and no digits, so only the known-value rule can catch them.
+  const DOTENV = 'qqqqrrrrssssttttuuuu';
+  const DATABASE_URL = 'postgres://app:hunterhunter@db.internal:5432/app';
+  const PROJECT_MCP = 'vvvvwwwwxxxxyyyyzzzz';
+  const GLOBAL_ENV = 'kkkkllllmmmmnnnnoooo';
+  const GLOBAL_BEARER = 'ppppqqqqrrrrsssstttt';
+  const OTHER_PROJECT = 'ggggffffeeeeddddcccc';
+  const root = mkdtempSync(join(tmpdir(), 'hive-known-'));
+  const cwd = join(root, 'proj');
+  const claudeConfig = join(root, '.claude.json');
+  mkdirSync(cwd);
+  writeFileSync(join(cwd, '.env'), `export SERVICE_THING="${DOTENV}"\nDATABASE_URL=${DATABASE_URL}\nSHORT=abcdefghij\nAPI_BASE=https://api.example.com/v1/users\nAPP_NAME=Alignment Hive Staging Server\n`);
+  writeFileSync(join(cwd, '.env.example'), 'TEMPLATE_KEY=templatetemplatetemplate\n');
+  writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { db: { command: 'x', env: { DB_SETTING: PROJECT_MCP } } } }));
+  writeFileSync(
+    claudeConfig,
+    JSON.stringify({
+      mcpServers: { api: { type: 'http', url: 'https://mcp.example.com', headers: { Authorization: `Bearer ${GLOBAL_BEARER}` } } },
+      projects: { '/elsewhere': { mcpServers: { s: { env: { ANYTHING: OTHER_PROJECT, HOME_DIR: '/home/someone/projects' } } } }, '/x': null },
+      env: { NOT_MCP: 'jjjjiiiihhhhggggffff' },
+    }),
+  );
+  writeFileSync(join(root, '.claude.json.bak'), '');
+  const known = () => new KnownValues({ env: { FOO_API_KEY: GLOBAL_ENV }, claudeConfig });
+  const redacted = (value: string, rule = known().rule([cwd])) => sanitizeString(`x ${value} y`, rule) === 'x [REDACTED:known-value] y';
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  test("a .env value is redacted whatever its name, a URL's credentials included", () => {
+    expect(redacted(DOTENV)).toBe(true);
+    expect(sanitizeString(`psql ${DATABASE_URL}`, known().rule([cwd]))).toBe('psql [REDACTED:known-value]');
+  });
+
+  test("the cwd's .mcp.json env and the global config's env and headers are redacted, the bearer token on its own too", () => {
+    expect(redacted(PROJECT_MCP)).toBe(true);
+    expect(redacted(GLOBAL_ENV)).toBe(true);
+    expect(redacted(GLOBAL_BEARER)).toBe(true);
+    expect(sanitizeString(`curl -H 'Authorization: Bearer ${GLOBAL_BEARER}'`, known().rule([cwd]))).toBe("curl -H 'Authorization: Bearer [REDACTED:known-value]'");
+    expect(redacted(OTHER_PROJECT)).toBe(true);
+  });
+
+  test('cwd files count only for a session that ran there; global values for every session', () => {
+    expect(redacted(DOTENV, known().rule([]))).toBe(false);
+    expect(redacted(PROJECT_MCP, known().rule(['/nowhere']))).toBe(false);
+    expect(redacted(GLOBAL_BEARER, known().rule([]))).toBe(true);
+  });
+
+  test('short values, templates, plain configuration and non-MCP config are left alone', () => {
+    for (const value of ['abcdefghij', 'templatetemplatetemplate', 'https://api.example.com/v1/users', 'Alignment Hive Staging Server', '/home/someone/projects', 'jjjjiiiihhhhggggffff']) {
+      expect(redacted(value)).toBe(false);
+    }
+  });
+
+  test('plainValue keeps URLs with credentials or token-shaped parts', () => {
+    expect(plainValue('https://hooks.example.com/services/aBcD3fGh1jKlMn0pQrStUvWx')).toBe(false);
+    expect(plainValue('redis://:s3cretpassword@cache:6379')).toBe(false);
+    expect(plainValue('https://example.com/docs/getting-started')).toBe(true);
+    expect(plainValue('2026-11-24T00:00:00Z')).toBe(false);
+    expect(plainValue('2026-11-24 00:00:00')).toBe(true);
+    expect(plainValue('${OTHER_SECRET_VARIABLE}')).toBe(true);
+  });
+
+  test('missing, malformed and oversized files are skipped', () => {
+    const bad = join(root, 'bad');
+    mkdirSync(bad);
+    mkdirSync(join(bad, '.env'));
+    writeFileSync(join(bad, '.env.local'), Buffer.from([0xff, 0xfe, 0x00, 0x3d, 0x0a]));
+    writeFileSync(join(bad, '.mcp.json'), '{ not json');
+    writeFileSync(join(bad, '.env.big'), `BIG_VALUE=${'a1'.repeat(1 << 20)}\n`);
+    const malformedConfig = join(root, 'malformed.json');
+    writeFileSync(malformedConfig, '{"mcpServers": ');
+    const rule = new KnownValues({ env: {}, claudeConfig: malformedConfig }).rule([bad, join(root, 'missing')]);
+    expect(rule).toBeNull();
+    expect(new KnownValues({ env: {}, claudeConfig: join(root, 'missing.json') }).rule([cwd])).not.toBeNull();
+  });
+
+  test('each cwd is read once per KnownValues and its rule reused', () => {
+    const values = known();
+    const first = values.rule([cwd, cwd]);
+    writeFileSync(join(cwd, '.env.later'), 'LATER_VALUE=lllllaaaaattttteeeee\n');
+    try {
+      expect(values.rule([cwd])).toBe(first);
+      expect(redacted('lllllaaaaattttteeeee', values.rule([cwd]))).toBe(false);
+      expect(redacted('lllllaaaaattttteeeee', known().rule([cwd]))).toBe(true);
+    } finally {
+      rmSync(join(cwd, '.env.later'));
+    }
+  });
+
+  test('resetKnownValues makes the process rule read the env again', () => {
+    process.env.FOO_KNOWN_RESET_TOKEN = 'mmmmnnnnbbbbvvvvcccc';
+    try {
+      resetKnownValues();
+      expect(redacted('mmmmnnnnbbbbvvvvcccc', processKnownRule())).toBe(true);
+      delete process.env.FOO_KNOWN_RESET_TOKEN;
+      expect(redacted('mmmmnnnnbbbbvvvvcccc', processKnownRule())).toBe(true);
+      resetKnownValues();
+      expect(redacted('mmmmnnnnbbbbvvvvcccc', processKnownRule())).toBe(false);
+    } finally {
+      delete process.env.FOO_KNOWN_RESET_TOKEN;
+      resetKnownValues();
+    }
   });
 });

@@ -24,6 +24,7 @@ import { allSettledFirstError, chunk, mapBatched } from './batch';
 import { escapeRegExp } from './grep-prefilter';
 import { buildSessionMeta } from './session-format';
 import { sanitizeDeep, sanitizeRecord, sanitizeString } from './sanitize';
+import { KnownValues } from './known-values';
 import {
   computeSessionStatus,
   findAgentsForParent,
@@ -41,6 +42,7 @@ import type { Id } from '../../../web/convex/_generated/dataModel';
 import type { UploadRecord, WorkflowRunUpload } from './convex';
 import type { ConsentWindows, DiscoveredSession, DiscoveryCache, SessionState, StatusContext } from './session-state';
 import type { RawRecord, WorkflowRunBlob, WorkflowRunRow } from '@alignment-hive/session-data';
+import type { SecretRule } from './secret-rules';
 
 const UPLOAD_CHUNK = 25; // agents / runs per backend round trip (bounds mutation arg size)
 const SUMMARY_CONCURRENCY = 10;
@@ -83,20 +85,29 @@ function excludedCopy(
 
 /**
  * Read a session file into its sanitized upload records, given the excluded session ids (see
- * excludedCopy). Also extracts cwds for worktree agent discovery.
+ * excludedCopy). Also extracts cwds for worktree agent discovery. The known secret values redacted
+ * are those around the session's own cwds plus `extraCwds` (an agent's parent's: a worktree lacks
+ * the main checkout's untracked `.env`).
  */
-export async function readAndSanitizeSession(session: TranscriptOwner, excluded: ReadonlySet<string>) {
+export async function readAndSanitizeSession(
+  session: TranscriptOwner,
+  excluded: ReadonlySet<string>,
+  known: KnownValues = new KnownValues(),
+  extraCwds: Iterable<string> = [],
+) {
   const rawContent = await readFile(session.path, 'utf-8');
   const { records } = readRecords(rawContent);
   const isCopy = excludedCopy(session, excluded, () => rawContent);
+  const cwds = extractCwds(rawContent);
+  const knownRule = known.rule([...cwds, ...extraCwds]);
   return {
     sanitizedEntries: records
       .map((r) => (isCopy(r) ? chainStub(r) : uploadRecord(r)))
       .filter((e) => e !== undefined)
-      .map((e) => sanitizeRecord(e)),
+      .map((e) => sanitizeRecord(e, knownRule)),
     lineCount: records.filter((r) => !isCopy(r) && countsAsLine(r)).length,
-    summary: (await readSessionSummary(session, excluded)) || undefined,
-    cwds: extractCwds(rawContent),
+    summary: (await readSessionSummary(session, excluded, undefined, knownRule)) || undefined,
+    cwds,
   };
 }
 
@@ -109,12 +120,13 @@ export async function readSessionCwds(sessionPath: string): Promise<Set<string>>
 
 /**
  * The sanitized one-line summary the upload list, the review UI and the backend show, skipping
- * copies of excluded sessions (see excludedCopy); '' when none.
+ * copies of excluded sessions (see excludedCopy); '' when none. `known`: see withKnownValues.
  */
 export async function readSessionSummary(
   session: TranscriptOwner,
   excluded: ReadonlySet<string>,
   size?: number,
+  known?: SecretRule | null,
 ): Promise<string> {
   const isCopy = excludedCopy(session, excluded, () => readFileSync(session.path, 'utf-8'));
   const summary = fileSessionSummary(
@@ -122,7 +134,7 @@ export async function readSessionSummary(
     size ?? (await stat(session.path)).size,
     (r) => !isCopy(r),
   );
-  return summary ? sanitizeString(summary) : '';
+  return summary ? sanitizeString(summary, known) : '';
 }
 
 /**
@@ -319,19 +331,22 @@ export async function readParseableRunBlobs(
 
 /**
  * Find a parent session's workflow runs (or only `onlyRunId`), sanitize each blob (secret
- * redaction + home-path normalization), and extract the indexed row.
+ * redaction, with the known values around `cwds`, + home-path normalization), and extract the
+ * indexed row.
  */
 export async function discoverWorkflowRuns(
   parent: DiscoveredSession,
   cwds: Set<string>,
   onlyRunId?: string,
+  known: KnownValues = new KnownValues(),
 ): Promise<Array<DiscoveredWorkflowRun>> {
   const home = homedir();
+  const knownRule = known.rule(cwds);
   const runs: Array<DiscoveredWorkflowRun> = [];
   for (const [workflowRunId, data] of await readParseableRunBlobs(parent, cwds)) {
     if (onlyRunId !== undefined && workflowRunId !== onlyRunId) continue;
     // strict: see sanitizeDeep
-    const blob = redactHomePaths(sanitizeDeep(data, true), home);
+    const blob = redactHomePaths(sanitizeDeep(data, { strict: true, known: knownRule }), home);
     runs.push({ row: extractWorkflowRunRow(workflowRunId, blob), blob });
   }
   return runs;
@@ -348,6 +363,8 @@ export interface UploadOneOpts {
   checkoutId: string;
   ids: ProjectIds;
   stateDir: string;
+  /** The run's known secret values, shared by its sessions so each file is read once; default a fresh read. */
+  known?: KnownValues;
 }
 
 /**
@@ -367,9 +384,10 @@ export async function uploadOneSession(opts: UploadOneOpts): Promise<UploadResul
   const veto = await uploadVeto(opts.stateDir, session.sessionId, excluded);
   if (veto) return { ok: false, error: veto };
   try {
-    const parentRead = await readAndSanitizeSession(session, excluded);
+    const known = opts.known ?? new KnownValues();
+    const parentRead = await readAndSanitizeSession(session, excluded, known);
     const agents = await findAgentsForParent(session, opts.state.agentsByParent, transcriptsDirs, parentRead.cwds);
-    return await uploadParentWithAgents({ parent: session, parentRead, agents, excluded, ...opts });
+    return await uploadParentWithAgents({ ...opts, parent: session, parentRead, agents, excluded, known });
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -380,6 +398,7 @@ interface UploadParentOpts {
   parentRead: SessionReadResult;
   agents: Array<DiscoveredSession>;
   excluded: ReadonlySet<string>;
+  known: KnownValues;
   checkoutId: string;
   ids: ProjectIds;
   stateDir: string;
@@ -419,7 +438,7 @@ class UploadVetoedError extends Error {}
  * reopen the parent, bounded by MAX_RUN_UPLOAD_ATTEMPTS). Backend failures throw.
  */
 async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadResult> {
-  const { parent, parentRead, agents, excluded, checkoutId, ids, stateDir } = opts;
+  const { parent, parentRead, agents, excluded, known, checkoutId, ids, stateDir } = opts;
   const assertNoVeto = async (): Promise<void> => {
     const reason = await uploadVeto(stateDir, parent.sessionId, excluded);
     if (reason) throw new UploadVetoedError(reason);
@@ -481,7 +500,7 @@ async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadRes
       batch.map(async (agent): Promise<UploadRecord> => {
         const url = urls[agent.sessionId];
         if (!url) throw new Error('No upload URL for agent');
-        const agentRead = await readAndSanitizeSession(agent, excluded);
+        const agentRead = await readAndSanitizeSession(agent, excluded, known, parentRead.cwds);
         const content = buildUploadContent(
           agentRead.sanitizedEntries,
           agent.sessionId,
@@ -511,7 +530,7 @@ async function uploadParentWithAgents(opts: UploadParentOpts): Promise<UploadRes
   // 3. Workflow run-metadata blobs in chunks, BEST-EFFORT: the parent + agents are already saved,
   //    so a run failure must not force a full re-upload loop. Any parseable run not in
   //    uploadedRunIds reopens this parent via the workflow backfill on a later state load.
-  const runs = await discoverWorkflowRuns(parent, parentRead.cwds);
+  const runs = await discoverWorkflowRuns(parent, parentRead.cwds, undefined, known);
   const uploadedRunIds: Array<string> = [];
   for (const batch of chunk(runs, UPLOAD_CHUNK)) {
     await assertNoVeto();
