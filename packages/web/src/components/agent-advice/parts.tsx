@@ -29,32 +29,6 @@ export const Icon = {
       <path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2" />
     </Svg>
   ),
-  clock: (
-    <Svg w="1.5">
-      <circle cx="8" cy="8" r="5.5" />
-      <path d="M8 5v3.2l2 1.3" />
-    </Svg>
-  ),
-  me: (
-    <Svg w="1.5">
-      <circle cx="8" cy="5.6" r="2.6" />
-      <path d="M3 13.5c.6-2.6 2.6-4 5-4s4.4 1.4 5 4" />
-    </Svg>
-  ),
-  agent: (
-    <Svg w="1.6">
-      <rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2" />
-      <path d="M4.6 6.4l2 1.7-2 1.7M8.4 10.2h3" />
-    </Svg>
-  ),
-  recall: (
-    <Svg w="1.5">
-      <path d="M2.8 8a5.2 5.2 0 1 0 1.5-3.7" />
-      <path d="M2.6 2.6v2.6h2.6" />
-      <path d="M8 5.4V8l1.8 1.2" />
-    </Svg>
-  ),
-  comment: <Svg w="1.5"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" /></Svg>,
 };
 
 // ---------- tooltips ----------
@@ -163,44 +137,33 @@ export type Message = {
 };
 
 const MONO = new Set(["me", "comment", "none"]);
-const RECALL_HEAD = "Recalled from earlier sessions";
-const isElapsed = (when: string) => /\blater$/.test(when);
+const ROLE_LABEL = { avoid: "Weaker prompt", better: "What I sent" } as const;
+// "Oct 8" or "on the report, Oct 8": the date goes to the thread's caption, the rest stays on the message.
+const DATE = /,?\s*\b([A-Z][a-z]{2} \d{1,2})$/;
+const ELAPSED = /^(\d+) (minute|second)s? later$/;
 
-// `seam`: the better alternative right after a prompt to avoid. It isn't a later message, so it
-// gets no elapsed-time chip.
-function MessageView({ m, first, seam }: { m: Message; first: boolean; seam: boolean }) {
+// Drawn like the Claude Code CLI: ">" on a shaded band for my prompts, "⏺" for replies, and a "✻" status line for
+// how long the agent worked before replying (rounded, from the gap between the two messages).
+function MessageView({ m }: { m: Message }) {
   const recall = m.kind === "recall";
   const cls = ["m", `m-${m.kind}`, MONO.has(m.kind) ? "mono" : "sans"];
   if (m.role) cls.push(`m-${m.role}`);
-  let when = m.when;
-  let gap: ReactNode = null;
-  if (!seam && !first && !recall && isElapsed(when)) {
-    gap = (
-      <div className="gap">
-        <span>
-          {Icon.clock}
-          {when}
-        </span>
-      </div>
-    );
-    when = "";
-    cls.push("has-gap");
-  }
-  const icon = !m.role ? (Icon as Record<string, ReactNode>)[m.kind] : null;
+  let when = m.when.replace(DATE, "");
+  const elapsed = when.match(ELAPSED);
+  if (elapsed) when = "";
   return (
     <div className={cls.join(" ")}>
-      {gap}
       <div className="mh">
+        {recall && (
+          <>
+            <span className="recall-dot" aria-hidden="true">⏺</span>
+            <span className="sp">hive - recall (MCP)</span>
+          </>
+        )}
         {m.role && (
           <span className={`role role-${m.role}`}>
             <span className="badge">{m.role === "avoid" ? Icon.cross : Icon.check}</span>
-            {m.role === "avoid" ? "Avoid" : "Better"}
-          </span>
-        )}
-        {m.speaker && (
-          <span className="sp">
-            {icon}
-            {recall ? RECALL_HEAD : m.speaker}
+            {ROLE_LABEL[m.role]}
           </span>
         )}
         {when && <span className="when">{when}</span>}
@@ -212,7 +175,20 @@ function MessageView({ m, first, seam }: { m: Message; first: boolean; seam: boo
           ),
         )}
       </div>
-      <div className="mb" dangerouslySetInnerHTML={{ __html: m.html }} />
+      {!recall && m.speaker && <span className="sr">{`${m.speaker}: `}</span>}
+      {recall ? (
+        <div className="mb">
+          <span className="recall-branch" aria-hidden="true">⎿</span>
+          <div dangerouslySetInnerHTML={{ __html: m.html }} />
+        </div>
+      ) : (
+        <div className="mb" dangerouslySetInnerHTML={{ __html: m.html }} />
+      )}
+      {elapsed && m.kind === "agent" && (
+        <div className="gap">
+          <span>{`Cogitated for ~${elapsed[1]}${elapsed[2] === "minute" ? "m" : "s"}`}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -221,12 +197,16 @@ export function Thread({ messages }: { messages: Message[] }) {
   const pair = messages.some((m, k) => k > 0 && messages[k - 1].role === "avoid" && m.role === "better");
   const cls = ["thread"];
   if (pair) cls.push("pair");
-  const label = pair ? "A prompt to avoid, then a better one" : "Conversation excerpt";
+  const label = pair ? "A weaker prompt, then the one I sent" : "Conversation excerpt";
+  const dates = [...new Set(messages.map((m) => m.when.match(DATE)?.[1]).filter(Boolean))];
   return (
-    <div className={cls.join(" ")} role="group" aria-label={label}>
-      {messages.map((m, k) => (
-        <MessageView key={k} m={m} first={k === 0} seam={k > 0 && m.role === "better" && messages[k - 1].role === "avoid"} />
-      ))}
-    </div>
+    <>
+      <div className={cls.join(" ")} role="group" aria-label={label}>
+        {messages.map((m, k) => (
+          <MessageView key={k} m={m} />
+        ))}
+      </div>
+      {dates.length > 0 && <div className="thread-caption">{dates.join(" · ")}</div>}
+    </>
   );
 }

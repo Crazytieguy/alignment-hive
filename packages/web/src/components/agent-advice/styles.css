@@ -155,6 +155,11 @@
 .aa .v-tldr .full ul,.aa .v-tldr .full ol{list-style:none;padding:0}
 .aa .v-tldr .full li{display:grid;grid-template-columns:3ch minmax(0,1fr);margin:0 0 4px}
 .aa .v-tldr .full .mk{color:var(--mute)}
+/* tables as Claude Code draws them: box lines around every cell, bold header */
+.aa .v-tldr .cct{overflow-x:auto;margin:0 0 11px}
+.aa .v-tldr .cct table{border-collapse:collapse;font:inherit;overflow-wrap:normal}
+.aa .v-tldr .cct :is(th,td){border:1px solid color-mix(in srgb,var(--fg) 55%,transparent);padding:2px 1ch;text-align:left;white-space:nowrap}
+.aa .v-tldr .cct th{font-weight:700}
 .aa .v-tldr .trim{display:flex;align-items:center;justify-content:center;height:30px;margin:4px 0 13px;border-block:1px dashed var(--line);background:var(--bg);font:500 11.5px/1 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;letter-spacing:.03em;color:var(--mute);user-select:none}
 .aa .v-tldr figcaption{font:14px/1.5 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;color:var(--mute);margin:10px 0 0}
 .aa .v-tldr figcaption .k{font:13px "JetBrains Mono",ui-monospace,Menlo,monospace;white-space:nowrap}
@@ -368,3 +373,129 @@
 .aa blockquote.pull p{font:italic 400 16px/1.55 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;color:var(--ink2);margin:0 0 8px;text-wrap:balance}
 .aa blockquote.pull cite{display:block;font:normal 14px/1.5 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;color:var(--mute)}
 .aa blockquote.pull cite a{color:inherit}
+
+/* ---------- threads as a CLI transcript ----------
+   Overrides the card styles above: one terminal panel per thread, like the tldr visual. One monospace
+   face for everyone, ">" on a shaded band for my prompts, "⏺" for replies, italic metadata rows, the
+   session dates in a caption under the panel. */
+.aa .thread{--tp:16px;--tg:2ch;--band:color-mix(in srgb,var(--fg) 6.5%,var(--card));margin:24px 0 26px;padding:2px 0 16px;background:var(--card);border:1px solid var(--line);border-radius:8px;font:13.5px/1.65 "JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-ligatures:none;color:var(--fg)}
+.aa .thread>.m,.aa .thread>.m.has-gap,.aa .thread>.m.m-recall,.aa .thread>.m.m-better{padding:20px var(--tp) 0;border:0;border-radius:0;background:transparent}
+.aa .thread>.m:has(+ .has-gap){padding-bottom:0}
+
+/* labels: quiet sans, like the visuals' "who" line */
+.aa .thread .mh{gap:2px 8px;margin:0 0 7px;font:500 12px/1.4 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;color:var(--mute)}
+.aa .thread .sp{font:600 12.5px/1.4 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;color:var(--ink2)}
+.aa .thread .sp .ic{display:none}
+.aa .thread .when{font-size:12px}
+.aa .thread .tag{font-size:11px;line-height:1.45;padding:0 7px}
+
+/* message bodies: one face for everyone */
+.aa .thread>.m>.mb{position:relative;padding-left:var(--tg);font:inherit;color:var(--fg)}
+.aa .thread>.m>.mb::before{content:"⏺";content:"⏺" / "";position:absolute;left:0;top:0;color:var(--fg)}
+.aa .thread>.m:is(.m-me,.m-comment,.m-none)>.mb{margin:0 calc(-1 * var(--tp));padding:8px var(--tp) 8px calc(var(--tp) + var(--tg));background:var(--band)}
+.aa .thread>.m:is(.m-me,.m-comment,.m-none)>.mb::before{content:">";content:">" / "";left:var(--tp);top:8px;color:var(--mute)}
+/* a reply whose start is left out: the bullet moves to the first kept line */
+.aa .thread>.m>.mb:has(>.trim-start:first-child)::before{content:none}
+.aa .thread .mb>.trim-start:first-child+*{position:relative}
+.aa .thread .mb>.trim-start:first-child+*::before{content:"⏺";content:"⏺" / "";position:absolute;left:calc(-1 * var(--tg));top:0}
+.aa .thread .mb>.trim-start:first-child+:is(ul,ol)::before{left:calc(-1 * var(--tg) - 22px)}
+
+.aa .thread .mb p{margin:0 0 10px}
+.aa .thread .mb ul{list-style:"- ";padding-left:2ch;margin:0 0 10px}
+.aa .thread .mb ol{padding-left:3ch;margin:0 0 10px}
+.aa .thread .mb li{margin:0 0 4px}
+.aa .thread .mb li::marker{color:var(--mute)}
+.aa .thread .mb>:last-child,.aa .thread .mb li:last-child{margin-bottom:0}
+.aa .thread .mb strong{font-weight:700;color:var(--fg)}
+.aa .thread .mb code,.aa .thread .sans>.mb code{font:inherit;background:var(--bg);border-radius:3px;padding:1px 3px}
+.aa .thread .cutin{font:inherit;font-size:1em;color:var(--mute);padding:0}
+.aa .thread .rdate{font:inherit;font-size:12px;margin-left:1ch}
+.aa .thread .qt table{font-size:12.5px;line-height:1.5}
+.aa .thread .qt td{border-color:var(--line2)}
+
+/* time between messages: the CLI's "✻" status line */
+.aa .thread .gap{position:static;transform:none;display:block;margin:0 0 12px;pointer-events:auto}
+.aa .thread .gap span{display:inline;padding:0;border:0;border-radius:0;background:none;font:12.5px/1.6 "JetBrains Mono",ui-monospace,Menlo,monospace;color:var(--mute);white-space:normal}
+.aa .thread .gap .ic{display:none}
+.aa .thread .gap span::before{content:"✻";content:"✻" / "";display:inline-block;width:var(--tg);color:var(--acc)}
+.aa .thread .lnote{order:-1;font:12.5px/1.6 "JetBrains Mono",ui-monospace,Menlo,monospace;font-style:normal;color:var(--mute);margin:0 0 9px}
+.aa .thread .lnote::before{content:"✻";content:"✻" / "";display:inline-block;width:var(--tg);color:var(--acc)}
+
+/* left-out lines: the tldr visual's dashed strip, cut across the whole panel */
+.aa .thread .trim{display:flex;justify-content:center;align-items:center;gap:0;height:28px;margin:10px calc(-1 * var(--tp)) 12px calc(-1 * (var(--tp) + var(--tg)));border-block:1px dashed var(--line2);background:var(--bg);font:500 11.5px/1 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;font-style:normal;letter-spacing:.03em;color:var(--mute)}
+.aa .thread .trim::before,.aa .thread .trim::after{content:none}
+.aa .thread .trim-start{margin-top:0}
+.aa .thread .trim-end{margin-bottom:0}
+
+/* avoid / better */
+.aa .thread .role{font:600 14px/1.4 "Seravek","Gill Sans","Trebuchet MS","Segoe UI",sans-serif;gap:6px}
+.aa .thread .role .badge{width:18px;height:18px}
+.aa .thread .role+.sp{font-weight:500;color:var(--mute)}
+.aa .thread>.m-avoid>.mb{color:var(--ink2)}
+.aa .thread>.m.m-better>.mb{background:var(--good-bg);box-shadow:inset 2px 0 0 var(--good)}
+.aa .thread>.m.m-better>.mb::before{color:var(--good)}
+.aa .thread>.m-avoid+.m-better{padding-top:14px}
+
+/* recall: its own blue block, like a tool call's output */
+.aa .thread>.m.m-recall>.mb{margin:0 calc(-1 * var(--tp));padding:8px var(--tp) 8px calc(var(--tp) + var(--tg));background:var(--rc-bg);box-shadow:inset 2px 0 0 var(--rc)}
+.aa .thread>.m.m-recall>.mb::before{left:var(--tp);top:8px;color:var(--rc)}
+.aa .thread .m-recall>.mh .sp{color:var(--rc)}
+
+@media (max-width:480px){
+.aa .thread{--tp:12px;font-size:12.5px;line-height:1.6}
+.aa .thread .gap span,.aa .thread .lnote{font-size:12px}
+}
+/* Give the short metadata rows equal breathing room above and below. */
+.aa .thread>.m:has(>.mh:not(:empty)),.aa .thread>.m-avoid+.m-better:has(>.mh:not(:empty)){padding-top:0}
+.aa .thread .mh{align-items:center;gap:4px 8px;margin:0;padding-block:9px;font:inherit;font-style:italic}
+.aa .thread .mh:empty{display:none}
+.aa .thread .when{font:inherit}
+.aa .thread:has(+.thread-caption){margin-bottom:0}
+.aa .thread-caption{margin:5px 0 24px;text-align:right;color:var(--mute);font:italic 12px/1.45 "JetBrains Mono",ui-monospace,monospace}
+.aa .thread .rdate{font:inherit;margin-left:0}
+.aa .thread>.m:not(:has(>.mh:not(:empty))){padding-top:14px}
+.aa .thread .gap{margin:6px 0 0}
+.aa .thread .gap span{font:inherit;font-variant-ligatures:none}
+.aa .thread .gap span::before{width:var(--tg)}
+
+/* An editorial note in the same flow, not a separator. */
+.aa .thread .trim{display:block;height:auto;margin:2px 0 7px;border:0;background:transparent;color:var(--mute);font:inherit;letter-spacing:normal}
+.aa .thread .trim-start{margin-top:0}
+.aa .thread .trim-end{margin-bottom:0}
+
+/* Same surface for all prompts; only the edge and the label carry the hue. */
+.aa .thread{--avoid-ink:light-dark(#884b40,#d49c91)}
+.aa .thread>.m:is(.m-avoid,.m-better)>.mb{color:var(--fg);background:var(--band);box-shadow:none}
+.aa .thread>.m:is(.m-avoid,.m-better)::after{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:color-mix(in srgb,var(--example-hue) 62%,var(--band));pointer-events:none}
+.aa .thread>.m-avoid:first-child::after{top:5px;border-radius:3px 0 0 0}
+.aa .thread>.m-avoid{--example-hue:var(--avoid-ink)}
+.aa .thread>.m-better{--example-hue:var(--good)}
+.aa .thread>.m:is(.m-avoid,.m-better)>.mb::before{color:var(--mute)}
+.aa .thread .role{font:inherit;font-weight:600;gap:6px;color:var(--example-hue);margin:0}
+.aa .thread .role .badge{display:inline-grid;place-items:center;width:12px;height:13px;box-shadow:none;background:transparent;color:inherit}
+.aa .thread .tag{padding:0;border:0;border-radius:0;font:inherit}
+.aa .thread .tag::before{content:"· "}
+.aa .thread .role+.when::before{content:"· "}
+/* An MCP call is a line in the transcript, with its output nested below. */
+.aa .thread>.m.m-recall>.mh{position:relative;padding-left:var(--tg);font:inherit;font-style:italic}
+.aa .thread .m-recall>.mh .sp{font:inherit;color:var(--rc)}
+.aa .thread .recall-dot{position:absolute;left:0;top:50%;transform:translateY(-50%);font-style:normal;color:var(--rc)}
+.aa .thread>.m.m-recall>.mb{margin:0;padding:0 0 0 calc(var(--tg) + 2ch);background:transparent;box-shadow:none}
+.aa .thread>.m.m-recall>.mb::before{content:none}
+.aa .thread .recall-branch{position:absolute;left:var(--tg);top:0;color:var(--mute)}
+.aa .thread .recall-role{color:var(--rc)}
+.aa .thread:has(>.m:first-child>.mh:empty),
+.aa .thread>.m:first-child:has(>.mh:empty){padding-top:0}
+.aa .thread>.m:first-child:has(>.mh:empty)>.mb{border-radius:7px 7px 0 0}
+.aa .thread>.m:is(.m-avoid,.m-better)::after{content:none}
+.aa .thread .role .badge{width:calc(var(--tg) - 6px)}
+.aa .thread>.m:is(.m-avoid,.m-better){--example-ink:color-mix(in oklab,var(--example-hue) 68%,var(--fg))}
+.aa .thread>.m:is(.m-avoid,.m-better)>.mh{padding-block:1.15em .3em;line-height:1.25}
+.aa .thread>.m:is(.m-avoid,.m-better):first-child>.mh{padding-top:.65em}
+.aa .thread>.m:is(.m-avoid,.m-better)>.mb::before,.aa .thread>.m:is(.m-avoid,.m-better)>.mh .role{color:var(--example-ink)}
+.aa .thread>.m:is(.m-avoid,.m-better){--example-ink:color-mix(in oklch,var(--example-hue) 72%,var(--fg))}
+.aa .thread>.m:is(.m-avoid,.m-better)>.mh .role{font-weight:700}
+.aa .thread>.m:is(.m-avoid,.m-better)>.mh .badge{position:relative;color:var(--example-hue);font-style:normal}
+.aa .thread>.m:is(.m-avoid,.m-better)>.mh .badge .ic{position:absolute;left:.5ch;top:50%;transform:translate(-50%,-50%);width:13px;height:13px;stroke-width:2.5}
+.aa .thread>.m:is(.m-avoid,.m-better)>.mb::before{color:var(--example-hue);font-weight:800;font-style:normal}
+.aa .thread .m-recall .mb>div>:last-child{margin-bottom:0}
