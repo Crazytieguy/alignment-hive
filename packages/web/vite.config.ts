@@ -19,5 +19,14 @@ export default defineConfig({
   ssr: {
     noExternal: ["tailwindcss"],
   },
-  plugins: [tanstackStart(), nitro(), viteReact()],
+  plugins: [
+    tanstackStart({
+      // The article is static: serve it as a prerendered file instead of rendering it per request.
+      // Only the listed pages, no crawling and no automatic discovery of other static routes.
+      prerender: { enabled: true, autoStaticPathsDiscovery: false, crawlLinks: false },
+      pages: [{ path: "/agent-advice" }],
+    }),
+    nitro(),
+    viteReact(),
+  ],
 });
