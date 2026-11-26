@@ -8,6 +8,9 @@ import { initArticleAnalytics } from "@/lib/article-analytics";
 
 const URL = "https://www.alignment-hive.com/agent-advice";
 const TITLE = "The Coding Agent Advice I Keep Repeating";
+// No-break spaces keep the heading's lines on phrase boundaries: "The Coding Agent Advice / I Keep Repeating",
+// or "The Coding / Agent Advice / I Keep Repeating" on the narrowest phones.
+const HEADING = TITLE.replace("Agent Advice", "Agent Advice").replace("I Keep Repeating", "I Keep Repeating");
 const DESC =
   "The advice I keep repeating to AI safety researchers who use coding agents: problems I've observed, and the best solutions I've found so far.";
 const OG_IMAGE = "https://www.alignment-hive.com/og/agent-advice.png?v=2";
@@ -95,7 +98,7 @@ function AgentAdvice() {
           </a>
         </nav>
         <header className="top">
-          <h1>{TITLE}</h1>
+          <h1>{HEADING}</h1>
         </header>
         <section className="pane">
           <p className="by">
