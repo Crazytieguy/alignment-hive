@@ -22,8 +22,16 @@ const positives: Array<[SecretKind, string, string]> = [
   ['key', `ANTHROPIC=${'sk-ant-api03-' + random(93, 9)}AA`, 'ANTHROPIC=[key]'],
   ['key', `token ${'ghp_' + random(36, 10)}`, 'token [key]'],
   ['key', `echo ${'sk-ant-oat02-' + random(93, 93)}AA`, 'echo [key]'],
-  // A command's output as a tool result's JSON: the token follows an escaped newline.
-  ['key', `{"stdout":"Your token:\\n${'sk-ant-oat02-' + random(93, 94)}AA\\n"}`, '{"stdout":"Your token:\\n[key]\\n"}'],
+  // A command's output as a tool result's JSON: the secret follows an escaped newline or tab.
+  ['key', `{"stdout":"Done.\\n${'sk-ant-oat02-' + random(93, 94)}AA\\n"}`, '{"stdout":"Done.\\n[key]\\n"}'],
+  ['key', `{"stdout":"key:\\n${'sk-ant-api03-' + random(93, 95)}AA\\n"}`, '{"stdout":"key:\\n[key]\\n"}'],
+  ['value', `{"stdout":"HOME=/x\\nGITHUB_TOKEN=${random(24, 96)}\\n"}`, '{"stdout":"HOME=/x\\nGITHUB_TOKEN=[token]\\n"}'],
+  ['bearer', `{"stdout":"-H\\tBearer ${random(30, 97)}"}`, '{"stdout":"-H\\tBearer [token]"}'],
+  // Colored output: the color code's `m` sits right before the secret, raw or JSON-escaped.
+  ['key', `\x1b[1m${'sk-ant-oat02-' + random(93, 99)}AA\x1b[0m`, '\x1b[1m[key]\x1b[0m'],
+  ['key', `{"stdout":"\\u001b[1m${'sk-ant-api03-' + random(93, 100)}AA\\u001b[0m"}`, '{"stdout":"\\u001b[1m[key]\\u001b[0m"}'],
+  // A name, then its value on the next escaped line.
+  ['value', `{"stdout":"Your token:\\n${random(24, 98)}\\n"}`, '{"stdout":"Your token:\\n[token]\\n"}'],
   ['value', `export OPENAI_API_KEY="${random(24, 11)}"`, 'export OPENAI_API_KEY="[token]"'],
   ['value', `{"client_secret": "${random(24, 12)}"}`, '{"client_secret": "[token]"}'],
   ['value', `{ _id: "k1", inviteToken: "${random(24, 15)}" }`, '{ _id: "k1", inviteToken: "[token]" }'],

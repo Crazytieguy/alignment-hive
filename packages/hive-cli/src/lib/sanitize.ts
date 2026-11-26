@@ -85,7 +85,7 @@ export const SECRET_SHAPES: Array<SecretRule & { id: ShapeId }> = [
 export const KEY_RULES: Array<SecretRule> = [
   ...SECRET_RULES,
   // Claude OAuth access and refresh tokens (`sk-ant-oat01-…`, `sk-ant-oat02-…`, `sk-ant-ort01-…`), whole, prefix included:
-  // any two-digit version, 20+ characters. No leading `\b`: in JSON-escaped output a token can follow `\n`.
+  // any two-digit version, 20+ characters. No leading `\b`, which a color code's `m` before it would defeat.
   { id: 'anthropic-oauth-token', keywords: ['sk-ant-oat', 'sk-ant-ort'], regex: new RegExp(`sk-ant-o(?:at|rt)\\d{2}-${RANDOM('[A-Za-z0-9_-]')}[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])`, 'g') },
 ];
 
@@ -104,6 +104,13 @@ export function namedScan(name: string | undefined, value: string): NamedScan {
 
 const MAX_SANITIZE_DEPTH = 100;
 const MIN_SECRET_LENGTH = 8;
+/**
+ * A JSON-escaped line break or tab (`"…\nGITHUB_TOKEN=…"` in a tool's output) or a terminal color code, raw or
+ * JSON-escaped (`\u001b[1m`), read as whitespace at the same length, so a secret or its name after one starts a word
+ * and a line.
+ */
+// eslint-disable-next-line no-control-regex -- ESC starts a raw color code.
+const READ_AS_SPACE = /\\[nrt]|(?:\x1b|\\u001[bB])\[[0-9;]*m/g;
 const TRUNCATED_PLACEHOLDER = '[TRUNCATED:max-depth]';
 
 const SAFE_KEYS = new Set([
@@ -254,7 +261,10 @@ function looksLikeNonSecret(s: string): boolean {
   return false;
 }
 
-/** Non-overlapping secret spans in content, earliest first; overlapping matches merge into one span. */
+/**
+ * Non-overlapping secret spans in content, earliest first, found in it as written and with JSON-escaped line breaks,
+ * tabs and color codes read as whitespace; overlapping matches merge into one span.
+ */
 export function detectSecrets(content: string): Array<SecretMatch> {
   return secretSpans(content, withEnvValues(ALL_RULES));
 }
@@ -263,6 +273,51 @@ export function detectSecrets(content: string): Array<SecretMatch> {
 export function secretSpans(content: string, rules: Array<SecretRule>): Array<SecretMatch> {
   if (content.length < MIN_SECRET_LENGTH) return [];
 
+  // Both readings: the spaced one alone would miss a value holding a literal `\n` (an env value matched exactly)
+  // or count escaped line breaks against a rule's limit on real ones (curl-auth-user).
+  const replaced: Array<[number, number]> = [];
+  const spaced = content.replace(READ_AS_SPACE, (seq: string, at: number) => {
+    replaced.push([at, at + seq.length]);
+    return seq === '\\n' || seq === '\\r' ? '\n\n' : ' '.repeat(seq.length);
+  });
+  const matches = ruleMatches(content, rules);
+  if (replaced.length > 0) {
+    // A spaced match's edge inside a replaced sequence moves out of it, so a replacement never splits an escape.
+    // The ranges are sorted and apart: the last one starting before `at` is the only one that can hold it.
+    const edge = (at: number, forward: boolean) => {
+      let low = 0, high = replaced.length;
+      while (low < high) {
+        const mid = (low + high) >> 1;
+        if (replaced[mid][0] < at) low = mid + 1;
+        else high = mid;
+      }
+      if (low === 0 || at >= replaced[low - 1][1]) return at;
+      return replaced[low - 1][forward ? 1 : 0];
+    };
+    for (const m of ruleMatches(spaced, rules)) {
+      const moved = { ...m, start: edge(m.start, true), valueStart: edge(m.valueStart, true), end: edge(m.end, false), valueEnd: edge(m.valueEnd, false) };
+      if (moved.valueStart < moved.valueEnd) matches.push(moved);
+    }
+  }
+  matches.sort((a, b) => a.start - b.start);
+
+  // Overlapping matches merge into one span covering both, under the earliest's rule: keeping only
+  // one would leave the rest of a longer match (a token's tail past what a narrower rule knows).
+  const merged: Array<SecretMatch> = [];
+  for (const m of matches) {
+    const last = merged.at(-1);
+    if (last === undefined || m.start >= last.end) {
+      merged.push(m);
+    } else {
+      last.end = Math.max(last.end, m.end);
+      last.valueStart = Math.min(last.valueStart, m.valueStart);
+      last.valueEnd = Math.max(last.valueEnd, m.valueEnd);
+    }
+  }
+  return merged;
+}
+
+function ruleMatches(content: string, rules: Array<SecretRule>): Array<SecretMatch> {
   const matches: Array<SecretMatch> = [];
   const lowerContent = content.toLowerCase();
 
@@ -289,23 +344,7 @@ export function secretSpans(content: string, rules: Array<SecretRule>): Array<Se
       if (match[0].length === 0) rule.regex.lastIndex++;
     }
   }
-
-  matches.sort((a, b) => a.start - b.start);
-
-  // Overlapping matches merge into one span covering both, under the earliest's rule: keeping only
-  // one would leave the rest of a longer match (a token's tail past what a narrower rule knows).
-  const merged: Array<SecretMatch> = [];
-  for (const m of matches) {
-    const last = merged.at(-1);
-    if (last === undefined || m.start >= last.end) {
-      merged.push(m);
-    } else {
-      last.end = Math.max(last.end, m.end);
-      last.valueStart = Math.min(last.valueStart, m.valueStart);
-      last.valueEnd = Math.max(last.valueEnd, m.valueEnd);
-    }
-  }
-  return merged;
+  return matches;
 }
 
 export function sanitizeString(content: string): string {

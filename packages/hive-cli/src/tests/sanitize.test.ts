@@ -55,9 +55,18 @@ describe('the review page\'s shapes apply to uploads too (one rule set)', () => 
     ['cookie JSON', `{"Cookie":"locale=en; sid=${sid}"}`],
     ['query token', `GET /cb?a=1&token=${sid} HTTP/1.1`],
     ['named value', `client_secret = "${sid}"`],
+    ['env value after a JSON-escaped newline', `{"stdout":"HOME=/x\\nDB_PASSWORD=${sid}\\n"}`],
+    // Read as written too: as line breaks, the eight lines exceed curl-auth-user's limit of five.
+    ['curl --user in a JSON-escaped command', JSON.stringify({ command: `curl \\\n  -s \\\n  -X POST \\\n  -H 'Accept: x' \\\n  -H 'Content-Type: y' \\\n  -d '{}' \\\n  -o out \\\n  --user admin:${sid} \\\n  https://api.example.test` })],
   ];
   test.each(cases)('%s is redacted in upload output', (_name, text) => {
     expect(sanitizeString(text)).not.toContain(sid);
+  });
+
+  test('a redaction in JSON-escaped output never splits an escape', () => {
+    // azure-ad-client-secret takes one whitespace character on each side as context.
+    const json = JSON.stringify({ stdout: 'before\n7Xp8Q~NYxF.xGwRrghPJV3bWOTevGk3~uEHsGab8\nafter' });
+    expect(JSON.parse(sanitizeString(json))).toEqual({ stdout: 'before\n[REDACTED:azure-ad-client-secret]\nafter' });
   });
 
   test('structured headers and secret-holding names are redacted in upload output', () => {
@@ -404,6 +413,12 @@ describe('credential env var values', () => {
     const out = sanitizeString(`Q7mZp2Lk9Wv4Rt8Yn3Bs${password} end`);
     expect(out).not.toContain('wwwwvvvv');
     expect(out).toEndWith(' end');
+  });
+
+  test('a value holding a literal backslash-n is still found as written', () => {
+    const password = 'zzzz\\nyyyyxxxxwwww';
+    withEnv({ FOO_DB_PASSWORD: password });
+    expect(sanitizeString(`echo ${password} done`)).toBe('echo [REDACTED:env-value] done');
   });
 
   test("a credential var's value is redacted under a safe key, even when uuid-shaped", () => {
