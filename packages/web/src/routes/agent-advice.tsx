@@ -1,4 +1,4 @@
-// "Agent Advice That Generalizes": the post's page. The text is in components/agent-advice/post.tsx.
+// "The Coding Agent Advice I Keep Repeating": the post's page. The text is in components/agent-advice/post.tsx.
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 import aaCssUrl from "@/components/agent-advice/styles.css?url";
@@ -7,12 +7,12 @@ import { PostBody } from "@/components/agent-advice/post";
 import { initArticleAnalytics } from "@/lib/article-analytics";
 
 const URL = "https://www.alignment-hive.com/agent-advice";
-const TITLE = "Agent Advice That Generalizes";
+const TITLE = "The Coding Agent Advice I Keep Repeating";
 const DESC =
   "The advice I keep repeating to AI safety researchers who use coding agents: problems I've observed, and the best solutions I've found so far.";
-const OG_IMAGE = "https://www.alignment-hive.com/og/agent-advice.png";
+const OG_IMAGE = "https://www.alignment-hive.com/og/agent-advice.png?v=2";
 const OG_ALT =
-  "Agent Advice That Generalizes: bottlenecks to effective research delegation, and my recommended fixes. The Claude, OpenAI and Gemini marks sit in three joined honeycomb cells.";
+  "The Coding Agent Advice I Keep Repeating: bottlenecks to effective research delegation, and my recommended fixes. The Claude, OpenAI and Gemini marks sit in three joined honeycomb cells.";
 const GITHUB_URL = "https://github.com/Crazytieguy/alignment-hive";
 const EMAIL = "yoav.tzfati@gmail.com";
 const FONTS =
